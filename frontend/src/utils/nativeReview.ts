@@ -31,7 +31,7 @@ export const executionErrorLabel = (code: string | null) =>
     output_token_limit: '达到整轮输出 Token 上限，未完成范围保持未知',
     context_capacity: '模型上下文容量不足，调查尚未完成',
     tool_call_limit: '达到工具调用上限，调查尚未完成',
-    agent_no_progress: 'Agent 重复执行相同调查，没有取得进展',
+    agent_tool_loop: 'Agent 持续重复相同工具调用，未完成结构化收尾',
     review_cutoff: '达到调查截止时间，未完成范围保持未知',
     hard_deadline: '达到本轮审查总期限',
     TimeoutError: '模型或工具调用超时',

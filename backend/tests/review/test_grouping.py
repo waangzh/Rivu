@@ -53,7 +53,7 @@ def test_grouping_failure_falls_back_to_single_file_units(tmp_path):
     assert plan.grouping_reason == "grouping_unavailable"
 
 
-def test_repeated_immutable_tool_result_is_marked_as_stalled():
+def test_repeated_immutable_tool_result_is_counted_for_advisory_warning():
     context = AgentContext(provider=None, work=None, budget=None)
     arguments = {"path": "a.py", "revision": "head", "start": 1, "end": 2}
     result = {"ok": True, "source": {"commit_sha": "head-sha", "side": "head", "path": "a.py",
@@ -233,43 +233,57 @@ async def test_cancelled_grouping_stays_unknown_and_does_not_dispatch(tmp_path):
     assert store.work_items(run.id) == []
 
 
-def test_no_progress_tracks_rounds_and_resets_when_investigation_advances():
+def test_tool_loop_requires_consecutive_identical_calls_and_results():
     context = AgentContext(provider=None, work=None, budget=None)
     request, response = {"path": "a.py"}, {"content": "same"}
-    context.note_tool_result("read_file", request, response)
-    assert context.begin_round() == 0
-    for round_number in (1, 2, 3):
+    for round_number in range(1, 6):
         context.note_tool_result("read_file", request, response)
         assert context.begin_round() == round_number
     context.note_tool_result("read_file", {"path": "b.py"}, response)
-    assert context.begin_round() == 0
+    assert context.begin_round() == 1
     context.note_tool_result("read_file", request, response)
+    assert context.begin_round() == 1
+    context.note_tool_result("read_file", request, {"content": "changed"})
+    assert context.begin_round() == 1
+    assert context.begin_round() == 0
+
+
+def test_parallel_tool_order_does_not_reset_a_loop_but_new_candidate_does():
+    context = AgentContext(provider=None, work=None, budget=None)
+    for index in range(5):
+        paths = ["a.py", "b.py"] if index % 2 else ["b.py", "a.py"]
+        for path in paths:
+            context.note_tool_result("read_file", {"path": path}, {"content": "same"})
+        assert context.begin_round() == index + 1
+    context.note_tool_result("read_file", {"path": "a.py"}, {"content": "same"})
+    context.note_tool_result("read_file", {"path": "b.py"}, {"content": "same"})
+    context.note_tool_result("submit_candidate", {}, {"ok": True, "candidate_id": "new"})
     assert context.begin_round() == 1
 
 
-def test_pagination_and_base_head_comparison_are_progress():
+def test_pagination_and_base_head_comparison_are_distinct_requests():
     context = AgentContext(provider=None, work=None, budget=None)
     for index in range(5):
         cursor = str(index)
         context.cursors[cursor] = {"scope": "search", "position": index, "column": 0}
         context.note_tool_result("search_code", {"cursor": cursor}, {"matches": [], "next_cursor": str(index + 1)})
-        assert context.begin_round() == 0
+        assert context.begin_round() == 1
     for side in ("base", "head"):
         context.note_tool_result("read_file", {"path": "a.py", "revision": side}, {"content": "same"})
-        assert context.begin_round() == 0
+        assert context.begin_round() == 1
 
 
-def test_opaque_cursor_changes_do_not_count_as_progress():
+def test_opaque_cursor_changes_do_not_reset_a_tool_loop():
     context = AgentContext(provider=None, work=None, budget=None)
     for index in range(4):
         cursor = str(index)
         context.cursors[cursor] = {"scope": "search", "position": 0, "column": 0}
         context.note_tool_result("search_code", {"cursor": cursor},
                                  {"matches": [], "cursor": cursor, "next_cursor": str(index + 1)})
-        assert context.begin_round() == index
+        assert context.begin_round() == index + 1
 
 
-def test_overlapping_source_requests_require_new_lines_to_count_as_progress():
+def test_overlapping_source_requests_do_not_establish_a_tool_loop():
     context = AgentContext(provider=None, work=None, budget=None)
 
     def read(start, end, side="head", tool="read_file"):
@@ -279,13 +293,13 @@ def test_overlapping_source_requests_require_new_lines_to_count_as_progress():
                                  {"ok": True, "source": source, "content": "fixed bytes"})
         return context.begin_round()
 
-    assert read(1, 100) == 0
-    assert read(101, 200) == 0
+    assert read(1, 100) == 1
+    assert read(101, 200) == 1
     assert read(20, 180) == 1
-    assert read(30, 170, tool="read_symbol") == 2
-    assert read(40, 160) == 3
-    assert read(150, 220) == 0
-    assert read(40, 160, side="base") == 0
+    assert read(30, 170, tool="read_symbol") == 1
+    assert read(40, 160) == 1
+    assert read(150, 220) == 1
+    assert read(40, 160, side="base") == 1
 
 
 def test_pending_grouping_cannot_be_reported_as_completed(tmp_path):

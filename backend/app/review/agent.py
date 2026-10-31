@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.core.config import settings
-from app.review.context import AgentContext, NoProgressDetected
+from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
 from app.review.domain import UnitCompletion, VerificationOutput, utcnow
 from app.review.findings import admit_verification
 from app.review.planner import tokens, unit_capacity
@@ -85,9 +85,9 @@ class RequestGate(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         context = request.runtime.context
         await context.check_active()
-        stalled = context.begin_round()
-        if context.no_progress_closing_calls >= 2:
-            raise NoProgressDetected("agent_no_progress")
+        repeated = context.begin_round()
+        if context.loop_closing_calls >= 2:
+            raise RepeatedToolLoop("agent_tool_loop")
         limits = context.provider.run.configuration.options.limits
         schema = request.response_format.schema
         tools = request.tools
@@ -109,8 +109,8 @@ class RequestGate(AgentMiddleware):
         deadline = run.review_cutoff if context.work.kind == "review" else run.hard_deadline
         seconds = max(0, (deadline - utcnow()).total_seconds())
         closing_reasons = []
-        if stalled >= 3 or context.no_progress_closing_calls:
-            closing_reasons.append("no_progress")
+        if repeated >= TOOL_LOOP_LIMIT or context.loop_closing_calls:
+            closing_reasons.append("tool_loop")
         if (available["input_tokens"] is not None
                 and available["input_tokens"] < 2 * estimate):
             closing_reasons.append("input_tokens")
@@ -127,8 +127,8 @@ class RequestGate(AgentMiddleware):
             closing_reasons.append("format_correction")
         closing = bool(closing_reasons)
         context.investigation_closed = closing
-        if "no_progress" in closing_reasons:
-            context.no_progress_closing_calls += 1
+        if "tool_loop" in closing_reasons:
+            context.loop_closing_calls += 1
         if closing:
             tools = [tool for tool in tools if tool.name == "submit_candidate"]
         if context.tool_calls >= limits.tool_calls:
@@ -147,10 +147,11 @@ class RequestGate(AgentMiddleware):
             "Finish as soon as the necessary investigation is complete; do not repeat "
             "reads or searches for already received evidence."
         )
-        if stalled >= 2:
+        if repeated >= TOOL_LOOP_WARNING:
             instruction += (
-                " The last two tool rounds returned no new information. Stop repeating those requests; "
-                "use existing evidence, change the investigation, or finish with a concrete limitation."
+                f" The last {repeated} tool rounds repeated identical calls with identical results. "
+                "Reuse those results or change the specific request to resolve a missing premise. "
+                "Repetition does not establish whether the investigation is complete."
             )
         if call_remaining == 2:
             instruction += (
@@ -180,7 +181,7 @@ class RequestGate(AgentMiddleware):
                     " If you have a newly supported claim, call submit_candidate AND "
                     "UnitCompletion in this same response so it is saved before this attempt ends."
                 )
-            if "no_progress" in closing_reasons:
+            if "tool_loop" in closing_reasons:
                 instruction += (
                     " Repetition alone is not a missing premise. Assess the evidence already received. "
                     "This is a bounded finalization opportunity, not permission to assume success."
@@ -304,8 +305,8 @@ class AgentRunner:
                         provider.run.id, work.id, type(exc).__name__)
             raise
         except Exception as exc:
-            if isinstance(exc, NoProgressDetected):
-                code = "agent_no_progress"
+            if isinstance(exc, RepeatedToolLoop):
+                code = "agent_tool_loop"
             elif isinstance(exc, BudgetExceeded):
                 code = str(exc)
             elif isinstance(exc, MissingStructuredResult):
@@ -313,7 +314,7 @@ class AgentRunner:
             else:
                 code = "agent_execution_failed"
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
-                "interrupted" if isinstance(exc, (BudgetExceeded, NoProgressDetected)) else "failed", None, code,
+                "interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed", None, code,
                 provider.lease, tool_calls=context.tool_calls)
             logger.warning(
                 "Agent未完成 review_id=%.8s work_id=%.8s kind=%s code=%s error_type=%s "

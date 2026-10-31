@@ -239,17 +239,17 @@ async def test_verifier_final_request_preserves_admission_and_hard_limit(tmp_pat
     check = next(item for item in report.units if item.kind == "verification")
     if verdict == "invalid":
         assert check.status == "interrupted"
-        assert check.error_code == ("agent_no_progress" if call_limit == 8 else "agent_model_limit")
+        assert check.error_code == ("agent_tool_loop" if call_limit == 8 else "agent_model_limit")
         assert candidate.verification is None
         assert report.status == "partial"
     else:
         assert check.status == "completed"
         assert candidate.verification.verdict == verdict
     assert next(item for item in report.units if item.kind == "review").status == "completed"
-    verifier_calls = (5 if verdict == "invalid" else 4) if call_limit == 8 else call_limit
+    verifier_calls = (7 if verdict == "invalid" else 6) if call_limit == 8 else call_limit
     assert len(requests) == report.usage["model_calls"] == (1 if call_limit == 1 else 2) + verifier_calls + 1
     if call_limit == 8:
-        assert "no_progress" in verifier_final[0]["messages"][-1]["content"]
+        assert "tool_loop" in verifier_final[0]["messages"][-1]["content"]
     with sessions() as session:
         tickets = list(session.scalars(select(ReviewRequestOrm)))
         assert sum(ticket.kind == "verification" for ticket in tickets) == verifier_calls
@@ -341,7 +341,7 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
 
 @pytest.mark.parametrize("boundary", [
     "long", "arguments", "cursor", "loop", "loop_unresolved", "loop_refuses", "loop_corrects",
-    "loop_invalid", "loop_unknown",
+    "loop_invalid", "loop_unknown", "loop_recovers",
     "input_tokens", "output_tokens", "time",
 ])
 async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, boundary, monkeypatch):
@@ -389,9 +389,14 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                     page = next(message for message in payload["messages"] if message["role"] == "tool")
                     result["cursor"] = json.loads(page["content"])["next_cursor"]
                 name = "search_code"
+            elif boundary == "loop_recovers" and len(review_requests) == 4:
+                assert "read_file" in names
+                assert "last 3 tool rounds repeated identical calls" in payload["messages"][-1]["content"]
+                name, result = "read_file", {"path": "a.py", "revision": "base", "start": 1, "end": 2}
             elif boundary == "loop_refuses" or (
                 "read_file" in names and len(review_requests) <= 13
                 and (boundary != "arguments" or len(review_requests) <= 2)
+                and (boundary != "loop_recovers" or len(review_requests) <= 3)
                 and boundary != "cursor"
             ):
                 start = len(review_requests) + 5 if boundary == "long" else 1
@@ -402,7 +407,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                 elif boundary == "loop_unknown":
                     name, result = "unregistered_tool", {}
             else:
-                if boundary == "loop_corrects" and len(review_requests) == 4:
+                if boundary == "loop_corrects" and len(review_requests) == 6:
                     return httpx.Response(200, json={
                         "id": "chat", "object": "chat.completion", "created": 1,
                         "model": "fixture", "choices": [{"index": 0, "finish_reason": "stop",
@@ -414,7 +419,9 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                 }
         return httpx.Response(200, json={"id": "chat", "object": "chat.completion", "created": 1,
             "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls",
-                "message": {"role": "assistant", "content": None, "tool_calls": [
+                "message": {"role": "assistant", "content": (
+                    "I have a new idea." if boundary.startswith("loop") else None
+                ), "tool_calls": [
                     {"id": f"call-{len(requests)}", "type": "function", "function": {
                         "name": name, "arguments": json.dumps(result)}}]}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
@@ -431,7 +438,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
     for previous, current in zip(review_requests, review_requests[1:]):
         assert current["messages"][:len(previous["messages"])] == previous["messages"]
     assert report.overview.status == "ready"
-    assert report.units[0].error_code == ("agent_no_progress" if boundary == "loop_refuses" else None)
+    assert report.units[0].error_code == ("agent_tool_loop" if boundary == "loop_refuses" else None)
     if boundary == "long":
         assert len(review_requests) == 14
         assert report.units[0].tool_calls == 13
@@ -450,18 +457,22 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         assert json.loads(error["content"])["error"] == "invalid_cursor"
         assert json.loads(error["content"])["retry_without_cursor"] is True
         assert "omit cursor" in json.loads(error["content"])["next_action"]
+    elif boundary == "loop_recovers":
+        assert len(review_requests) == 5
+        assert report.units[0].status == "completed"
+        assert report.units[0].tool_calls == 4
+        assert "read_file" in {tool["function"]["name"] for tool in review_requests[-1]["tools"]}
     elif boundary.startswith("loop"):
-        assert len(review_requests) == (5 if boundary in {
-            "loop_refuses", "loop_corrects", "loop_invalid", "loop_unknown"} else 4)
+        assert len(review_requests) == (7 if boundary in {"loop_refuses", "loop_corrects"} else 6)
         assert report.units[0].status == ("interrupted" if boundary == "loop_refuses" else "completed")
-        assert report.units[0].tool_calls == (5 if boundary == "loop_refuses" else
-                                            4 if boundary in {"loop_invalid", "loop_unknown"} else 3)
-        warning_index = 3 if boundary in {"loop_invalid", "loop_unknown"} else 2
-        assert "last two tool rounds returned no new information" in review_requests[warning_index]["messages"][-1]["content"]
-        for payload in review_requests[warning_index + 1:]:
+        assert report.units[0].tool_calls == (7 if boundary == "loop_refuses" else 5)
+        assert "last 3 tool rounds repeated identical calls" in review_requests[3]["messages"][-1]["content"]
+        for payload in review_requests[3:5]:
+            assert "read_file" in {tool["function"]["name"] for tool in payload["tools"]}
+        for payload in review_requests[5:]:
             assert {tool["function"]["name"] for tool in payload["tools"]} == {
                 "submit_candidate", "UnitCompletion"}
-            assert "no_progress" in payload["messages"][-1]["content"]
+            assert "tool_loop" in payload["messages"][-1]["content"]
         if boundary == "loop_unresolved":
             assert any("unresolved_investigation" in reason for reason in report.reasons)
     else:
@@ -470,3 +481,97 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
             "submit_candidate", "UnitCompletion"}
         assert boundary in review_requests[0]["messages"][-1]["content"]
     assert report.usage["model_calls"] == len(requests) == len(review_requests) + 1
+
+
+@pytest.mark.parametrize("role", ["review", "verification"])
+@pytest.mark.parametrize("investigation", ["overlapping_reads", "empty_searches"])
+async def test_low_novelty_keeps_tools_for_a_specific_followup(tmp_path, role, investigation):
+    store, run, lease, provider, sessions = setup_source_run(tmp_path, support_sources={
+        "caller.py": "\n".join(f"VALUE_{index} = {index}" for index in range(16)) + "\n",
+    })
+    investigation_requests = []
+    requests = []
+
+    def transport(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        names = {tool["function"]["name"] for tool in payload["tools"]}
+        packet = json.loads(payload["messages"][1]["content"])
+        extra_calls = []
+        if "OverviewOutput" in names:
+            name, result = "OverviewOutput", {
+                "change_overview": [{"text": "调整比例计算。", "source_refs": ["S1"]}],
+            }
+        elif role == "verification" and "UnitCompletion" in names:
+            handle = next(source["source_ref"] for material in packet["materials"]
+                          for source in material["sources"] if source["source"]["side"] == "head")
+            name, result = "submit_candidate", {"proposal": {
+                "claim": "零输入导致除零", "trigger": "x=0", "impact": "请求失败",
+                "source_refs": [handle],
+            }}
+            extra_calls.append({"id": "review-complete", "type": "function", "function": {
+                "name": "UnitCompletion", "arguments": "{}"}})
+        else:
+            investigation_requests.append(payload)
+            step = len(investigation_requests)
+            assert {"read_file", "search_code"} <= names
+            assert "Close now because of" not in payload["messages"][-1]["content"]
+            if step <= 6 and investigation == "overlapping_reads":
+                name, result = "read_file", {
+                    "path": "caller.py", "revision": "head", "start": step, "end": 17 - step,
+                }
+            elif step <= 6:
+                name, result = "search_code", {"query": f"missing_order_variant_{step}"}
+            elif step == 7:
+                name, result = "read_file", {
+                    "path": "a.py", "revision": "base", "start": 1, "end": 2,
+                }
+            else:
+                assert step == 8
+                name = "UnitCompletion" if role == "review" else "VerificationOutput"
+                result = {} if role == "review" else {
+                    "verdict": "insufficient", "attribution": "uncertain",
+                    "reason": "尚未查明调用方是否允许零输入。",
+                }
+        return httpx.Response(200, json={
+            "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": "Reconsidering the same source.",
+                "tool_calls": [{"id": f"call-{len(requests)}", "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(result),
+                }}, *extra_calls],
+            }}], "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105},
+        })
+
+    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client,
+                          max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert len(investigation_requests) == 8
+    work = next(item for item in report.units if item.kind == role)
+    assert work.status == "completed"
+    assert work.error_code is None
+    assert work.tool_calls == 7
+    assert report.findings == []
+    if role == "verification":
+        assert report.candidates[0].verification.verdict == "insufficient"
+    for step, (previous, current) in enumerate(
+        zip(investigation_requests, investigation_requests[1:]), 1,
+    ):
+        assert current["messages"][:len(previous["messages"])] == previous["messages"]
+        result = json.loads(next(
+            message for message in reversed(current["messages"]) if message["role"] == "tool"
+        )["content"])
+        if investigation == "empty_searches" and step <= 6:
+            assert result["matches"] == []
+            assert result["scope_complete"] is True
+            assert result["next_cursor"] is None
+        elif investigation == "overlapping_reads" and step > 1:
+            assert result["content_omitted"] is True
+    assert report.usage["model_calls"] == len(requests)
+    with sessions() as session:
+        tickets = list(session.scalars(select(ReviewRequestOrm)))
+        assert len(tickets) == len(requests)
+        assert all(ticket.state == "settled" for ticket in tickets)

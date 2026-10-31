@@ -9,7 +9,7 @@ from typing import Literal
 
 from langchain.tools import ToolRuntime, tool
 
-from app.review.context import AgentContext
+from app.review.context import AgentContext, TOOL_LOOP_WARNING
 from app.review.domain import CandidateInput
 from app.review.findings import admit_candidate
 from app.review.retrieval import find_paths, search
@@ -52,9 +52,10 @@ def bounded(function):
         # Submission receipts remain idempotent; never block saving a candidate.
         if function.__name__ != "submit_candidate":
             repetition = context.note_tool_result(function.__name__, arguments, result)
-            if repetition == 3:
-                return {**result, "progress_warning": "Repeated request returned no new information. "
-                        "Use the evidence already received, change the query, or finish."}
+            if repetition == TOOL_LOOP_WARNING:
+                return {**result, "progress_warning": "Identical request returned the same result. "
+                        "Reuse that result or change the request to resolve a missing premise. "
+                        "This does not determine whether the investigation is complete."}
         logger.debug("工具调用完成 review_id=%.8s work_id=%.8s tool=%s",
                      context.provider.run.id, context.work.id, function.__name__)
         return result
@@ -112,11 +113,7 @@ async def submit_candidate(proposal: CandidateInput, runtime: ToolRuntime[AgentC
     candidate = admit_candidate(proposal, context, runtime.tool_call_id)
     candidate_id = await asyncio.to_thread(context.provider.store.submit,
         context.provider.run.id, context.work, candidate, context.provider.lease)
-    progress = "candidate:" + candidate_id
-    if progress not in context.progress_keys:
-        context.progress_keys.add(progress)
-        context.round_progress = True
-        context.round_tools += 1
+    context.note_tool_result("submit_candidate", {}, {"ok": True, "candidate_id": candidate_id})
     logger.info("候选已保存并排队核验 review_id=%.8s work_id=%.8s candidate_id=%.8s",
                 context.provider.run.id, context.work.id, candidate_id)
     return {"ok": True, "candidate_id": candidate_id, "status": "unverified"}

@@ -12,8 +12,12 @@ from app.review.planner import identity, members, tokens, unit_capacity
 from app.review.store import BudgetExceeded
 
 
-class NoProgressDetected(RuntimeError):
-    """The stalled agent exhausted its bounded structured finalization attempts."""
+TOOL_LOOP_WARNING = 3
+TOOL_LOOP_LIMIT = 5
+
+
+class RepeatedToolLoop(RuntimeError):
+    """An identical tool loop exhausted its bounded finalization attempts."""
 
 
 @dataclass
@@ -31,12 +35,10 @@ class AgentContext:
     structured_output_retry: bool = False
     source_counter: int = 0
     tool_repetitions: dict[str, tuple[str, int]] = field(default_factory=dict)
-    progress_keys: set[str] = field(default_factory=set)
-    round_tools: int = 0
-    round_progress: bool = False
-    stalled_rounds: int = 0
-    source_ranges: dict[tuple[str, str, str], list[tuple[int, int]]] = field(default_factory=dict)
-    no_progress_closing_calls: int = 0
+    round_calls: list[str] = field(default_factory=list)
+    previous_tool_round: str | None = None
+    repeated_tool_rounds: int = 0
+    loop_closing_calls: int = 0
     investigation_closed: bool = False
     investigation_tools: set[str] = field(default_factory=set)
     source_paths: set[str] = field(default_factory=set)
@@ -59,20 +61,6 @@ class AgentContext:
     async def check_active(self):
         await self.budget.active()
 
-    def note_source(self, source) -> bool:
-        key = (source["commit_sha"], source["side"], source["path"])
-        start, end = source["start_line"], source["end_line"]
-        ranges = self.source_ranges.setdefault(key, [])
-        fresh = not any(first <= start and end <= last for first, last in ranges)
-        merged = []
-        for first, last in sorted([*ranges, (start, end)]):
-            if merged and first <= merged[-1][1] + 1:
-                merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
-            else:
-                merged.append((first, last))
-        self.source_ranges[key] = merged
-        return fresh
-
     def note_tool_result(self, name, arguments, result) -> int:
         normalized = dict(arguments)
         cursor = normalized.get("cursor")
@@ -80,7 +68,7 @@ class AgentContext:
             saved = self.cursors[cursor]
             normalized["cursor"] = {key: saved.get(key) for key in ("scope", "position", "column")}
         key = identity([name, normalized])
-        # Cursors and attempt-local handles are opaque identities, not progress.
+        # Opaque handles do not change a deterministic result.
         def semantic(value):
             if isinstance(value, dict):
                 return {key: semantic(item) for key, item in value.items()
@@ -89,8 +77,7 @@ class AgentContext:
                 return [semantic(item) for item in value]
             return value
         digest = identity(semantic(result))
-        progress = identity([key, digest])
-        self.round_tools += 1
+        self.round_calls.append(identity([key, digest]))
         if result.get("ok") is True:
             self.investigation_tools.add(name)
             if name == "search_code":
@@ -103,13 +90,8 @@ class AgentContext:
         sources = ([result["source"]] if isinstance(result.get("source"), dict) else [])
         sources.extend(item["source"] for item in result.get("sources", [])
                        if isinstance(item, dict) and isinstance(item.get("source"), dict))
-        fresh = False
         for source in sources:
             self.source_paths.add(source.get("path", ""))
-            fresh = self.note_source(source) or fresh
-        if (fresh if sources else progress not in self.progress_keys):
-            self.progress_keys.add(progress)
-            self.round_progress = True
         previous, count = self.tool_repetitions.get(key, (None, 0))
         count = count + 1 if previous == digest else 1
         self.tool_repetitions[key] = (digest, count)
@@ -232,10 +214,17 @@ class AgentContext:
         return compacted
 
     def begin_round(self):
-        if self.round_tools:
-            self.stalled_rounds = 0 if self.round_progress else self.stalled_rounds + 1
-        self.round_tools, self.round_progress = 0, False
-        return self.stalled_rounds
+        # Parallel tool completion order must not change the round identity.
+        fingerprint = identity(sorted(self.round_calls)) if self.round_calls else None
+        if fingerprint is None:
+            self.repeated_tool_rounds = 0
+        elif fingerprint == self.previous_tool_round:
+            self.repeated_tool_rounds += 1
+        else:
+            self.repeated_tool_rounds = 1
+        self.previous_tool_round = fingerprint
+        self.round_calls.clear()
+        return self.repeated_tool_rounds
 
     def stage(self, ref: SourceRef):
         for handle, issued in {**self.visible, **self.pending}.items():
@@ -259,7 +248,6 @@ class AgentContext:
         self.delivered_hunks.update(hunks)
         for ref in pending.values():
             self.source_paths.add(ref.path)
-            self.note_source(ref.model_dump())
         for handle in pending:
             self.pending.pop(handle, None)
         for key in hunks:
