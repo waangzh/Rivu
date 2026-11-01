@@ -7,7 +7,7 @@ from time import perf_counter
 from app.review.budget import BudgetGate
 from app.review.domain import utcnow
 from app.review.report import build_report, generate_overview
-from app.review.store import LeaseLost, ReviewStopped
+from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
 
 logger = logging.getLogger("Rivu.Review")
 
@@ -54,14 +54,18 @@ class ReviewOrchestrator:
                 queued.sort(key=lambda item: (item.kind != "verification", priority[item.unit_id]))
                 while queued and len(running) < run.configuration.options.limits.concurrency:
                     item = queued.pop(0)
-                    reason = await asyncio.to_thread(self.store.can_start, run_id, item)
+                    try:
+                        claimed = await asyncio.to_thread(
+                            self.store.claim, run_id, item.id, lease, check_budget=True)
+                        reason = None
+                    except BudgetExceeded as exc:
+                        reason = str(exc)
                     if reason:
                         if not running:
                             await asyncio.to_thread(self.store.skip, run_id, item.id, reason, lease)
                             logger.warning("工作项未启动 review_id=%.8s work_id=%.8s kind=%s reason=%s",
                                            run_id, item.id, item.kind, reason)
                         continue
-                    claimed = await asyncio.to_thread(self.store.claim, run_id, item.id, lease)
                     if claimed:
                         task = asyncio.create_task(self.runner.run(claimed, provider, budget))
                         running[task] = claimed

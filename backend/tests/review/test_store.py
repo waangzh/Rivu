@@ -158,6 +158,7 @@ def test_retried_verification_gets_a_new_minimum_before_discovery(tmp_path):
     reviewer = store.claim(run.id, reviewer.id, lease)
     with pytest.raises(BudgetExceeded, match="model_call_limit"):
         store.reserve(run.id, reviewer, 1000, lease)
+    store.finish_work(run.id, reviewer, "interrupted", None, "model_call_limit", lease)
     check = store.claim(run.id, check.id, lease)
     store.reserve(run.id, check, 1000, lease)
 

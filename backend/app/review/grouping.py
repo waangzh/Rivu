@@ -9,7 +9,7 @@ from pydantic import Field, StrictInt
 
 from app.review.domain import Model, utcnow
 from app.review.planner import excluded_changes, plan_review, tokens
-from app.review.store import LeaseLost, ReviewStopped
+from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
 
 logger = logging.getLogger("Rivu.Review.Grouping")
 
@@ -102,6 +102,9 @@ async def freeze_semantic_groups(run, store, lease, model):
             output = GroupingOutput.model_validate(raw.tool_calls[0]["args"])
     except (LeaseLost, ReviewStopped, asyncio.CancelledError):
         raise
+    except BudgetExceeded as exc:
+        reason = f"grouping_budget:{exc}"
+        logger.info("分组跳过 review_id=%.8s reason=%s", run.id, reason)
     except Exception as exc:
         if ticket is not None:
             await asyncio.to_thread(store.settle, run.id, ticket, None, lease)

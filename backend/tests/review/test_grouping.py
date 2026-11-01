@@ -138,6 +138,44 @@ async def test_grouping_is_frozen_before_dispatch_and_not_replayed(tmp_path):
         assert ticket.kind == "grouping" and ticket.state == "settled"
 
 
+@pytest.mark.parametrize(("resource", "value", "reason"), [
+    ("total_model_calls", 3, "model_call_limit"),
+    ("total_input_tokens", 26000, "input_token_limit"),
+    ("total_output_tokens", 3 * 4096, "output_token_limit"),
+])
+async def test_grouping_skips_before_spending_minimum_review_budget(tmp_path, resource, value, reason):
+    store, run, lease, sessions = pending_run(tmp_path)
+    setattr(run.configuration.options.limits, resource, value)
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = GroupModel()
+    frozen = await freeze_semantic_groups(run, store, lease, model)
+    assert model.calls == []
+    assert frozen.plan.grouping_status == "fallback"
+    assert frozen.plan.grouping_reason == f"grouping_budget:{reason}"
+    assert store.usage(run.id)["model_calls"] == 0
+    assert len(store.work_items(run.id)) == 4
+    first = store.work_items(run.id)[0]
+    assert store.claim(run.id, first.id, lease, check_budget=True) is not None
+
+
+async def test_grouping_keeps_one_review_verification_and_overview_with_four_calls(tmp_path):
+    store, run, lease, sessions = pending_run(tmp_path)
+    run.configuration.options.limits.total_model_calls = 4
+    run.configuration.options.limits.model_calls = 1
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = GroupModel()
+    frozen = await freeze_semantic_groups(run, store, lease, model)
+    assert len(model.calls) == 1
+    assert frozen.plan.grouping_status == "model"
+    work = store.work_items(run.id)[0]
+    work = store.claim(run.id, work.id, lease, check_budget=True)
+    _, available = store.reserve(run.id, work, 1000, lease, with_remaining=True)
+    assert available["agent_model_calls"] == 1
+    assert available["model_calls"] == 1
+
+
 async def test_unknown_grouping_request_is_not_recharged_after_recovery(tmp_path):
     store, run, lease, _ = pending_run(tmp_path)
     store.reserve_grouping(run.id, 1234, lease)

@@ -40,6 +40,11 @@ def verification_input_limit(limits, committed_input_tokens=0):
     return max(1, min(available))
 
 
+def review_input_estimate(unit, limits):
+    from app.review.planner import unit_capacity
+    return min(unit.estimated_input_tokens * 2 + 4096, unit_capacity(limits))
+
+
 class LeaseLost(RuntimeError):
     pass
 
@@ -192,13 +197,16 @@ class ReviewStore:
             return [Candidate.model_validate(row.payload) for row in session.scalars(
                 select(ReviewCandidateOrm).where(ReviewCandidateOrm.run_id == run_id))]
 
-    def claim(self, run_id, work_id, lease):
+    def claim(self, run_id, work_id, lease, *, check_budget=False):
         with self.sessions.begin() as session:
             run_row = self._guard(session, run_id, lease)
             row = session.get(ReviewWorkItemOrm, work_id)
             work = WorkItem.model_validate(row.payload)
             if row.run_id != run_id or work.status != "queued":
                 return None
+            if check_budget:
+                run = self._run(run_row)
+                self._admit_request(session, run, work, self._initial_estimate(run, work), False)
             work.status, work.attempt_id = "running", uuid4().hex
             work.attempt += 1
             work.delivered_hunk_ids, work.missing_material_reasons = [], {}
@@ -343,6 +351,72 @@ class ReviewStore:
         with self.sessions() as session:
             return self._usage(session, run_id)[1]
 
+    def _initial_estimate(self, run, work):
+        if work.kind != "review":
+            return None
+        unit = next(unit for unit in run.plan.units if unit.id == work.unit_id)
+        return review_input_estimate(unit, run.configuration.options.limits)
+
+    def _request_protection(self, session, run, work, calls, usage, kind, estimate):
+        if kind == "overview":
+            return 0, 0
+        limits = run.configuration.options.limits
+        protected_calls, protected_tokens = 1, OVERVIEW_INPUT
+        items = [WorkItem.model_validate(row.payload) for row in session.scalars(
+            select(ReviewWorkItemOrm).where(ReviewWorkItemOrm.run_id == run.id, or_(
+                ReviewWorkItemOrm.kind == "verification",
+                ReviewWorkItemOrm.payload["status"].as_string() == "running")))]
+        requested = {(call.work_item_id, call.attempt_id) for call in calls}
+        pending = [item for item in items if item.kind == "verification"
+                   and (work is None or item.id != work.id)
+                   and (item.status == "queued" or (
+                       item.status == "running" and (item.id, item.attempt_id) not in requested))]
+        verifier_input = verification_input_limit(limits)
+        if limits.total_model_calls is not None:
+            submitted = set(session.scalars(select(ReviewCandidateOrm.attempt_id).where(
+                ReviewCandidateOrm.run_id == run.id)))
+            reviewers = [item for item in items if item.kind == "review" and item.status == "running"]
+            if kind == "review" and all(item.id != work.id for item in reviewers):
+                reviewers.append(work)
+            # One possible first candidate per active attempt, transferred on submission.
+            future = sum(item.status == "queued" or item.attempt_id not in submitted for item in reviewers)
+            # Claimed reviewers may not yet have reached their first request.
+            starting = [item for item in reviewers if (work is None or item.id != work.id)
+                        and item.attempt_id not in submitted
+                        and (item.id, item.attempt_id) not in requested]
+            starting_input = sum(self._initial_estimate(run, item) for item in starting)
+            future_input = verifier_input
+            if future and limits.total_input_tokens is not None:
+                own_input = max(estimate, self._initial_estimate(run, work) or 0)
+                available = (limits.total_input_tokens - usage["committed_input_tokens"]
+                             - own_input - protected_tokens - starting_input - len(pending) * verifier_input)
+                future_input = min(future_input, max(1, available // future))
+            protected_calls += future + len(starting)
+            protected_tokens += future * future_input + starting_input
+            if kind == "grouping":
+                protected_calls += 2
+                review_input = min((review_input_estimate(unit, limits)
+                                    for unit in run.plan.units), default=0)
+                protected_tokens += review_input + verifier_input
+        if kind == "verification" and (work.status == "queued"
+                                      or (work.id, work.attempt_id) not in requested):
+            # A burst of candidates may exceed every buffer. Still allow a first
+            # verification; protect as many other first requests as can fit.
+            capacity = len(pending)
+            if limits.total_model_calls is not None:
+                capacity = min(capacity, limits.total_model_calls - len(calls) - protected_calls - 1)
+            if limits.total_input_tokens is not None:
+                available = limits.total_input_tokens - usage["committed_input_tokens"] - protected_tokens
+                own_input = verification_input_limit(limits, usage["committed_input_tokens"])
+                capacity = min(capacity, (available - own_input) // verifier_input)
+            if limits.total_output_tokens is not None:
+                available = limits.total_output_tokens - usage["committed_output_tokens"]
+                capacity = min(capacity, available // limits.output_tokens - protected_calls - 1)
+            pending = pending[:max(0, capacity)]
+        protected_calls += len(pending)
+        protected_tokens += len(pending) * verifier_input
+        return protected_calls, protected_tokens
+
     def _admit_request(self, session, run, work, estimate, overview, *, kind_override=None):
         now, limits = utcnow(), run.configuration.options.limits
         if now >= run.hard_deadline:
@@ -353,17 +427,11 @@ class ReviewStore:
         calls, usage = self._usage(session, run.id)
         if estimate is None:
             estimate = verification_input_limit(limits, usage["committed_input_tokens"])
-        protected_calls, protected_tokens = (0, 0) if overview else (1, OVERVIEW_INPUT)
-        if kind == "review":
-            checks = session.scalars(select(ReviewWorkItemOrm).where(
-                ReviewWorkItemOrm.run_id == run.id, ReviewWorkItemOrm.kind == "verification"))
-            requested = {(call.work_item_id, call.attempt_id) for call in calls if call.kind == "verification"}
-            pending = sum(item.payload["status"] == "queued" or (
-                item.payload["status"] == "running"
-                and (item.id, item.payload["attempt_id"]) not in requested) for item in checks)
-            protected_calls += pending
-            protected_tokens += pending * verification_input_limit(limits)
-        if work is not None and sum(call.attempt_id == work.attempt_id for call in calls) >= limits.model_calls:
+        protected_calls, protected_tokens = self._request_protection(
+            session, run, work, calls, usage, kind, estimate)
+        agent_calls = sum(call.work_item_id == work.id and call.attempt_id == work.attempt_id
+                          for call in calls) if work is not None and work.status == "running" else 0
+        if work is not None and agent_calls >= limits.model_calls:
             raise BudgetExceeded("agent_model_limit")
         if (limits.total_model_calls is not None
                 and len(calls) + 1 + protected_calls > limits.total_model_calls):
@@ -384,21 +452,15 @@ class ReviewStore:
                               if limits.total_output_tokens is not None else None),
             "model_calls": (limits.total_model_calls - len(calls) - protected_calls
                             if limits.total_model_calls is not None else None),
-            "agent_model_calls": limits.model_calls - sum(
-                call.attempt_id == work.attempt_id for call in calls) if work else None,
+            "agent_model_calls": limits.model_calls - agent_calls if work else None,
         }
 
     def can_start(self, run_id, work):
         with self.sessions() as session:
             row = session.get(ReviewTaskOrm, run_id)
             run = self._run(row)
-            unit = next(unit for unit in run.plan.units if unit.id == work.unit_id)
-            from app.review.planner import unit_capacity
-            estimate = (min(unit.estimated_input_tokens * 2 + 4096,
-                            unit_capacity(run.configuration.options.limits))
-                        if work.kind == "review" else None)
             try:
-                self._admit_request(session, run, work, estimate, False)
+                self._admit_request(session, run, work, self._initial_estimate(run, work), False)
             except BudgetExceeded as exc:
                 return str(exc)
             return None

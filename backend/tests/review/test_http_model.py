@@ -528,10 +528,13 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         tmp_path, **({"head_source": source, "base_source": source.replace("10 / x", "10 / (x or 1)")}
                     if boundary in {"long", "cursor"} else {}))
     if boundary == "input_tokens":
+        # Isolate token-driven closing from strict-call discovery buffers.
+        run.configuration.options.limits.total_model_calls = None
         run.configuration.options.limits.total_input_tokens = 12000
         run.pr.body = "预算调查上下文。" * 100
     elif boundary == "output_tokens":
-        run.configuration.options.limits.total_output_tokens = 8192
+        # One discovery, one possible first verification, and the overview.
+        run.configuration.options.limits.total_output_tokens = 3 * 4096
     elif boundary == "time":
         run.review_cutoff = utcnow() + timedelta(seconds=30)
     with sessions.begin() as session:

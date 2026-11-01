@@ -82,6 +82,28 @@ async def test_candidate_and_completion_in_one_response_wait_for_saved_receipt(t
     assert report.status == "completed"
 
 
+async def test_three_calls_finish_combined_discovery_verification_and_overview(tmp_path):
+    from app.models.orm import ReviewTaskOrm
+
+    class CombinedModel(ReviewModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            message = result.generations[0].message
+            if message.tool_calls and message.tool_calls[0]["name"] == "submit_candidate":
+                message.tool_calls.append({"name": "UnitCompletion", "args": {}, "id": "completion"})
+            return result
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.limits.total_model_calls = 3
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    report = await ReviewOrchestrator(store, AgentRunner(CombinedModel())).run(run.id, provider, lease)
+    assert report.status == "completed"
+    assert len(report.findings) == 1
+    assert report.overview.status == "ready"
+    assert report.usage["model_calls"] == 3
+
+
 async def test_candidate_survives_reviewer_failure_and_is_verified(tmp_path):
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     report = await ReviewOrchestrator(store, AgentRunner(ReviewModel(fail_after_submit=True))).run(
