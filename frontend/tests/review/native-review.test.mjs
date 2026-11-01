@@ -17,6 +17,7 @@ test('预算耗尽说明具体限制，避免显示为未知执行异常', async
     const { executionErrorLabel } = await server.ssrLoadModule('/src/utils/nativeReview.ts');
     assert.equal(executionErrorLabel('agent_model_limit'), '达到单个 Agent 的模型调用上限，调查尚未完成');
     assert.equal(executionErrorLabel('agent_structured_output_missing'), '模型未返回有效的结构化结果，任务尚未完成');
+    assert.equal(executionErrorLabel('agent_execution_failed'), 'Agent 执行异常，未取得有效结果');
     for (const code of ['model_call_limit', 'input_token_limit', 'output_token_limit',
       'context_capacity', 'tool_call_limit', 'agent_tool_loop', 'review_cutoff', 'hard_deadline']) {
       assert.doesNotMatch(executionErrorLabel(code), /执行异常/);

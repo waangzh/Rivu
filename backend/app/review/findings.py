@@ -49,9 +49,15 @@ def verification_problem(output, refs, changed_files):
 
 
 def admit_verification(candidate, output, context):
-    refs = context.resolve(output.source_refs)
     run = context.provider.run
-    problem = verification_problem(output, refs, run.changed_files)
+    try:
+        refs = context.resolve(output.source_refs)
+    except ValueError:
+        # A model-supplied handle is untrusted; keep the verification as an
+        # admission failure instead of letting it abort the whole work item.
+        refs, problem = [], "invalid_source_refs"
+    else:
+        problem = verification_problem(output, refs, run.changed_files)
     candidate.verification = output.model_copy(update={
         "verdict": "insufficient", "severity": None, "author_comment": None,
         "reason": f"{problem}: {output.reason}"} if problem else {})

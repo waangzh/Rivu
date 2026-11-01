@@ -16,6 +16,7 @@ class ReviewModel(BaseChatModel):
     empty: bool = False
     overview_failure: bool = False
     unknown_usage: bool = False
+    invalid_verification_refs: bool = False
 
     @property
     def _llm_type(self):
@@ -36,6 +37,8 @@ class ReviewModel(BaseChatModel):
                 "source_refs": [packet["source_materials"][0]["source_ref"]]}], "finding_order": []}
         elif system.startswith("Independently"):
             handles = [source["source_ref"] for material in packet["materials"] for source in material["sources"]]
+            if self.invalid_verification_refs:
+                handles = ["S999"]
             name = "VerificationOutput"
             payload = {"verdict": "confirmed", "attribution": "introduced", "severity": "high",
                 "reason": "零输入现在到达除零路径，BASE 使用非零回退。", "source_refs": handles,
@@ -65,6 +68,36 @@ async def test_actual_agent_loop_candidate_verifier_and_default_overview(tmp_pat
     assert report.usage["model_calls"] == 4
     assert all(item.material_delivery == "complete" for item in report.units)
     assert store.get(run.id).report == report
+
+
+async def test_invalid_verification_sources_are_admission_failure_not_execution_failure(tmp_path):
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    report = await ReviewOrchestrator(store, AgentRunner(
+        ReviewModel(invalid_verification_refs=True))).run(run.id, provider, lease)
+    assert report.status == "completed"
+    assert report.findings == []
+    assert "unverified_candidates" not in report.reasons
+    candidate = report.candidates[0]
+    assert candidate.verification.verdict == "insufficient"
+    assert candidate.admission_reason == "invalid_source_refs"
+    assert candidate.verification_sources == []
+    assert candidate.finding is None
+
+
+def test_safe_error_detail_only_exposes_stable_codes():
+    from app.review.agent import safe_error_detail
+    from app.review.context import RepeatedToolLoop
+    from app.review.store import BudgetExceeded
+
+    assert safe_error_detail(ValueError("source_not_visible_in_this_attempt")) == (
+        "source_not_visible_in_this_attempt")
+    assert safe_error_detail(BudgetExceeded("input_token_limit")) == "input_token_limit"
+    assert safe_error_detail(RepeatedToolLoop("agent_tool_loop")) == "agent_tool_loop"
+    assert safe_error_detail(RuntimeError("source_not_visible_in_this_attempt")) == "-"
+    assert safe_error_detail(BudgetExceeded("private_provider_body")) == "-"
+    assert safe_error_detail(ValueError("private_provider_body_token_and_source")) == "-"
+    assert safe_error_detail(ValueError("PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE")) == "-"
+    assert safe_error_detail(ValueError("vendor body with spaces")) == "-"
 
 
 async def test_candidate_and_completion_in_one_response_wait_for_saved_receipt(tmp_path):
@@ -153,13 +186,17 @@ async def test_missing_decision_sources_cannot_admit_a_finding(tmp_path, verdict
     assert result.finding is None
 
 
-async def test_model_failure_logs_unknown_usage_without_provider_exception(tmp_path, caplog):
+@pytest.mark.parametrize("private_body", [
+    "PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE",
+    "private_provider_body_token_and_source",
+])
+async def test_model_failure_logs_unknown_usage_without_provider_exception(tmp_path, caplog, private_body):
     class PrivateFailureModel(ReviewModel):
         def _generate(self, messages, stop=None, run_manager=None, **kwargs):
             if str(messages[0].content).startswith("Investigate") and any(
                 isinstance(message, ToolMessage) for message in messages
             ):
-                raise ValueError("PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE")
+                raise ValueError(private_body)
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     caplog.set_level(logging.INFO, logger="Rivu.Review")
@@ -171,5 +208,6 @@ async def test_model_failure_logs_unknown_usage_without_provider_exception(tmp_p
     assert "模型请求失败" in text
     assert "error_type=ValueError usage=unknown" in text
     assert "Agent未完成" in text
-    assert "PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE" not in text
+    assert private_body not in text
+    assert "detail=-" in text
     assert report.usage["unknown_calls"] == 1

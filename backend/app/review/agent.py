@@ -31,6 +31,23 @@ class MissingStructuredResult(ValueError):
     pass
 
 
+def safe_error_detail(exc):
+    # Allow only known type/code pairs, never arbitrary exception bodies.
+    allowed = {
+        ValueError: {"source_not_visible_in_this_attempt"},
+        BudgetExceeded: {
+            "hard_deadline", "review_cutoff", "agent_model_limit", "model_call_limit",
+            "input_token_limit", "context_capacity", "output_token_limit", "candidate_limit",
+        },
+        RepeatedToolLoop: {"agent_tool_loop"},
+    }
+    codes = allowed.get(type(exc))
+    if codes is None:
+        return "-"
+    detail = str(exc)
+    return detail if detail in codes else "-"
+
+
 def request_input_tokens(messages, tools, schema):
     return tokens({
         "messages": [message.model_dump(mode="json") for message in messages],
@@ -392,7 +409,8 @@ class AgentRunner:
                   status="interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed",
                   reason=code, model_calls=context.model_calls, tool_calls=context.tool_calls)
             logger.warning(
-                "Agent未完成 review_id=%.8s work_id=%.8s kind=%s code=%s error_type=%s "
+                "Agent未完成 review_id=%.8s work_id=%.8s kind=%s code=%s error_type=%s detail=%s "
                 "model_calls=%d tool_calls=%d elapsed_ms=%.0f",
                 provider.run.id, work.id, work.kind, code, type(exc).__name__,
-                context.model_calls, context.tool_calls, (perf_counter() - started) * 1000)
+                safe_error_detail(exc), context.model_calls, context.tool_calls,
+                (perf_counter() - started) * 1000)
