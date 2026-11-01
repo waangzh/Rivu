@@ -83,22 +83,22 @@ async function saveDisposition() {
   <div class="page-head">
     <div>
       <h2>问题与证据</h2>
-      <p class="title-sub">仅展示通过准入的 Finding；候选和证据不足保持独立可见。</p>
+      <p class="title-sub">已确认问题均经过源码证据检查与独立核验；疑似问题和证据不足项单独保留。</p>
     </div>
     <span class="badge neutral">{{ findings.length }} 条 Finding</span>
   </div>
 
   <div class="workspace-toolbar rg-finding-filters">
     <input v-model="query" class="input" placeholder="搜索问题或文件" aria-label="搜索问题" />
-    <span class="muted small">候选 {{ candidates.length }} 条</span>
+    <span class="muted small">疑似问题记录 {{ candidates.length }} 条</span>
   </div>
 
   <p v-if="loading" class="muted space-top" role="status">正在读取问题记录…</p>
   <section v-else-if="!visible.length" class="card card-pad space-top">
     <EmptyState
       icon="shield"
-      title="没有匹配的已准入问题"
-      :description="candidates.length ? '仍有候选或证据不足项，不能据此推断不存在缺陷。' : '未发现问题不能证明审查范围完整。'"
+      title="没有匹配的已确认问题"
+      :description="candidates.length ? '请同时查看疑似问题的核验记录，当前列表不能证明不存在缺陷。' : '未发现问题不能证明审查范围完整。'"
     />
   </section>
 

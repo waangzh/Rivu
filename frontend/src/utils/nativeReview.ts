@@ -13,6 +13,7 @@ export const phaseLabel = (phase: string) =>
     reviewing: '审查中',
     verification: '核验候选',
     report: '汇总报告',
+    overview: '整理审查结果',
     running: '执行中',
     finished: '审查结束',
     completed: '审查结束',
@@ -42,7 +43,7 @@ export const executionErrorLabel = (code: string | null) =>
     review_deadline: '达到本轮审查总期限',
   })[code || ''] || '执行异常，未取得有效结果';
 
-export function observedUsage(report: Report | null) {
+export function observedUsage(report: Pick<Report, 'usage'> | null) {
   if (!report) return {
     calls: null, tokens: null, input: null, output: null,
     cachedInput: null, uncachedInput: null, cacheHitRate: null,

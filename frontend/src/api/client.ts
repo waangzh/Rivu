@@ -8,6 +8,7 @@ import type {
   Run,
   ReviewCreateRequest,
   ReviewPreviewResponse,
+  ReviewProgress,
   WorkItem,
 } from '../types/review';
 import type { ReviewCapabilities } from '../types/reviewPlan';
@@ -142,20 +143,30 @@ function retryableCreateError(error: unknown) {
 export async function createReview(
   input: ReviewCreateRequest,
   signal?: AbortSignal,
-  key = crypto.randomUUID(),
+  key: string = crypto.randomUUID(),
 ): Promise<Run> {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+  const timeout = setTimeout(cancel, 120_000);
   const init: RequestInit = {
     method: 'POST',
     headers: { 'Idempotency-Key': key },
     body: JSON.stringify(reviewBody(input)),
-    signal,
+    signal: controller.signal,
   };
 
   try {
-    return await request<Run>('/api/reviews', init);
-  } catch (error) {
-    if (aborted(signal, error) || !retryableCreateError(error)) throw error;
-    return request<Run>('/api/reviews', init);
+    try {
+      return await request<Run>('/api/reviews', init);
+    } catch (error) {
+      if (aborted(controller.signal, error) || !retryableCreateError(error)) throw error;
+      return await request<Run>('/api/reviews', init);
+    }
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', cancel);
   }
 }
 
@@ -168,6 +179,8 @@ export const previewReview = (input: ReviewCreateRequest, signal?: AbortSignal) 
   });
 export const getUnits = (id: string, signal?: AbortSignal) =>
   request<WorkItem[]>(reviewPath(id, '/units'), { signal });
+export const getProgress = (id: string, signal?: AbortSignal) =>
+  request<ReviewProgress>(reviewPath(id, '/progress'), { signal });
 export const getFindings = (id: string, signal?: AbortSignal) =>
   request<{
     findings: Finding[];

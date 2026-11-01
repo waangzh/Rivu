@@ -7,6 +7,7 @@ import "./styles/review-overview.css";
 import "./styles/pr-discussions.css";
 import "./styles/report-delivery.css";
 import "./styles/restored-workspace.css";
+import "./styles/review-progress.css";
 
 createApp(App).mount("#app");
 

@@ -20,6 +20,7 @@ const labels: Record<string, string> = {
   needs_human: "未确认",
   unresolved: "未确认",
   completed: "执行已完成",
+  partial: "已结束 · 部分完成",
   completed_with_warnings: "已结束 · 有限制",
   failed: "失败",
   timed_out: "已超时",
@@ -70,7 +71,7 @@ const EXECUTION_TONES: Record<string, string> = {
   resolving_evidence: "info", verifying_issues: "info", generating_patches: "info",
   completed: "success", passed: "success",
   failed: "danger", infrastructure_error: "danger",
-  timed_out: "warning", completed_with_warnings: "warning", warning: "warning",
+  timed_out: "warning", partial: "warning", completed_with_warnings: "warning", warning: "warning",
   validation_pending: "warning", waiting_for_human: "warning",
 };
 

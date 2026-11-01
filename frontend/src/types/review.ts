@@ -190,6 +190,11 @@ export interface ReviewUsage {
   committed_output_tokens?: number;
 }
 
+export interface ReviewProgress {
+  units: WorkItem[];
+  usage: ReviewUsage;
+}
+
 export interface Report {
   version: string;
   status: RunStatus;

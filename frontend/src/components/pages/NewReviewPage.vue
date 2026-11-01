@@ -17,13 +17,13 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <template>
 <section class="hero-import">
 <h1>粘贴 GitHub PR 链接，<br />直接发起只读代码审查。</h1>
-<p>服务端在创建后固定快照并运行审查。可选预览不会成为强制确认步骤。</p>
+<p>提交后会自动显示审查进度。系统先固定 PR 版本，再分析代码并独立核验疑似问题。</p>
 <form @submit.prevent="valid && options.focus.length && !busy && $emit('create')">
 <label class="field-label" for="pr-url">GitHub Pull Request 链接</label>
 <div class="hero-input">
 <input id="pr-url" class="input" type="url" required :value="prUrl" placeholder="https://github.com/owner/repo/pull/123" :disabled="busy" @input="$emit('update:prUrl', ($event.target as HTMLInputElement).value)" />
 <button class="btn primary" :disabled="!valid || !options.focus.length || busy">
-<AppIcon name="arrow-right" />开始审查</button>
+<AppIcon name="arrow-right" />{{ busy ? '正在提交…' : '开始审查' }}</button>
 </div>
 <p v-if="prUrl && !valid" class="input-error">请输入有效的 GitHub Pull Request 链接。</p>
 </form>
@@ -39,7 +39,7 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <div class="card-header">
 <div>
 <h2>审查偏好</h2>
-<p>创建请求直接提交当前配置，由服务端校验。</p>
+<p>可按需要调整审查重点、范围和用量上限。</p>
 </div>
 </div>
 <details>

@@ -27,17 +27,17 @@ const title = computed(() => {
   if (props.task.status === 'failed') return '审查中断，尚无完整结论';
   if (props.task.status === 'cancelled') return '审查已停止，保留已有结果';
   if (props.task.status === 'partial') return props.findings.length ? '发现问题，审查结论仍不完整' : '审查结论不完整';
-  if (props.findings.length) return '发现需要处理的已准入问题';
-  if (unresolved.value) return '存在尚未解决的候选问题';
+  if (props.findings.length) return '发现需要处理的已确认问题';
+  if (unresolved.value) return '存在尚未解决的疑似问题';
   return terminal(props.task.status) ? '在本轮已处理范围内未记录已确认问题' : '审查正在进行';
 });
 const overviewLabel = computed(() => ({
   pending: '等待生成变更总览',
-  running: '正在生成 LLM 变更总览，审查事实已保留',
-  ready: 'LLM 变更总览',
-  failed: 'LLM 总览未能生成，审查事实已保留',
-  skipped_deadline: '已到硬截止时间，未生成 LLM 总览',
-  skipped_cancelled: '审查已取消，未生成 LLM 总览',
+  running: '正在整理变更总览，已有审查结果已保留',
+  ready: '变更总览',
+  failed: '变更总览未能生成，已有审查结果已保留',
+  skipped_deadline: '已达到总期限，未生成变更总览',
+  skipped_cancelled: '审查已取消，未生成变更总览',
   skipped_empty: '没有可审查范围，未调用模型生成总览',
 }[props.report?.overview.status ?? 'pending']));
 const excluded = computed(() => Object.entries(props.report?.excluded || {}));
@@ -64,8 +64,8 @@ const omissionLabel = {
           <AppIcon name="shield" />本轮结论 · {{ terminal(task.status) ? '固定快照审查' : '执行中' }}
         </div>
         <h2>{{ title }}</h2>
-        <p class="ov-verdict__description">候选经过源码证据准入与独立核验；零问题不代表代码没有缺陷。</p>
-        <p v-if="unresolved" class="notice warn small">存在 {{ unresolved }} 个未决问题，请结合候选的缺失前提判断。</p>
+        <p class="ov-verdict__description">已确认问题经过源码证据检查与独立核验；零问题不代表代码没有缺陷。</p>
+        <p v-if="unresolved" class="notice warn small">仍有 {{ unresolved }} 个疑似问题尚未解决，请查看缺失的证据或前提。</p>
         <div class="ov-verdict__bottom">
           <div class="ov-verdict__meta">
             <span><AppIcon name="activity" />{{ phaseLabel(task.phase) }}</span>
@@ -134,23 +134,23 @@ const omissionLabel = {
         <div class="ov-metrics">
           <div class="ov-metric">
             <button class="ov-metric__head" @click="$emit('navigate', 'findings')">
-              <span class="ov-metric__title"><AppIcon name="shield" />已准入问题</span>
+              <span class="ov-metric__title"><AppIcon name="shield" />已确认问题</span>
               <strong :class="{ 'ov-count-danger': !!findings.length }">{{ findings.length }}</strong>
               <small>已保存来源与独立核验</small>
             </button>
           </div>
           <div class="ov-metric">
             <button class="ov-metric__head" @click="$emit('navigate', 'findings')">
-              <span class="ov-metric__title"><AppIcon name="help" />未决候选</span>
+              <span class="ov-metric__title"><AppIcon name="help" />待确认问题</span>
               <strong>{{ unresolved }}</strong>
               <small>缺失前提单独保留</small>
             </button>
           </div>
           <div class="ov-metric">
             <button class="ov-metric__head" @click="$emit('navigate', 'activity')">
-              <span class="ov-metric__title"><AppIcon name="units" />工作项</span>
+              <span class="ov-metric__title"><AppIcon name="units" />执行记录</span>
               <strong>{{ report?.units.length ?? '—' }}</strong>
-              <small>材料交付与执行分别记录</small>
+              <small>查看代码分析与问题核验进度</small>
             </button>
           </div>
         </div>

@@ -134,7 +134,7 @@ button { color: inherit; }
 .break-anywhere { overflow-wrap: anywhere; }
 /* 程序化聚焦用于屏幕阅读器定位，不为静态标题绘制焦点环。 */
 .rg-app :is(h1, h2, section, div)[tabindex='-1']:focus { outline: none; }
-.rg-app :is(h1, h2, section, div)[tabindex='-1']:focus-visible { outline: 3px solid rgba(50, 94, 235, .35); outline-offset: 2px; }
+.rg-app :is(section, div)[tabindex='-1']:focus-visible { outline: 3px solid rgba(50, 94, 235, .35); outline-offset: 2px; }
 .top-status { font-size: .8125rem; color: var(--muted); }
 .recent-identity { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .input-error { color: var(--danger); font-size: .8125rem; margin-top: 10px; overflow-wrap: anywhere; }

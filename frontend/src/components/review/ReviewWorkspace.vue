@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { getFindings, getPublicationPlan, getReport, getUnits } from '../../api/client';
-import type { Candidate, Finding, FindingDispositions, Report, Run, WorkItem } from '../../types/review';
+import { getFindings, getProgress, getPublicationPlan, getReport } from '../../api/client';
+import type { Candidate, Finding, FindingDispositions, Report, ReviewProgress, Run } from '../../types/review';
 import type { PublicationPlan } from '../../types/publication';
 import { reviewPrimarySections, type ReviewSection } from '../../types/workspace';
 import { executionErrorLabel, phaseLabel, safeGitHubLink, terminal } from '../../utils/nativeReview';
+import { initialReviewSection } from '../../utils/reviewProgress';
 import AppIcon from '../common/AppIcon.vue';
 import StatusBadge from '../common/StatusBadge.vue';
 import ReviewActivityPage from '../pages/ReviewActivityPage.vue';
@@ -13,10 +14,10 @@ import ReviewFindingsPage from '../pages/ReviewFindingsPage.vue';
 import ReviewOverviewPage from '../pages/ReviewOverviewPage.vue';
 import ReviewReportPage from '../pages/ReviewReportPage.vue';
 
-const props = defineProps<{ task: Run; section?: ReviewSection; busy?: boolean }>();
+const props = defineProps<{ task: Run; section?: ReviewSection; busy?: boolean; connectionError?: string }>();
 const emit = defineEmits<{ navigate: [value: ReviewSection]; cancel: []; retry: []; overviewRetry: []; rereview: [] }>();
 
-const localSection = ref<ReviewSection>('overview');
+const localSection = ref<ReviewSection>(initialReviewSection(props.task.status));
 const tab = computed({
   get: () => props.section ?? localSection.value,
   set: value => {
@@ -27,16 +28,54 @@ const tab = computed({
 const plan = ref<PublicationPlan | null>(null);
 const findings = ref<Finding[]>([]);
 const candidates = ref<Candidate[]>([]);
+const findingsLoaded = ref(false);
 const dispositions = ref<FindingDispositions>({});
-const units = ref<WorkItem[]>([]);
+const progress = ref<ReviewProgress | null>(null);
+const syncedAt = ref<number | null>(null);
+const progressError = ref('');
 const report = ref<Report | null>(null);
 const markdown = ref('');
 const error = ref('');
 const loading = ref(false);
 let controller: AbortController | null = null;
+let progressController: AbortController | null = null;
 let generation = 0;
+let progressGeneration = 0;
+let reloadQueued = false;
+let progressLoading = false, progressQueued = false;
+
+async function loadProgress() {
+  if (progressLoading) { progressQueued = true; return; }
+  const owner = ++progressGeneration;
+  const request = new AbortController();
+  progressController = request;
+  progressLoading = true;
+  try {
+    const result = await getProgress(props.task.id, request.signal);
+    if (owner !== progressGeneration) return;
+    progress.value = result;
+    syncedAt.value = Date.now();
+    progressError.value = '';
+  } catch {
+    if (owner === progressGeneration && !request.signal.aborted) {
+      progressError.value = '进度读取失败，当前显示的是上次取得的状态。';
+    }
+  } finally {
+    progressLoading = false;
+    if (owner === progressGeneration && progressQueued) {
+      progressQueued = false;
+      void loadProgress();
+    }
+  }
+}
+
+function refreshData() {
+  void loadProgress();
+  void load();
+}
 
 async function load() {
+  if (loading.value) { reloadQueued = true; return; }
   const id = props.task.id;
   const owner = ++generation;
   controller?.abort();
@@ -46,34 +85,48 @@ async function load() {
   error.value = '';
 
   try {
-    const [nextFindings, nextReport, nextUnits, nextPlan] = await Promise.all([
+    const results = await Promise.allSettled([
       getFindings(id, request.signal),
-      getReport(id, request.signal),
-      getUnits(id, request.signal),
-      getPublicationPlan(id, request.signal).catch(() => null),
+      props.task.report || terminal(props.task.status)
+        ? getReport(id, request.signal) : Promise.resolve({ report: null, markdown: '' }),
+      terminal(props.task.status) ? getPublicationPlan(id, request.signal) : Promise.resolve(null),
     ]);
     if (owner !== generation) return;
 
-    findings.value = nextFindings.findings;
-    candidates.value = nextFindings.candidates;
-    dispositions.value = nextFindings.dispositions;
-    report.value = nextReport.report;
-    markdown.value = nextReport.markdown;
-    units.value = nextUnits;
-    plan.value = nextPlan;
+    const [nextFindings, nextReport, nextPlan] = results;
+    if (nextFindings.status === 'fulfilled') {
+      findings.value = nextFindings.value.findings;
+      candidates.value = nextFindings.value.candidates;
+      dispositions.value = nextFindings.value.dispositions;
+      findingsLoaded.value = true;
+    }
+    if (nextReport.status === 'fulfilled') {
+      report.value = nextReport.value.report;
+      markdown.value = nextReport.value.markdown;
+    }
+    if (nextPlan.status === 'fulfilled') plan.value = nextPlan.value;
+    if (nextFindings.status === 'rejected' || nextReport.status === 'rejected') {
+      error.value = '部分结果暂时无法读取，已有内容会保留。';
+    }
   } catch (cause) {
     if (owner === generation && !request.signal.aborted) {
       error.value = cause instanceof Error ? cause.message : '结果读取失败';
     }
   } finally {
-    if (owner === generation) loading.value = false;
+    if (owner === generation) {
+      loading.value = false;
+      if (reloadQueued) { reloadQueued = false; void load(); }
+    }
   }
 }
 
-watch(() => [props.task.id, props.task.updated_at], () => { void load(); }, { immediate: true });
+// Work-item events can change progress without changing the run's updated_at.
+watch(() => props.task, refreshData, { immediate: true });
 onBeforeUnmount(() => {
   generation += 1;
+  progressGeneration += 1;
   controller?.abort();
+  progressController?.abort();
 });
 
 function exportReport() {
@@ -92,7 +145,7 @@ function exportReport() {
   <header class="pr-title">
     <div class="min0">
       <div class="eyebrow">{{ task.pr.owner }} / {{ task.pr.repo }} / PR #{{ task.pr.number }}</div>
-      <h1>{{ task.pr.title }}</h1>
+      <h1 tabindex="-1">{{ task.pr.title }}</h1>
       <div class="meta">
         <StatusBadge :status="task.status" />
         <span class="muted small">{{ phaseLabel(task.phase) }}</span>
@@ -105,7 +158,7 @@ function exportReport() {
       </a>
       <button v-if="!terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('cancel')">停止审查</button>
       <button v-if="task.status === 'failed' || task.status === 'partial'" class="btn secondary" :disabled="busy" @click="$emit('retry')">重试审查</button>
-      <button class="btn secondary" :disabled="busy" @click="$emit('rereview')">重新审查此 PR</button>
+      <button v-if="terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('rereview')">重新审查此 PR</button>
     </div>
   </header>
 
@@ -116,8 +169,9 @@ function exportReport() {
   </nav>
 
   <p v-if="error" class="notice warn space-bottom" role="alert">
-    {{ error }} <button class="link" @click="load">重试读取结果</button>
+    {{ error }} <button class="link" @click="refreshData">重试读取结果</button>
   </p>
+  <p v-if="connectionError" class="notice warn space-bottom" role="alert">{{ connectionError }}</p>
   <p v-if="task.error_code" class="notice warn space-bottom">
     {{ executionErrorLabel(task.error_code) }}。错误类别：<code>{{ task.error_code }}</code>；缺失与未知不能视为通过。
   </p>
@@ -125,7 +179,7 @@ function exportReport() {
   <ReviewOverviewPage v-if="tab === 'overview'" :task="task" :report="report" :findings="findings" :loading="loading" @navigate="tab = $event" @retry-overview="$emit('overviewRetry')" />
   <ReviewFilesPage v-else-if="tab === 'changes'" :task="task" :findings="findings" @finding="tab = 'findings'" />
   <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :dispositions="dispositions" :loading="loading" @update:dispositions="dispositions = $event" />
-  <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="units" :report="report" />
+  <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="progress?.units ?? []" :usage="progress?.usage" :report="report" :candidates="candidates" :findings-count="findings.length" :findings-loaded="findingsLoaded" :loaded="!!progress" :synced-at="syncedAt" :sync-error="connectionError || progressError" @navigate="tab = $event" @refresh="refreshData" />
   <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" @export="exportReport" />
 
   <footer v-if="tab !== 'publish'" class="app-footer">

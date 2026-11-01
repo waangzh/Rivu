@@ -46,6 +46,17 @@ async def get_units(task_id: str):
     return await asyncio.to_thread(_reviews.get_review_service().store.work_items, task_id)
 
 
+@router.get("/{task_id}/progress")
+async def get_progress(task_id: str):
+    await get_review(task_id)
+    store = _reviews.get_review_service().store
+    units, usage = await asyncio.gather(
+        asyncio.to_thread(store.work_items, task_id),
+        asyncio.to_thread(store.usage, task_id),
+    )
+    return {"units": units, "usage": usage}
+
+
 @router.delete("/{task_id}", status_code=204)
 async def delete_review(task_id: str):
     try:

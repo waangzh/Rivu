@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AppPage } from '../../types/operations'; import { reviewPrimarySections, type ReviewSection } from '../../types/workspace'; import AppIcon from '../common/AppIcon.vue'; import brandSymbol from '../../assets/repoguardian-symbol-color.svg'; import brandSymbolWhite from '../../assets/repoguardian-symbol-white.svg'; import { usePreferences } from '../../composables/usePreferences';
-const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: ReviewSection; hasReview: boolean; hasPreview?: boolean; taskActive: boolean; mobileOpen: boolean; busy: boolean }>(); defineEmits<{ 'update:modelValue': [page: AppPage]; section: [value: ReviewSection]; create: []; close: [] }>();
+const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: ReviewSection; hasReview: boolean; hasPending?: boolean; taskActive: boolean; mobileOpen: boolean; busy: boolean }>(); defineEmits<{ 'update:modelValue': [page: AppPage]; section: [value: ReviewSection]; create: []; close: [] }>();
 </script>
 <template>
 <aside id="workspace-sidebar" class="sidebar" :class="{ 'mobile-open': mobileOpen }" @keydown.esc="$emit('close')">
@@ -18,7 +18,7 @@ const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: 
 </div>
 <nav class="side-scroll" aria-label="主导航">
 <div class="nav-heading">工作区</div>
-<button class="side-link" :class="{ active: modelValue === 'dashboard' && !hasReview }" :disabled="taskActive || busy" @click="$emit('create')">
+<button class="side-link" :class="{ active: modelValue === 'dashboard' && !hasReview && !hasPending }" :disabled="taskActive || busy" @click="$emit('create')">
 <AppIcon name="plus" />
 <span class="nav-text">新建审查</span>
 </button>
@@ -28,7 +28,7 @@ const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: 
 </button>
 <div class="nav-divider" />
 <div class="nav-heading">当前 PR 审查</div>
-<button v-for="item in reviewPrimarySections" :key="item.id" class="side-link" :class="{ active: hasReview && modelValue === 'dashboard' && section === item.id }" :disabled="!hasReview" @click="$emit('section', item.id)">
+<button v-for="item in reviewPrimarySections" :key="item.id" class="side-link" :class="{ active: modelValue === 'dashboard' && (hasReview ? section === item.id : hasPending && item.id === 'activity') }" :disabled="!hasReview && !(hasPending && item.id === 'activity')" @click="$emit('section', item.id)">
 <AppIcon :name="item.icon" />
 <span class="nav-text">{{ item.label }}</span>
 </button>
