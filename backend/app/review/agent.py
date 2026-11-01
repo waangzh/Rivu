@@ -17,6 +17,7 @@ from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, 
 from app.review.domain import UnitCompletion, VerificationOutput, utcnow
 from app.review.findings import admit_verification
 from app.review.planner import tokens
+from app.review.observability import event, message_content, review_trace, stage
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped, verification_input_limit
 from app.review.tools import (
     READ_TOOLS, read_discussion, recall_context, record_investigation, submit_candidate,
@@ -57,6 +58,7 @@ class RequestGate(AgentMiddleware):
                                "the same rejected call. Return the required result tool if finished.",
             }
             context.note_tool_result(request.tool_call["name"], request.tool_call["args"], body)
+            event("tool.rejected", tool=request.tool_call["name"], reason=error, ok=False)
             result = ToolMessage(content=json.dumps(body), tool_call_id=request.tool_call["id"],
                                  name=request.tool_call["name"], status="error")
         await context.check_active()
@@ -81,6 +83,7 @@ class RequestGate(AgentMiddleware):
                 or context.model_calls >= context.provider.run.configuration.options.limits.model_calls):
             raise MissingStructuredResult
         context.structured_output_retry = True
+        event("agent.format_correction")
         schema_name = "UnitCompletion" if context.work.kind == "review" else "VerificationOutput"
         logger.warning(
             "模型未交付结构化结果，将在原预算内纠正一次 review_id=%.8s work_id=%.8s expected=%s",
@@ -233,7 +236,23 @@ class RequestGate(AgentMiddleware):
             context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"])
         pending, hunks = dict(context.pending), dict(context.pending_hunks)
         try:
-            response = await handler(request)
+            with stage("model.request", run_type="llm", ticket=ticket,
+                       call=context.model_calls, estimated_input_tokens=estimate,
+                       remaining_input_tokens=available["input_tokens"],
+                       remaining_output_tokens=available["output_tokens"],
+                       remaining_seconds=seconds, closing=closing) as observation:
+                observation.content(inputs={"messages": message_content(
+                    ([request.system_message] if request.system_message else []) + request.messages)})
+                event("context.projected", **context.window.metrics,
+                      investigation_questions=len(context.investigations),
+                      repeated_rounds=repeated)
+                for reason in closing_reasons:
+                    event("agent.closing", reason=reason)
+                response = await handler(request)
+                observed_message = next(
+                    (item for item in reversed(response.result) if isinstance(item, AIMessage)), None)
+                observation.usage(getattr(observed_message, "usage_metadata", None))
+                observation.content(outputs={"messages": message_content(response.result)})
         except asyncio.CancelledError:
             logger.info("模型请求取消 review_id=%.8s work_id=%.8s ticket=%.8s elapsed_ms=%.0f",
                         context.provider.run.id, context.work.id, ticket, (perf_counter() - started) * 1000)
@@ -276,6 +295,12 @@ class AgentRunner:
         self.model = model
 
     async def run(self, work, provider, budget):
+        with review_trace(provider.run, provider.lease):
+            with stage("agent.attempt", work_id=work.id, unit_id=work.unit_id,
+                       attempt_id=work.attempt_id, attempt=work.attempt, kind=work.kind):
+                return await self._run(work, provider, budget)
+
+    async def _run(self, work, provider, budget):
         context = AgentContext(provider=provider, work=work, budget=budget, window=WorkingContext())
         candidate = None
         started = perf_counter()
@@ -327,6 +352,14 @@ class AgentRunner:
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
                 "completed", output.model_dump(), None, provider.lease,
                 candidate=candidate, tool_calls=context.tool_calls)
+            if candidate:
+                event("candidate.verified", candidate_id=candidate.id, model_verdict=output.verdict,
+                      verdict=candidate.verification.verdict, reason=candidate.admission_reason,
+                      source_count=len(candidate.verification_sources),
+                      finding=candidate.finding is not None)
+            event("agent.finished", status="completed", model_calls=context.model_calls,
+                  tool_calls=context.tool_calls,
+                  unresolved=bool(output.unresolved_reason) if isinstance(output, UnitCompletion) else False)
             logger.info(
                 "Agent结果已提交 review_id=%.8s work_id=%.8s kind=%s elapsed_ms=%.0f "
                 "model_calls=%d tool_calls=%d verdict=%s finding=%s unresolved=%s",
@@ -336,6 +369,10 @@ class AgentRunner:
                 candidate.finding is not None if candidate else False,
                 bool(output.unresolved_reason) if isinstance(output, UnitCompletion) else False)
         except (LeaseLost, ReviewStopped, asyncio.CancelledError) as exc:
+            event("agent.stopped",
+                  status="cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted",
+                  reason="cancelled" if isinstance(exc, asyncio.CancelledError)
+                  else "lease_lost" if isinstance(exc, LeaseLost) else "review_stopped")
             logger.info("Agent停止 review_id=%.8s work_id=%.8s reason=%s",
                         provider.run.id, work.id, type(exc).__name__)
             raise
@@ -351,6 +388,9 @@ class AgentRunner:
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
                 "interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed", None, code,
                 provider.lease, tool_calls=context.tool_calls)
+            event("agent.finished",
+                  status="interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed",
+                  reason=code, model_calls=context.model_calls, tool_calls=context.tool_calls)
             logger.warning(
                 "Agent未完成 review_id=%.8s work_id=%.8s kind=%s code=%s error_type=%s "
                 "model_calls=%d tool_calls=%d elapsed_ms=%.0f",

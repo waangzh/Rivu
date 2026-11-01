@@ -18,6 +18,12 @@ export interface SystemDiagnostics {
   worker_status: 'running' | 'idle';
   artifact_directory_writable: boolean;
   langsmith_enabled: boolean;
+  langsmith: {
+    status: 'disabled' | 'missing_credentials' | 'pending' | 'active' | 'degraded';
+    capture_content: boolean;
+    last_success_at: string | null;
+    dropped_operations: number;
+  };
   retention_days: number;
   configured_secrets: Record<string, boolean>;
 }

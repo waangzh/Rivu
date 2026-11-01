@@ -45,11 +45,14 @@ class Settings(BaseSettings):
     rivu_pr_discussions_enabled: bool = True
 
 
-    # ---- LangSmith：显式启用会上传模型输入、源码工具结果与输出 ----
+    # ---- LangSmith：默认仅上传元数据，正文需要另行明确启用 ----
     rivu_langsmith_tracing: bool = False
+    rivu_langsmith_capture_content: bool = False
     langsmith_api_key: str | None = None
     langsmith_project: str = "rivu"
     langsmith_endpoint: str | None = None
+    rivu_langsmith_connect_timeout_seconds: float = Field(default=3, ge=0.1, le=60)
+    rivu_langsmith_read_timeout_seconds: float = Field(default=10, ge=0.1, le=60)
 
     # ---- 工作目录 ----
     rivu_workdir: Path = Path(__file__).resolve().parent.parent.parent / ".rivu" / "workspaces"

@@ -20,6 +20,15 @@ class ModelCatalogResponse(BaseModel):
     models: list[ProviderModelInfo]
 
 
+class LangSmithDiagnostics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["disabled", "missing_credentials", "pending", "active", "degraded"]
+    capture_content: bool
+    last_success_at: str | None
+    dropped_operations: int
+
+
 class SystemDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -31,6 +40,7 @@ class SystemDiagnostics(BaseModel):
     worker_status: Literal["running", "idle"]
     artifact_directory_writable: bool
     langsmith_enabled: bool
+    langsmith: LangSmithDiagnostics
     retention_days: int
     configured_secrets: dict[str, bool]
 

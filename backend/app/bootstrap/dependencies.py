@@ -50,6 +50,7 @@ def get_publication_service() -> PublicationService:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     from app.languages.isolation import close_parser_workers
+    from app.review.observability import close_observability
 
     service = get_review_service()
     repository = service.repository
@@ -70,3 +71,4 @@ async def lifespan(_app: FastAPI):
         await maintenance_task
         await service.close()
         await asyncio.to_thread(close_parser_workers)
+        await close_observability()

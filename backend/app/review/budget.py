@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from app.review.domain import utcnow
 from app.review.store import BudgetExceeded
+from app.review.observability import event, settlement
 
 
 @dataclass
@@ -19,11 +20,20 @@ class BudgetGate:
             raise BudgetExceeded("hard_deadline")
 
     async def reserve(self, work, estimate, *, overview=False, with_remaining=False):
-        return await asyncio.to_thread(self.store.reserve, self.run.id, work,
-                                      estimate, self.lease, overview=overview, with_remaining=with_remaining)
+        try:
+            result = await asyncio.to_thread(self.store.reserve, self.run.id, work,
+                                            estimate, self.lease, overview=overview,
+                                            with_remaining=with_remaining)
+        except BudgetExceeded as exc:
+            event("budget.rejected", reason=str(exc), estimated_input_tokens=estimate)
+            raise
+        event("budget.reserved", ticket=result[0] if with_remaining else result,
+              estimated_input_tokens=estimate)
+        return result
 
     async def headroom(self, work):
         return await asyncio.to_thread(self.store.request_headroom, self.run.id, work, self.lease)
 
     async def settle(self, ticket, usage):
-        await asyncio.to_thread(self.store.settle, self.run.id, ticket, usage, self.lease)
+        receipt = await asyncio.to_thread(self.store.settle, self.run.id, ticket, usage, self.lease)
+        settlement(ticket, receipt)

@@ -17,6 +17,7 @@ from app.review.index import OnDemandIndex
 from app.review.incremental import refine_plan
 from app.review.grouping import freeze_semantic_groups, grouping_files
 from app.review.orchestrator import ReviewOrchestrator
+from app.review.observability import event, review_trace, stage
 from app.review.planner import identity, plan_review
 from app.review.relations import change_relations
 from app.review.report import build_report, generate_overview
@@ -217,6 +218,10 @@ class ReviewService:
         run = await asyncio.to_thread(self.store.get, job.task_id)
         if run is None or run.status in TERMINAL:
             return
+        with review_trace(run, lease, kind=job.kind) as observation:
+            await self._execute_job(job, run, lease, observation)
+
+    async def _execute_job(self, job, run, lease, observation):
         cancel, repo, index = threading.Event(), None, None
         logger.info("审查作业开始 review_id=%.8s job_id=%.8s kind=%s attempt=%d",
                     run.id, job.id, job.kind, job.attempts)
@@ -224,7 +229,8 @@ class ReviewService:
             if (run.configuration.provider != self._provider._provider_name
                     or run.configuration.endpoint != self._provider._base_url):
                 raise NonRetryableJobError("review_provider_changed")
-            repo, changed, snapshot = await self._prepare(run.pr, run.id, cancel)
+            with stage("review.prepare"):
+                repo, changed, snapshot = await self._prepare(run.pr, run.id, cancel)
             if snapshot != run.snapshot or changed != run.changed_files:
                 raise NonRetryableJobError("fixed_snapshot_inputs_changed")
             model = self._provider.agent_model(run.configuration.model,
@@ -256,17 +262,23 @@ class ReviewService:
                 report.version = identity([report.version, report.overview.model_dump()])
                 report.usage = await asyncio.to_thread(self.store.usage, run.id)
                 await asyncio.to_thread(self.store.save_report, run.id, report, lease, finished=True)
+                observation.set(status=report.status)
             else:
                 await ReviewOrchestrator(self.store, AgentRunner(model)).run(run.id, provider, lease)
         except (ReviewStopped, LeaseLost) as exc:
+            observation.set(status="interrupted")
+            event("review.stopped", status="interrupted",
+                  reason="lease_lost" if isinstance(exc, LeaseLost) else "review_stopped")
             logger.info("审查作业停止 review_id=%.8s job_id=%.8s reason=%s",
                         run.id, job.id, type(exc).__name__)
             return
         except asyncio.CancelledError:
+            observation.set(status="cancelled")
             cancel.set()
             logger.info("审查作业取消 review_id=%.8s job_id=%.8s", run.id, job.id)
             raise
         except Exception as exc:
+            observation.set(status="failed")
             logger.error("审查作业失败 review_id=%.8s job_id=%.8s kind=%s error_type=%s",
                          run.id, job.id, job.kind, type(exc).__name__)
             await asyncio.to_thread(self.store.fail_run, run.id, "review_execution_failed", lease)

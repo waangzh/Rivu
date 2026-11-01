@@ -8,6 +8,10 @@ const emit = defineEmits<{ saved: [] }>();
 const { theme, density } = usePreferences();
 const state = ref<SystemDiagnostics | null>(null), error = ref(''), feedback = ref(''), busy = ref(false);
 const endpoint = ref(''), model = ref(''), retention = ref(30);
+const tracingLabels = {
+  disabled: '未启用', missing_credentials: '缺少凭据', pending: '等待首次上报',
+  active: '最近上报成功', degraded: '存在上报缺失',
+};
 let disposed = false;
 async function load() {
   busy.value = true; error.value = '';
@@ -38,7 +42,9 @@ onBeforeUnmount(() => { disposed = true; });
     </section>
     <section class="card card-pad"><div class="card-header"><h2>外观偏好</h2><AppIcon name="settings" /></div><div class="grid two"><label class="field-label">主题<select v-model="theme" class="select"><option value="light">浅色</option><option value="dark">深色</option></select></label><label class="field-label">信息密度<select v-model="density" class="select"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label></div><p class="field-hint">仅保存在当前浏览器，不改变审查结果或运行保护上限。</p></section>
   </div><aside class="plan-aside"><section class="card card-pad"><div class="card-header"><h2>服务状态</h2><AppIcon name="shield" /></div><p v-if="!state" class="muted" role="status">{{ busy ? '正在读取诊断…' : '诊断尚不可用' }}</p>
-    <template v-else><div v-for="item in [['数据库',state.database_schema_current?'当前结构':'需要执行迁移'],['审查 Worker',state.worker_status==='running'?'运行中':'空闲'],['模型凭据',state.configured_secrets.llm_provider?'已配置':'未配置'],['证据目录',state.artifact_directory_writable?'可写':'不可写'],['追踪上传',state.langsmith_enabled?'已启用':'未启用']]" :key="item[0]" class="aside-stat"><span class="muted">{{ item[0] }}</span><strong>{{ item[1] }}</strong></div></template>
+    <template v-else><div v-for="item in [['数据库',state.database_schema_current?'当前结构':'需要执行迁移'],['审查 Worker',state.worker_status==='running'?'运行中':'空闲'],['模型凭据',state.configured_secrets.llm_provider?'已配置':'未配置'],['证据目录',state.artifact_directory_writable?'可写':'不可写'],['追踪上传',tracingLabels[state.langsmith.status]]]" :key="item[0]" class="aside-stat"><span class="muted">{{ item[0] }}</span><strong>{{ item[1] }}</strong></div>
+      <p v-if="state.langsmith_enabled" class="muted small space-top">{{ state.langsmith.capture_content ? '追踪包含经脱敏、截断的模型消息和工具正文。' : '追踪仅上传结构化元数据。' }}<template v-if="state.langsmith.last_success_at">最近上报：{{ new Date(state.langsmith.last_success_at).toLocaleString() }}。</template><template v-if="state.langsmith.dropped_operations">缺失 {{ state.langsmith.dropped_operations }} 次上报操作，轨迹可能不完整。</template></p>
+    </template>
     <p class="notice small space-top">Rivu 不执行目标仓库代码、测试或构建。发布权限与只读审查凭据分别配置。</p>
   </section></aside></div>
 </template>

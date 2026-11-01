@@ -556,12 +556,13 @@ class ReviewStore:
             if row.work_item_id:
                 self._attempt(session, run_id, row.work_item_id, row.attempt_id)
             if row.state != "reserved":
-                return
+                return {"state": row.state, "usage": row.usage, "changed": False}
             if usage is not None:
                 for key in ("input_tokens", "output_tokens"):
                     if type(usage.get(key)) is not int or usage[key] < 0:
                         raise ValueError("invalid_usage")
             row.usage, row.state = usage, "settled" if usage is not None else "unknown"
+            return {"state": row.state, "usage": row.usage, "changed": True}
 
     def cancel(self, run_id):
         with self.sessions.begin() as session:

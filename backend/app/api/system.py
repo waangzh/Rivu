@@ -22,6 +22,7 @@ from app.models.operations import (
 from app.services.workspaces.maintenance_service import workspace_cleanup_lock, workspace_ttl_seconds
 from app.llm.model_catalog import ModelCatalogError, fetch_model_catalog
 from app.review.configuration import capabilities
+from app.review.observability import diagnostics as tracing_diagnostics
 from app.tools.workspace_cleanup import inspect_orphaned_workspaces, reap_orphaned_workspaces
 
 
@@ -81,6 +82,7 @@ async def get_system_diagnostics() -> SystemDiagnostics:
         worker_status="running" if worker_running else "idle",
         artifact_directory_writable=writable_target.exists() and os.access(writable_target, os.W_OK),
         langsmith_enabled=settings.rivu_langsmith_tracing,
+        langsmith=tracing_diagnostics(),
         retention_days=settings.rivu_retention_days,
         configured_secrets={
             "github": bool(settings.github_token),

@@ -6,6 +6,7 @@ from time import perf_counter
 
 from app.review.budget import BudgetGate
 from app.review.domain import utcnow
+from app.review.observability import event, review_trace, stage
 from app.review.report import build_report, generate_overview
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
 
@@ -17,6 +18,12 @@ class ReviewOrchestrator:
         self.store, self.runner = store, runner
 
     async def run(self, run_id, provider, lease):
+        with review_trace(provider.run, lease) as observation:
+            report = await self._run(run_id, provider, lease)
+            observation.set(status=report.status)
+            return report
+
+    async def _run(self, run_id, provider, lease):
         started = perf_counter()
         run = await asyncio.to_thread(self.store.begin, run_id, lease)
         provider.run = run
@@ -43,10 +50,12 @@ class ReviewOrchestrator:
                     for item in work_items:
                         if item.status in {"queued", "running"}:
                             await asyncio.to_thread(self.store.skip, run_id, item.id, "hard_deadline", lease)
+                            event("work.skipped", work_id=item.id, kind=item.kind, reason="hard_deadline")
                     break
                 for item in list(queued):
                     if item.kind == "review" and utcnow() >= run.review_cutoff:
                         await asyncio.to_thread(self.store.skip, run_id, item.id, "review_cutoff", lease)
+                        event("work.skipped", work_id=item.id, kind=item.kind, reason="review_cutoff")
                         logger.warning("工作项未启动 review_id=%.8s work_id=%.8s kind=%s reason=review_cutoff",
                                        run_id, item.id, item.kind)
                         queued.remove(item)
@@ -63,6 +72,7 @@ class ReviewOrchestrator:
                     if reason:
                         if not running:
                             await asyncio.to_thread(self.store.skip, run_id, item.id, reason, lease)
+                            event("work.skipped", work_id=item.id, kind=item.kind, reason=reason)
                             logger.warning("工作项未启动 review_id=%.8s work_id=%.8s kind=%s reason=%s",
                                            run_id, item.id, item.kind, reason)
                         continue
@@ -84,10 +94,13 @@ class ReviewOrchestrator:
                 task.cancel()
             await asyncio.gather(*running, return_exceptions=True)
         await asyncio.to_thread(self.store.assert_active, run_id, lease)
-        report = await asyncio.to_thread(build_report, run,
-            await asyncio.to_thread(self.store.work_items, run_id),
-            await asyncio.to_thread(self.store.candidates, run_id),
-            await asyncio.to_thread(self.store.usage, run_id))
+        with stage("review.report") as observation:
+            report = await asyncio.to_thread(build_report, run,
+                await asyncio.to_thread(self.store.work_items, run_id),
+                await asyncio.to_thread(self.store.candidates, run_id),
+                await asyncio.to_thread(self.store.usage, run_id))
+            observation.set(status=report.status, candidate_count=len(report.candidates),
+                            finding_count=len(report.findings), gap_count=len(report.reasons))
         await asyncio.to_thread(self.store.save_report, run_id, report, lease)
         logger.info("审查事实已保存 review_id=%.8s status=%s candidates=%d findings=%d gaps=%d",
                     run_id, report.status, len(report.candidates), len(report.findings), len(report.reasons))
@@ -97,6 +110,9 @@ class ReviewOrchestrator:
         from app.review.planner import identity
         report.version = identity([report.version, report.overview.model_dump()])
         await asyncio.to_thread(self.store.save_report, run_id, report, lease, finished=True)
+        event("review.finished", status=report.status, candidate_count=len(report.candidates),
+              finding_count=len(report.findings), gap_count=len(report.reasons),
+              unknown_calls=report.usage["unknown_calls"])
         logger.info(
             "审查结束 review_id=%.8s status=%s overview=%s candidates=%d findings=%d gaps=%d "
             "model_calls=%s input_tokens=%s output_tokens=%s unknown_calls=%s elapsed_ms=%.0f",

@@ -13,6 +13,7 @@ from app.review.findings import aggregate
 from app.review.overview_materials import overview_material
 from app.review.planner import identity, tokens
 from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
+from app.review.observability import message_content, stage
 
 logger = logging.getLogger("Rivu.Review.Overview")
 OVERVIEW_POLICY_VERSION = "change-first-prose-v1"
@@ -51,6 +52,13 @@ def build_report(run, work_items, candidates, usage):
 
 
 async def generate_overview(report, provider, budget, model):
+    with stage("review.overview", kind="overview") as observation:
+        result = await _generate_overview(report, provider, budget, model)
+        observation.set(status=result.status, omitted_sources=result.omitted.get("sources", 0))
+        return result
+
+
+async def _generate_overview(report, provider, budget, model):
     started = perf_counter()
     run_id = provider.run.id
     previous = provider.run.report
@@ -97,8 +105,12 @@ async def generate_overview(report, provider, budget, model):
                     run_id, ticket, estimate)
         structured = model.bind_tools([OverviewOutput], tool_choice="OverviewOutput")
         seconds = max(0, (provider.run.hard_deadline - utcnow()).total_seconds())
-        async with asyncio.timeout(seconds):
-            raw = await structured.ainvoke(messages)
+        with stage("model.request", run_type="llm", ticket=ticket) as observation:
+            observation.content(inputs={"messages": message_content(messages)})
+            async with asyncio.timeout(seconds):
+                raw = await structured.ainvoke(messages)
+            observation.usage(getattr(raw, "usage_metadata", None))
+            observation.content(outputs={"messages": message_content([raw])})
         usage = getattr(raw, "usage_metadata", None)
         await budget.settle(ticket, usage)
         logger.info("总览模型请求返回 review_id=%.8s ticket=%.8s input_tokens=%s output_tokens=%s elapsed_ms=%.0f",

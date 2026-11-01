@@ -10,6 +10,7 @@ from pydantic import Field, StrictInt
 from app.review.domain import Model, utcnow
 from app.review.planner import excluded_changes, plan_review, tokens
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
+from app.review.observability import event, message_content, settlement, stage
 
 logger = logging.getLogger("Rivu.Review.Grouping")
 
@@ -66,6 +67,14 @@ def grouped_plan(run, output=None, *, reason=None):
 
 
 async def freeze_semantic_groups(run, store, lease, model):
+    with stage("review.grouping") as observation:
+        result = await _freeze_semantic_groups(run, store, lease, model)
+        observation.set(status=result.plan.grouping_status, reason=result.plan.grouping_reason,
+                        unit_count=len(result.plan.units))
+        return result
+
+
+async def _freeze_semantic_groups(run, store, lease, model):
     """Never replay a request left unknown by a previous worker attempt."""
     if run.plan.grouping_status != "pending":
         return run
@@ -87,16 +96,21 @@ async def freeze_semantic_groups(run, store, lease, model):
         if ticket is None:
             reason = "previous_grouping_request_not_replayed"
         else:
+            event("budget.reserved", ticket=ticket, estimated_input_tokens=estimate)
             logger.info("分组请求开始 review_id=%.8s files=%d", run.id, len(files))
             structured = model.bind_tools([GroupingOutput], tool_choice="GroupingOutput")
             seconds = max(0, (run.review_cutoff - utcnow()).total_seconds())
-            async with asyncio.timeout(seconds):
-                raw = await structured.ainvoke([
-                    SystemMessage(content=GROUPING_PROMPT),
-                    HumanMessage(content=json.dumps(packet, ensure_ascii=False)),
-                ])
-            await asyncio.to_thread(store.settle, run.id, ticket,
-                                    getattr(raw, "usage_metadata", None), lease)
+            messages = [SystemMessage(content=GROUPING_PROMPT),
+                        HumanMessage(content=json.dumps(packet, ensure_ascii=False))]
+            with stage("model.request", run_type="llm", ticket=ticket) as observation:
+                observation.content(inputs={"messages": message_content(messages)})
+                async with asyncio.timeout(seconds):
+                    raw = await structured.ainvoke(messages)
+                observation.usage(getattr(raw, "usage_metadata", None))
+                observation.content(outputs={"messages": message_content([raw])})
+            receipt = await asyncio.to_thread(store.settle, run.id, ticket,
+                                              getattr(raw, "usage_metadata", None), lease)
+            settlement(ticket, receipt)
             if len(raw.tool_calls) != 1 or raw.tool_calls[0]["name"] != "GroupingOutput":
                 raise ValueError("grouping_schema")
             output = GroupingOutput.model_validate(raw.tool_calls[0]["args"])
@@ -107,7 +121,8 @@ async def freeze_semantic_groups(run, store, lease, model):
         logger.info("分组跳过 review_id=%.8s reason=%s", run.id, reason)
     except Exception as exc:
         if ticket is not None:
-            await asyncio.to_thread(store.settle, run.id, ticket, None, lease)
+            receipt = await asyncio.to_thread(store.settle, run.id, ticket, None, lease)
+            settlement(ticket, receipt)
         reason = "grouping_unavailable"
         logger.warning("分组降级 review_id=%.8s error_type=%s", run.id, type(exc).__name__)
     plan = await asyncio.to_thread(grouped_plan, run, output, reason=reason)

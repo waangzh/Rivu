@@ -14,6 +14,7 @@ from app.review.domain import CandidateInput
 from app.review.findings import admit_candidate
 from app.review.retrieval import find_paths, search
 from app.review.evidence import SourceReadError
+from app.review.observability import event, stage
 
 logger = logging.getLogger("Rivu.Review.Tools")
 
@@ -29,29 +30,51 @@ def bounded(function):
         bound.apply_defaults()
         arguments = {key: value for key, value in bound.arguments.items() if key != "runtime"}
         if context.investigation_closed and function.__name__ != "submit_candidate":
+            event("tool.rejected", tool=function.__name__, reason="investigation_closed", ok=False)
             result = {"ok": False, "error": "investigation_closed",
                       "next_action": "Return the required result tool using existing evidence; "
                       "state a concrete missing premise if the investigation is unfinished."}
             context.note_tool_result(function.__name__, arguments, result)
             return result
         if context.tool_calls > context.provider.run.configuration.options.limits.tool_calls:
+            event("tool.rejected", tool=function.__name__, reason="tool_call_limit", ok=False)
             logger.warning("工具调用被预算阻止 review_id=%.8s work_id=%.8s tool=%s reason=tool_call_limit",
                            context.provider.run.id, context.work.id, function.__name__)
             return {"ok": False, "error": "tool_call_limit"}
         if (context.window and context.window.checkpoint_pending
                 and function.__name__ not in {"record_investigation", "submit_candidate"}):
+            event("tool.rejected", tool=function.__name__, reason="context_checkpoint_required", ok=False)
             result = {"ok": False, "error": "context_checkpoint_required",
                       "next_action": "Record current questions, conclusions, counterevidence and "
                                      "missing premises before continuing, or return the final result."}
             context.note_tool_result(function.__name__, arguments, result)
             return result
         try:
-            result = await function(*args, **kwargs)
+            with stage("tool.execute", run_type="tool", tool=function.__name__) as observation:
+                observation.content(inputs=arguments)
+                result = await function(*args, **kwargs)
+                partial = result.get("partial")
+                if (result.get("scope_complete") is False or result.get("has_more") is True
+                        or result.get("truncated") is True):
+                    partial = True
+                observation.set(ok=result.get("ok") is True,
+                                source_count=len(context.visible) + len(context.pending),
+                                truncated=result.get("truncated"), partial=partial,
+                                scope_complete=result.get("scope_complete"),
+                                has_more=result.get("has_more"),
+                                **{f"{name}_count": len(result[plural])
+                                   for name, plural in (("match", "matches"), ("path", "paths"),
+                                                        ("edge", "edges"))
+                                   if isinstance(result.get(plural), list)})
+                observation.content(outputs=result)
         except SourceReadError as exc:
+            event("tool.rejected", tool=function.__name__, reason=exc.code, ok=False)
             logger.warning("工具调用被拒绝 review_id=%.8s work_id=%.8s tool=%s reason=%s",
                            context.provider.run.id, context.work.id, function.__name__, exc.code)
             result = {"ok": False, "error": exc.code, **exc.details}
         except (ValueError, OSError) as exc:
+            event("tool.rejected", tool=function.__name__,
+                  reason="source_or_submission_rejected", ok=False)
             logger.warning("工具调用被拒绝 review_id=%.8s work_id=%.8s tool=%s error_type=%s",
                            context.provider.run.id, context.work.id, function.__name__, type(exc).__name__)
             result = {"ok": False, "error": "source_or_submission_rejected"}
@@ -120,6 +143,8 @@ async def submit_candidate(proposal: CandidateInput, runtime: ToolRuntime[AgentC
     candidate = admit_candidate(proposal, context, runtime.tool_call_id)
     candidate_id = await asyncio.to_thread(context.provider.store.submit,
         context.provider.run.id, context.work, candidate, context.provider.lease)
+    event("candidate.submitted", candidate_id=candidate_id, status="unverified",
+          source_count=len(candidate.sources))
     context.submitted[candidate_id] = {
         "id": candidate_id, "claim": proposal.claim, "source_refs": proposal.source_refs,
     }

@@ -1,10 +1,23 @@
 import pytest
+from langsmith import tracing_context
 
+from app.core.config import settings
 from app.languages import isolation, parser_cache
 
 collect_ignore = ["fixtures"]
 
 pytest_plugins = ["tests.support.persistence", "tests.support.source_fixtures"]
+
+
+@pytest.fixture(autouse=True)
+def isolated_review_tracing(monkeypatch):
+    monkeypatch.setattr(settings, "rivu_langsmith_tracing", False)
+    monkeypatch.setattr(settings, "rivu_langsmith_capture_content", False)
+    for name in ("RIVU_LANGSMITH_TRACING", "RIVU_LANGSMITH_CAPTURE_CONTENT",
+                 "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2"):
+        monkeypatch.setenv(name, "false")
+    with tracing_context(enabled=False, parent=False):
+        yield
 
 
 @pytest.fixture(autouse=True)
