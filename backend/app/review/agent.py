@@ -152,20 +152,7 @@ class RequestGate(AgentMiddleware):
             tools = [tool for tool in tools if tool.name == "submit_candidate"]
         if context.tool_calls >= limits.tool_calls:
             tools = []
-        instruction = (
-            f"\n\nShared input/output tokens available before this request, after protecting "
-            f"verification and overview: {available['input_tokens'] if available['input_tokens'] is not None else 'unlimited'}/"
-            f"{available['output_tokens'] if available['output_tokens'] is not None else 'unlimited'}. "
-            f"Seconds to this role's cutoff: {seconds:.0f}. "
-            f"Remaining model requests including this one: {remaining}. "
-            f"Remaining Run model requests after protection: {available['model_calls'] if available['model_calls'] is not None else 'unlimited'}. "
-            f"Remaining tool calls: {max(0, limits.tool_calls - context.tool_calls)}. "
-            "Complete the necessary investigation; optional cost limits are not completion targets. "
-            "Time and per-agent call/tool fuses still apply. "
-            "All limits include structured output and correction requests. "
-            "Finish as soon as the necessary investigation is complete; do not repeat "
-            "reads or searches for source still present in the working context."
-        )
+        instruction = ""
         if context.window.checkpoint_pending and not closing:
             instruction += (
                 " Context checkpoint: before more investigation, call record_investigation to "
@@ -222,9 +209,9 @@ class RequestGate(AgentMiddleware):
                     " Confirm or refute only with the required supporting evidence; "
                     "otherwise return insufficient and identify the missing premise."
                 )
-        guidance = HumanMessage(content="Runtime guidance (trusted host):" + instruction,
-                                id=f"runtime-{ticket}")
-        request = request.override(tools=tools, messages=[*messages, guidance])
+        guidance = (HumanMessage(content="Runtime guidance (trusted host):" + instruction,
+                                 id=f"runtime-{ticket}") if instruction else None)
+        request = request.override(tools=tools, messages=[*messages, *([guidance] if guidance else [])])
         started = perf_counter()
         logger.info(
             "模型请求开始 review_id=%.8s work_id=%.8s kind=%s attempt_id=%.8s ticket=%.8s "
@@ -279,8 +266,8 @@ class RequestGate(AgentMiddleware):
         # A successful response proves the model received the full request packet.
         await context.acknowledge(pending, hunks)
         await context.persist()
-        # Keep the guidance at its original position in the append-only history.
-        return ModelResponse(result=[guidance, *response.result],
+        # Keep any guidance at its original position in the append-only history.
+        return ModelResponse(result=[*([guidance] if guidance else []), *response.result],
                              structured_response=response.structured_response)
 
 

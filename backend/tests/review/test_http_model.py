@@ -331,7 +331,7 @@ async def test_last_allowed_request_finishes_instead_of_starting_more_tools(
         model.root_async_client, model.async_client = sdk, sdk.chat.completions
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
     assert len(finalizations) == 1
-    assert "Remaining model requests including this one: 1" in finalizations[0]["messages"][-1]["content"]
+    assert "Close now because of call_fuse" in finalizations[0]["messages"][-1]["content"]
     assert report.status == ("partial" if unfinished else "completed")
     assert report.units[0].status == "completed"
     assert report.units[0].error_code is None
@@ -689,6 +689,9 @@ async def test_low_novelty_keeps_tools_for_a_specific_followup(tmp_path, role, i
             investigation_requests.append(payload)
             step = len(investigation_requests)
             assert {"read_file", "search_code"} <= names
+            if step == 1:
+                assert not any("Runtime guidance (trusted host):" in (message.get("content") or "")
+                               for message in payload["messages"])
             assert "Close now because of" not in payload["messages"][-1]["content"]
             if step <= 6 and investigation == "overlapping_reads":
                 name, result = "read_file", {
