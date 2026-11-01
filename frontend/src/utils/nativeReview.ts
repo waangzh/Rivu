@@ -24,16 +24,16 @@ export const phaseLabel = (phase: string) =>
 
 export const executionErrorLabel = (code: string | null) =>
   ({
-    ReviewBudgetExceeded: '达到审查预算，未完成范围保持未知',
+    ReviewBudgetExceeded: '达到审查预算，未完成审查单元保持未知',
     agent_model_limit: '达到单个 Agent 的模型调用上限，调查尚未完成',
     agent_structured_output_missing: '模型未返回有效的结构化结果，任务尚未完成',
-    model_call_limit: '达到整轮模型调用上限，未完成范围保持未知',
-    input_token_limit: '达到整轮输入 Token 上限，未完成范围保持未知',
-    output_token_limit: '达到整轮输出 Token 上限，未完成范围保持未知',
+    model_call_limit: '达到整轮模型调用上限，未完成审查单元保持未知',
+    input_token_limit: '达到整轮输入 Token 上限，未完成审查单元保持未知',
+    output_token_limit: '达到整轮输出 Token 上限，未完成审查单元保持未知',
     context_capacity: '模型上下文容量不足，调查尚未完成',
     tool_call_limit: '达到工具调用上限，调查尚未完成',
     agent_tool_loop: 'Agent 持续重复相同工具调用，未完成结构化收尾',
-    review_cutoff: '达到调查截止时间，未完成范围保持未知',
+    review_cutoff: '达到调查截止时间，未完成审查单元保持未知',
     hard_deadline: '达到本轮审查总期限',
     TimeoutError: '模型或工具调用超时',
     APITimeoutError: '模型请求超时',

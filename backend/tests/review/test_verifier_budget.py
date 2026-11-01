@@ -139,9 +139,9 @@ async def test_quoted_source_packet_fits_protected_reservation(tmp_path):
 
 
 @pytest.mark.parametrize(("context_tokens", "total_input_tokens", "unknown_input"), [
-    (16384, 100000, 0),
-    (64000, 20000, 0),
-    (64000, 30000, 10000),
+    (16384, OVERVIEW_INPUT + 94_000, 0),
+    (64000, OVERVIEW_INPUT + 14_000, 0),
+    (64000, OVERVIEW_INPUT + 24_000, 10000),
 ])
 async def test_small_verifier_starts_with_effective_input_budget(
     tmp_path, context_tokens, total_input_tokens, unknown_input,

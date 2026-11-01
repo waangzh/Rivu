@@ -47,12 +47,12 @@ const workLabel = { queued: '等待处理', running: '处理中', completed: '�
 const groupingLabel = { pending: '等待正式语义分组', deterministic: '确定性分组', model: '语义分组已冻结', fallback: '分组降级为逐文件审查' };
 const unitDescription = (id: string) => {
   const unit = props.task.plan.units.find(item => item.id === id);
-  return unit?.label || unit?.paths.join('、') || '审查范围';
+  return unit?.label || unit?.paths.join('、') || '审查单元';
 };
 const workPaths = (item: WorkItem) => {
   const unit = props.task.plan.units.find(entry => entry.id === item.unit_id);
   if (!unit) return '';
-  // 审查范围没有标签时标题已经显示路径，不再重复一行。
+  // 审查单元没有标签时标题已经显示路径，不再重复一行。
   return item.kind === 'verification' || unit.label ? unit.paths.join(' · ') : '';
 };
 const workDescription = (item: WorkItem) => item.kind === 'verification'
@@ -66,7 +66,7 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
   <section class="progress-summary card card-pad" aria-labelledby="progress-title">
     <div class="progress-eyebrow"><span v-if="!ended && !syncError" class="rg-live-dot" />审查进度</div>
     <h2 id="progress-title" aria-live="polite">{{ progressHeading(task) }}</h2>
-    <p class="progress-lead">{{ syncError ? '连接或进度同步出现异常，以下为最近取得的记录。' : ended ? '本轮处理已结束。请结合已确认问题、未完成范围和报告限制查看结果。' : task.status === 'queued' ? '任务已创建，等待后台继续处理。你可以离开页面，稍后从审查历史返回。' : reporting ? '代码分析阶段已结束，正在整理变更说明与审查结果。' : preparing ? '正在准备后台审查环境或确定范围，暂时没有可展示的分析结果。' : '系统正在读取固定版本源码，分析变更，并独立核验发现的疑似问题。' }}</p>
+    <p class="progress-lead">{{ syncError ? '连接或进度同步出现异常，以下为最近取得的记录。' : ended ? '本轮处理已结束。请结合已确认问题、未完成审查单元和报告限制查看结果。' : task.status === 'queued' ? '任务已创建，等待后台继续处理。你可以离开页面，稍后从审查历史返回。' : reporting ? '代码分析阶段已结束，正在整理变更说明与审查结果。' : preparing ? '正在准备后台审查环境或确定审查单元，暂时没有可展示的分析结果。' : '系统正在读取固定版本源码，分析变更，并独立核验发现的疑似问题。' }}</p>
     <div class="progress-facts">
       <span><AppIcon name="clock" />{{ ended ? '总用时' : '已用时' }} {{ elapsed }}</span>
       <span v-if="!ended"><AppIcon :name="syncError ? 'alert' : 'server'" />{{ syncLabel }}</span>
@@ -82,19 +82,19 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
 
   <div class="progress-columns space-top">
     <section class="card card-pad">
-      <div class="card-header"><h3>范围进展</h3><span class="muted small">代码分析</span></div>
-      <p v-if="!loaded" class="muted" role="status">正在读取审查范围…</p>
+      <div class="card-header"><h3>审查单元进展</h3><span class="muted small">代码分析</span></div>
+      <p v-if="!loaded" class="muted" role="status">正在读取审查单元…</p>
       <template v-else>
-        <p v-if="summary.total === null" class="progress-scope-count">正在确定审查范围</p>
-        <p v-else-if="!summary.total" class="progress-scope-count">没有可审查范围</p>
-        <p v-else class="progress-scope-count">已完成 <strong>{{ summary.completed }}</strong><span> / {{ summary.total }} 个范围</span></p>
-        <p class="muted small">范围数量只反映代码分析进展，不代表整体完成比例或剩余时间。</p>
+        <p v-if="summary.total === null" class="progress-scope-count">正在确定审查单元</p>
+        <p v-else-if="!summary.total" class="progress-scope-count">没有可审查单元</p>
+        <p v-else class="progress-scope-count">已完成 <strong>{{ summary.completed }}</strong><span> / {{ summary.total }} 个审查单元</span></p>
+        <p class="muted small">审查单元数量只反映代码分析进展，不代表整体完成比例或剩余时间。</p>
         <div class="progress-counts">
           <div v-if="!ended"><strong>{{ summary.reviewing }}</strong><span>正在分析</span></div>
           <div v-if="!ended"><strong>{{ summary.verifying }}</strong><span>正在核验</span></div>
-          <div><strong>{{ summary.unavailable }}</strong><span>未完成范围</span></div>
+          <div><strong>{{ summary.unavailable }}</strong><span>未完成审查单元</span></div>
         </div>
-        <p v-if="summary.unavailable" class="notice warn space-top">部分范围未完成，相关代码不能视为已通过审查。可在下方执行记录中查看原因。</p>
+        <p v-if="summary.unavailable" class="notice warn space-top">部分审查单元未完成，相关代码不能视为已通过审查。可在下方执行记录中查看原因。</p>
       </template>
     </section>
     <section class="card card-pad">
@@ -107,7 +107,7 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
           <div><strong>{{ summary.pending }}</strong><span>等待或正在核验</span></div>
           <div><strong>{{ summary.insufficient }}</strong><span>证据不足，尚未解决</span></div>
         </div>
-        <p v-if="!findingsCount" class="muted small space-top">{{ ended ? '未确认问题不代表代码没有缺陷，请同时查看范围与限制。' : '审查仍在进行，当前数量不代表最终结论。' }}</p>
+        <p v-if="!findingsCount" class="muted small space-top">{{ ended ? '未确认问题不代表代码没有缺陷，请同时查看审查单元与限制。' : '审查仍在进行，当前数量不代表最终结论。' }}</p>
       </template>
     </section>
   </div>
@@ -116,25 +116,25 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
     <h3>审查过程</h3>
     <ol class="progress-stages">
       <li data-state="done"><AppIcon name="check-circle" /><div><strong>固定 PR 版本</strong><p>本轮分析始终基于同一份源码快照。</p></div><span>已完成</span></li>
-      <li :data-state="task.plan.grouping_status === 'pending' ? ended ? 'stopped' : 'current' : 'done'"><AppIcon :name="task.plan.grouping_status === 'pending' ? 'units' : 'check-circle'" /><div><strong>确定审查范围</strong><p>{{ task.plan.grouping_status === 'pending' ? ended ? '本轮已结束，审查范围尚未确定。' : '正在组织相关文件，范围数量尚未确定。' : '已按变更内容组织需要调查的范围。' }}</p></div><span>{{ task.plan.grouping_status === 'pending' ? ended ? '未完成' : '处理中' : '已完成' }}</span></li>
+      <li :data-state="task.plan.grouping_status === 'pending' ? ended ? 'stopped' : 'current' : 'done'"><AppIcon :name="task.plan.grouping_status === 'pending' ? 'units' : 'check-circle'" /><div><strong>确定审查单元</strong><p>{{ task.plan.grouping_status === 'pending' ? ended ? '本轮已结束，审查单元尚未确定。' : '正在组织相关文件，审查单元数量尚未确定。' : '已按变更内容组织需要调查的审查单元。' }}</p></div><span>{{ task.plan.grouping_status === 'pending' ? ended ? '未完成' : '处理中' : '已完成' }}</span></li>
       <li :data-state="!ended && !preparing && !reporting ? 'current' : 'neutral'"><AppIcon name="code" /><div><strong>分析代码与核验问题</strong><p>两个过程可以交错进行；发现疑似问题后会独立核验。</p></div><span>{{ ended ? '已结束' : reporting ? '已结束' : preparing ? '等待处理' : '处理中' }}</span></li>
-      <li :data-state="reporting && !ended ? 'current' : 'neutral'"><AppIcon name="report" /><div><strong>整理审查结果</strong><p>汇总已确认问题、未完成范围和变更说明。</p></div><span>{{ ended ? '已结束' : reporting ? '处理中' : '等待处理' }}</span></li>
+      <li :data-state="reporting && !ended ? 'current' : 'neutral'"><AppIcon name="report" /><div><strong>整理审查结果</strong><p>汇总已确认问题、未完成审查单元和变更说明。</p></div><span>{{ ended ? '已结束' : reporting ? '处理中' : '等待处理' }}</span></li>
     </ol>
   </section>
 
   <section v-if="!ended" class="card card-pad space-top">
-    <div class="card-header"><h3>当前处理</h3><span class="muted small">可同时处理多个范围</span></div>
+    <div class="card-header"><h3>当前处理</h3><span class="muted small">可同时处理多个审查单元</span></div>
     <p v-if="!loaded" class="muted" role="status">正在读取执行记录…</p>
     <ul v-else-if="active.length" class="progress-current">
       <li v-for="item in active" :key="item.id"><AppIcon :name="item.kind === 'review' ? 'code' : 'shield'" /><div><strong>{{ workDescription(item) }}</strong><p v-if="workPaths(item)">{{ workPaths(item) }}</p></div><span>{{ item.kind === 'review' ? '分析中' : '核验疑似问题中' }}</span></li>
     </ul>
-    <p v-else class="muted">{{ reporting ? '正在整理结果，暂时没有分析或核验任务。' : preparing ? '尚在准备环境或组织范围，分析记录将在开始处理后显示。' : '暂未记录正在处理的范围，系统会继续同步后台状态。' }}</p>
+    <p v-else class="muted">{{ reporting ? '正在整理结果，暂时没有分析或核验任务。' : preparing ? '尚在准备环境或组织审查单元，分析记录将在开始处理后显示。' : '暂未记录正在处理的审查单元，系统会继续同步后台状态。' }}</p>
   </section>
 
   <details class="card card-pad progress-disclosure space-top">
-    <summary>所有范围与核验记录 <span>{{ loaded ? `${ordered.length} 项` : '读取中' }}</span></summary>
+    <summary>所有审查单元与核验记录 <span>{{ loaded ? `${ordered.length} 项` : '读取中' }}</span></summary>
     <p v-if="!loaded" class="muted space-top">正在读取执行记录…</p>
-    <p v-else-if="!ordered.length" class="muted space-top">{{ ended ? '本轮没有执行记录，请结合范围和结束原因查看结果。' : '准备期间尚无执行记录，开始分析后会在此显示。' }}</p>
+    <p v-else-if="!ordered.length" class="muted space-top">{{ ended ? '本轮没有执行记录，请结合审查单元和结束原因查看结果。' : '准备期间尚无执行记录，开始分析后会在此显示。' }}</p>
     <ol v-else class="rg-stage-list">
       <li v-for="item in ordered" :key="item.id">
         <StatusBadge :status="item.status" :label="workLabel[item.status]" />
@@ -142,7 +142,7 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
           <strong>{{ item.kind === 'review' ? '分析代码' : '核验疑似问题' }} · {{ workDescription(item) }}</strong>
           <p v-if="workPaths(item)" class="muted small">{{ workPaths(item) }}</p>
           <p class="rg-activity-meta"><span>{{ materialLabel[item.material_delivery] }}</span><span>尝试 {{ item.attempt }} 次</span><span>工具调用 {{ item.tool_calls }} 次</span></p>
-          <p v-if="item.reused_from" class="notice small">复用了此前已完成且源码一致的范围。历史问题仍由本轮独立核验。</p>
+          <p v-if="item.reused_from" class="notice small">复用了此前已完成且源码一致的审查单元。历史问题仍由本轮独立核验。</p>
           <p v-if="item.error_code" class="notice warn small">{{ executionErrorLabel(item.error_code) }}</p>
           <details v-if="item.error_code || item.reused_from || Object.keys(item.missing_material_reasons).length" class="space-top">
             <summary class="link">查看执行详情</summary>

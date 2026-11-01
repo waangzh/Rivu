@@ -29,7 +29,7 @@ const title = computed(() => {
   if (props.task.status === 'partial') return props.findings.length ? '发现问题，审查结论仍不完整' : '审查结论不完整';
   if (props.findings.length) return '发现需要处理的已确认问题';
   if (unresolved.value) return '存在尚未解决的疑似问题';
-  return terminal(props.task.status) ? '在本轮已处理范围内未记录已确认问题' : '审查正在进行';
+  return terminal(props.task.status) ? '在本轮已处理审查单元中未记录已确认问题' : '审查正在进行';
 });
 const overviewLabel = computed(() => ({
   pending: '等待生成变更总览',
@@ -38,7 +38,7 @@ const overviewLabel = computed(() => ({
   failed: '变更总览未能生成，已有审查结果已保留',
   skipped_deadline: '已达到总期限，未生成变更总览',
   skipped_cancelled: '审查已取消，未生成变更总览',
-  skipped_empty: '没有可审查范围，未调用模型生成总览',
+  skipped_empty: '没有可审查单元，未调用模型生成总览',
 }[props.report?.overview.status ?? 'pending']));
 const excluded = computed(() => Object.entries(props.report?.excluded || {}));
 const additions = computed(() => props.task.changed_files.reduce((sum, file) => sum + file.additions, 0));
@@ -158,13 +158,13 @@ const omissionLabel = {
     </div>
 
     <section class="ov-panel ov-boundary">
-      <header class="ov-section-head"><h2>范围与历史</h2></header>
+      <header class="ov-section-head"><h2>审查单元与历史</h2></header>
       <p class="ov-note"><AppIcon name="info" />只读静态审查。未执行目标仓库的测试、构建或脚本。</p>
       <p v-if="task.plan.incremental_from" class="ov-note">
-        本轮复用了此前完成且源码字节一致的范围，来源审查 <code>{{ task.plan.incremental_from }}</code>；
+        本轮复用了此前完成且源码字节一致的审查单元，来源审查 <code>{{ task.plan.incremental_from }}</code>；
         复用项在活动页单独标记。历史问题仍须本轮独立核验。
       </p>
-      <p v-else-if="task.plan.incremental_reason" class="muted small">本轮按全量范围执行：{{ task.plan.incremental_reason }}</p>
+      <p v-else-if="task.plan.incremental_reason" class="muted small">本轮按全量审查单元执行：{{ task.plan.incremental_reason }}</p>
       <p v-if="task.plan.history.length" class="ov-note">包含 {{ task.plan.history.length }} 条历史意见作为调查线索；历史结论不代表当前 Head 仍成立。</p>
       <ul v-if="report?.reasons.length" class="ov-limitations">
         <li v-for="reason in report.reasons" :key="reason">{{ reason }}</li>

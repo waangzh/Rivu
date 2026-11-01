@@ -191,7 +191,19 @@ class PreparedWorkspaces:
                 return False
             identity = uuid4().hex
             destination = self._path(PREPARED_WORKSPACE_PREFIX + identity)
-            path.rename(destination)
+            for attempt in range(3):
+                try:
+                    path.rename(destination)
+                    break
+                except PermissionError:
+                    # Windows 上目录内有 Defender/编辑器持有的句柄时无法重命名，稍后重试。
+                    if attempt == 2:
+                        logger.warning("准备工作区发布被占用，跳过缓存")
+                        return False
+                    time.sleep(0.1 * (attempt + 1))
+                except OSError:
+                    logger.warning("准备工作区发布失败，跳过缓存", exc_info=True)
+                    return False
             try:
                 _check_cancelled(cancel_event)
                 with self.sessions.begin() as session:

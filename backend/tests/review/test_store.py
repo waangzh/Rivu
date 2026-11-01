@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 
 from app.models.orm import ReviewTaskOrm, WorkerJobOrm
 from app.review.domain import utcnow
-from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
+from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
 from tests.review.vnext_helpers import setup_run, submit_candidate
 
 
@@ -89,7 +89,7 @@ def test_missing_or_invalid_cache_details_stay_unknown(tmp_path, cached):
 
 
 def test_cached_usage_remains_gross_for_budget_and_unknown_calls(tmp_path):
-    store, run, lease, sessions = setup_run(tmp_path, input_tokens=30000)
+    store, run, lease, sessions = setup_run(tmp_path, input_tokens=OVERVIEW_INPUT + 24_000)
     work = store.claim(run.id, store.work_items(run.id)[0].id, lease)
     ticket = store.reserve(run.id, work, 1000, lease)
     store.settle(run.id, ticket, {
@@ -180,7 +180,7 @@ def test_late_completion_cannot_turn_hard_timeout_into_completed(tmp_path):
 
 
 def test_request_budget_snapshot_keeps_verification_overview_and_unknown_usage(tmp_path):
-    store, run, lease, _ = setup_run(tmp_path, calls=4, input_tokens=30000)
+    store, run, lease, _ = setup_run(tmp_path, calls=4, input_tokens=OVERVIEW_INPUT + 24_000)
     work = store.claim(run.id, store.work_items(run.id)[0].id, lease)
     submit_candidate(store, run, lease, work)
     first, available = store.reserve(run.id, work, 1000, lease, with_remaining=True)
@@ -227,10 +227,10 @@ def test_optional_totals_do_not_stop_progress_or_reset_unknown_usage(tmp_path):
 
 
 def test_explicit_totals_still_block_when_actual_usage_exceeds_reservation(tmp_path):
-    store, run, lease, _ = setup_run(tmp_path, input_tokens=30_000)
+    store, run, lease, _ = setup_run(tmp_path, input_tokens=OVERVIEW_INPUT + 24_000)
     work = store.claim(run.id, store.work_items(run.id)[0].id, lease)
     ticket = store.reserve(run.id, work, 1000, lease)
-    store.settle(run.id, ticket, {"input_tokens": 40_000, "output_tokens": 50}, lease)
-    assert store.usage(run.id)["input_tokens"] == 40_000
+    store.settle(run.id, ticket, {"input_tokens": OVERVIEW_INPUT + 34_000, "output_tokens": 50}, lease)
+    assert store.usage(run.id)["input_tokens"] == OVERVIEW_INPUT + 34_000
     with pytest.raises(BudgetExceeded, match="input_token_limit"):
         store.reserve(run.id, work, 1000, lease)

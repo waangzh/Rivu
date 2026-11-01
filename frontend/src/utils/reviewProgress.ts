@@ -44,10 +44,10 @@ export function progressSummary(task: Run, units: WorkItem[], candidates: Candid
 export function progressHeading(task: Run) {
   if (task.status === 'cancelled') return '审查已停止';
   if (task.status === 'failed') return '审查未能完成';
-  if (task.status === 'partial') return '审查已结束，部分范围未完成';
+  if (task.status === 'partial') return '审查已结束，部分审查单元未完成';
   if (task.status === 'completed') return '审查已结束';
   if (task.status === 'queued') return '等待后台处理';
   if (task.phase === 'overview' || task.phase === 'report') return '正在整理审查结果';
-  if (task.phase === 'grouping' || task.phase === 'planning') return '正在确定审查范围';
+  if (task.phase === 'grouping' || task.phase === 'planning') return '正在确定审查单元';
   return '正在分析代码与核验问题';
 }

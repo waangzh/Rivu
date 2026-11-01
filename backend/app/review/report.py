@@ -16,7 +16,6 @@ from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewSt
 from app.review.observability import message_content, stage
 
 logger = logging.getLogger("Rivu.Review.Overview")
-OVERVIEW_POLICY_VERSION = "change-first-prose-v1"
 
 
 def build_report(run, work_items, candidates, usage):
@@ -70,9 +69,12 @@ async def _generate_overview(report, provider, budget, model):
         return Overview(status="skipped_deadline", error_code="hard_deadline")
     prompt = (Path(__file__).parent / "prompts" / "overview.md").read_text(encoding="utf-8")
     schema = OverviewOutput.model_json_schema()
-    # Include editorial instructions and schema in the existing 6000-token
-    # protection; the material ceiling itself must not grow with the prompt.
-    material_limit = OVERVIEW_INPUT - tokens([prompt, schema]) - 512 - 128
+    limits = provider.run.configuration.options.limits
+    input_limit = max(0, min(OVERVIEW_INPUT, limits.context_tokens - limits.output_tokens))
+    # Keep the original request margins proportional, including smaller contexts.
+    request_overhead = input_limit * 512 // 6000
+    material_headroom = input_limit * 128 // 6000
+    material_limit = max(0, input_limit - tokens([prompt, schema]) - request_overhead - material_headroom)
     try:
         packet, refs, omissions = await asyncio.to_thread(
             overview_material, report, provider, max_tokens=material_limit)
@@ -81,8 +83,7 @@ async def _generate_overview(report, provider, budget, model):
     except (ValueError, OSError):
         logger.warning("总览材料不可用 review_id=%.8s", run_id)
         return Overview(status="failed", error_code="overview_material_unavailable")
-    input_hash = identity({"policy": OVERVIEW_POLICY_VERSION, "prompt": prompt,
-                          "schema": schema, "materials": packet,
+    input_hash = identity({"prompt": prompt, "schema": schema, "materials": packet,
                           "omissions": [item.model_dump() for item in omissions]})
     if (previous and previous.overview.input_hash == input_hash
             and previous.overview.status in {"ready", "failed"}):
@@ -91,15 +92,14 @@ async def _generate_overview(report, provider, budget, model):
     overview = Overview(status="running", input_hash=input_hash, omitted=packet["omitted"],
                         omitted_materials=omissions)
     logger.info("总览材料准备完成 review_id=%.8s changes=%d sources=%d material_tokens=%d "
-                "omitted_changes=%d omitted_sources=%d policy=%s", run_id, len(packet["changes"]),
-                len(refs), tokens(packet), packet["omitted"]["changes"], packet["omitted"]["sources"],
-                OVERVIEW_POLICY_VERSION)
+                "omitted_changes=%d omitted_sources=%d", run_id, len(packet["changes"]),
+                len(refs), tokens(packet), packet["omitted"]["changes"], packet["omitted"]["sources"])
     report.overview = overview
     await asyncio.to_thread(provider.store.save_report, provider.run.id, report, provider.lease)
     ticket = None
     try:
         messages = [SystemMessage(content=prompt), HumanMessage(content=json.dumps(packet, ensure_ascii=False))]
-        estimate = tokens([prompt, packet, schema]) + 512
+        estimate = tokens([prompt, packet, schema]) + request_overhead
         ticket = await budget.reserve(None, estimate, overview=True)
         logger.info("总览模型请求开始 review_id=%.8s ticket=%.8s estimated_input_tokens=%d",
                     run_id, ticket, estimate)

@@ -16,7 +16,7 @@ from app.models.orm import (
 from app.review.domain import Candidate, Run, TERMINAL, WorkItem, utcnow
 from app.services.review.review_task_access import lock_live_review
 
-OVERVIEW_INPUT = 6000
+OVERVIEW_INPUT = 200_000
 # Maximum verifier initial packet; smaller contexts and remaining budgets lower it.
 VERIFICATION_INPUT = 20000
 MAX_CANDIDATES = 100

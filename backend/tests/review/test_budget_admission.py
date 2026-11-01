@@ -13,7 +13,7 @@ from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded
 from tests.review.vnext_helpers import setup_run, submit_candidate
 
 
-def setup_reviewers(tmp_path, *, calls=3, input_tokens=100000):
+def setup_reviewers(tmp_path, *, calls=3, input_tokens=OVERVIEW_INPUT + 94_000):
     store, run, lease, sessions = setup_run(tmp_path, calls=calls, input_tokens=input_tokens)
     run.plan.units.append(run.plan.units[0].model_copy(update={
         "id": "u2", "paths": ["b.py"], "required_hunk_ids": ["h2"]}))
@@ -71,6 +71,19 @@ def test_output_budget_without_verification_space_does_not_start_reviewer(tmp_pa
         store.claim(run.id, work.id, lease, check_budget=True)
     assert store.work_items(run.id)[0].status == "queued"
     assert store.usage(run.id)["model_calls"] == 0
+
+
+def test_reviewer_preserves_full_200k_overview_reservation(tmp_path):
+    store, run, lease, sessions = setup_run(tmp_path, input_tokens=200_000)
+    work = store.work_items(run.id)[0]
+    with pytest.raises(BudgetExceeded, match="input_token_limit"):
+        store.claim(run.id, work.id, lease, check_budget=True)
+    assert store.usage(run.id)["model_calls"] == 0
+    ticket = store.reserve(run.id, None, 200_000, lease, overview=True)
+    store.settle(run.id, ticket, None, lease)
+    usage = type(store)(sessions).usage(run.id)
+    assert usage["committed_input_tokens"] == 200_000
+    assert usage["unknown_calls"] == 1
 
 
 def test_parallel_reviewers_keep_both_late_candidate_first_requests(tmp_path):

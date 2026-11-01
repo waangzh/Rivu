@@ -10,11 +10,11 @@ from app.review.domain import (
     Candidate, CandidateInput, Configuration, Limits, Options, Plan, Run, Snapshot,
     SourceRef, Unit, utcnow,
 )
-from app.review.store import ReviewStore
+from app.review.store import OVERVIEW_INPUT, ReviewStore
 from app.services.review.task_queue import DatabaseTaskQueue
 
 
-def setup_run(tmp_path, *, calls=20, input_tokens=100000, concurrency=2):
+def setup_run(tmp_path, *, calls=20, input_tokens=OVERVIEW_INPUT + 94_000, concurrency=2):
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}",
                           connect_args={"check_same_thread": False, "timeout": 30})
     Base.metadata.create_all(engine)

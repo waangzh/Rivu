@@ -98,7 +98,7 @@ async function saveDisposition() {
     <EmptyState
       icon="shield"
       title="没有匹配的已确认问题"
-      :description="candidates.length ? '请同时查看疑似问题的核验记录，当前列表不能证明不存在缺陷。' : '未发现问题不能证明审查范围完整。'"
+      :description="candidates.length ? '请同时查看疑似问题的核验记录，当前列表不能证明不存在缺陷。' : '未发现问题不能证明审查单元覆盖完整。'"
     />
   </section>
 

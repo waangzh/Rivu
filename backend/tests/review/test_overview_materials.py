@@ -8,6 +8,7 @@ import pytest
 from app.models.review.diff import ChangedFile
 from app.review.budget import BudgetGate
 from app.review.domain import Report, Run, WorkItem, utcnow
+from app.review.evidence import digest, source_lines
 from app.review.overview_materials import MATERIAL_TOKENS, overview_material
 from app.review.planner import members, plan_review, tokens
 from app.review.report import build_report, generate_overview
@@ -26,6 +27,21 @@ def commit(repo, message):
     git(repo, "add", ".")
     git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", message)
     return git(repo, "rev-parse", "HEAD")
+
+
+def assert_verified_patch_sources(provider, packet, refs):
+    for item in packet["source_materials"]:
+        if not item.get("background_only"):
+            assert "content" not in item
+        assert item["source"] == refs[item["source_ref"]]
+    for change in packet["changes"]:
+        for side, handle in change["source_refs"].items():
+            ref, original = provider.evidence.read_source(refs[handle]["id"])
+            assert ref.model_dump() == refs[handle]
+            assert digest(original) == ref.content_hash
+            prefixes = (" ", "+") if side == "head" else (" ", "-")
+            projected = [line[1:] for line in change["patch"].split("\n") if line.startswith(prefixes)]
+            assert projected == [line.rstrip("\n") for line in source_lines(original)]
 
 
 @pytest.fixture
@@ -81,6 +97,28 @@ def test_real_onpar_changes_survive_unrelated_and_overlapping_background(onpar_r
     assert overview_material(report, provider) == (packet, refs, omissions)
 
 
+def test_verified_diff_keeps_full_evidence_without_duplicate_bodies(onpar_run):
+    _, _, _, provider, report = onpar_run
+    packet, refs, omissions = overview_material(report, provider)
+    assert not omissions
+    assert_verified_patch_sources(provider, packet, refs)
+
+
+@pytest.mark.parametrize(("newline", "final_newline"), [("\n", True), ("\r\n", False)])
+def test_split_changes_keep_side_ranges_and_archived_source(tmp_path, newline, final_newline):
+    base = newline.join(f"VALUE_{index} = {index}" for index in range(150))
+    head = newline.join(f"VALUE_{index} = {index + 1000}" for index in range(150))
+    if final_newline:
+        base, head = base + newline, head + newline
+    _, run, _, provider, _ = setup_source_run(tmp_path, base_source=base, head_source=head)
+    report = Report(version="d" * 64, status="completed", findings=[], candidates=[], units=[], excluded={})
+    packet, refs, omissions = overview_material(report, provider)
+    assert not omissions
+    assert len(packet["changes"]) >= 3
+    assert {ref["side"] for ref in refs.values()} == {"base", "head"}
+    assert_verified_patch_sources(provider, packet, refs)
+
+
 def test_adjacent_background_is_optional_and_does_not_duplicate_changes(onpar_run):
     _, _, _, provider, report = onpar_run
     adjacent = provider.evidence._read("src/clickllm/prove/stats.py", 430, 436, "head")["evidence"]["id"]
@@ -91,6 +129,9 @@ def test_adjacent_background_is_optional_and_does_not_duplicate_changes(onpar_ru
     assert len([item for item in packet["source_materials"] if item.get("background_only")]) == 1
     assert len(refs) == 5
     assert len({item["id"] for item in refs.values()}) == len(refs)
+    background = next(item for item in packet["source_materials"] if item.get("background_only"))
+    assert background["content"] == provider.evidence.read_source(adjacent)[1]
+    assert_verified_patch_sources(provider, packet, refs)
 
 
 def test_units_receive_capacity_before_redistribution(tmp_path):
@@ -179,6 +220,7 @@ def test_added_deleted_and_renamed_paths_keep_correct_source_sides(tmp_path):
     assert set(indexed["removed.py"]["source_refs"]) == {"base"}
     assert refs[indexed["new.py"]["source_refs"]["base"]]["path"] == "old.py"
     assert refs[indexed["new.py"]["source_refs"]["head"]]["path"] == "new.py"
+    assert_verified_patch_sources(provider, packet, refs)
 
 
 @pytest.mark.parametrize("error", [LeaseLost("lost"), ReviewStopped("cancelled")])
@@ -201,9 +243,11 @@ def test_hard_deadline_stops_source_reads(onpar_run, monkeypatch):
         overview_material(report, provider)
 
 
-async def test_policy_and_prompt_changes_invalidate_saved_overview(tmp_path, monkeypatch):
-    from app.review import report as report_module
-    store, run, lease, provider, _ = setup_source_run(tmp_path)
+async def test_prompt_and_material_changes_invalidate_saved_overview(tmp_path, monkeypatch):
+    context = "# unchanged context\n" * 8
+    store, run, lease, provider, _ = setup_source_run(tmp_path,
+        head_source="def ratio(x):\n    return 10 / x\n" + context,
+        base_source="def ratio(x):\n    return 10 / (x or 1)\n" + context)
     report = build_report(run, store.work_items(run.id), [], store.usage(run.id))
     budget = BudgetGate(store, run, lease)
     first = await generate_overview(report, provider, budget, ReviewModel())
@@ -212,17 +256,19 @@ async def test_policy_and_prompt_changes_invalidate_saved_overview(tmp_path, mon
     before = store.usage(run.id)["model_calls"]
     assert await generate_overview(report, provider, budget, ReviewModel()) == first
     assert store.usage(run.id)["model_calls"] == before
-    monkeypatch.setattr(report_module, "OVERVIEW_POLICY_VERSION", "next-policy")
-    changed = await generate_overview(report, provider, budget, ReviewModel())
-    assert changed.status == "ready" and changed.input_hash != first.input_hash
-    assert store.usage(run.id)["model_calls"] == before + 1
     original_read = Path.read_text
     def read_prompt(path, *args, **kwargs):
         text = original_read(path, *args, **kwargs)
         return text + "\nKeep necessary conditions." if path.name == "overview.md" else text
     monkeypatch.setattr(Path, "read_text", read_prompt)
+    changed = await generate_overview(report, provider, budget, ReviewModel())
+    assert changed.status == "ready" and changed.input_hash != first.input_hash
+    assert store.usage(run.id)["model_calls"] == before + 1
+    adjacent = provider.evidence._read("a.py", 6, 7, "head")["evidence"]["id"]
+    report.units[0].visible_source_ids.append(adjacent)
     newest = await generate_overview(report, provider, budget, ReviewModel())
     assert newest.status == "ready" and newest.input_hash != changed.input_hash
+    assert len(newest.sources) == len(changed.sources) + 1
     assert store.usage(run.id)["model_calls"] == before + 2
 
 
@@ -242,6 +288,53 @@ async def test_real_onpar_generation_fits_original_request_protection(onpar_run)
         assert request.reserved_input_tokens <= OVERVIEW_INPUT
 
 
+@pytest.mark.parametrize("context_tokens", [1_000_000, 8192])
+async def test_overview_keeps_large_changes_within_request_and_context_budget(tmp_path, context_tokens):
+    from sqlalchemy import select
+    from app.models.orm import ReviewRequestOrm, ReviewTaskOrm
+
+    source = "".join(f"# Guidance {index}: " + "inspect source before changing behavior " * 8 + "\n"
+                     for index in range(68))
+    unchanged = "# unchanged context\n" * 200
+    store, run, lease, provider, sessions = setup_source_run(
+        tmp_path, base_source=unchanged + "VALUE = 1\n",
+        head_source=source + unchanged + "VALUE = 2\n")
+    run.configuration.options.limits.context_tokens = context_tokens
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    report = build_report(run, store.work_items(run.id), [], store.usage(run.id))
+    overview = await generate_overview(report, provider, BudgetGate(store, run, lease), ReviewModel())
+    with sessions() as session:
+        request = session.scalar(select(ReviewRequestOrm).where(ReviewRequestOrm.run_id == run.id))
+        assert request.reserved_input_tokens <= min(
+            OVERVIEW_INPUT, context_tokens - run.configuration.options.limits.output_tokens)
+    if context_tokens == 1_000_000:
+        assert overview.status == "ready"
+        assert not overview.omitted_materials
+        assert any(ref.side == "head" and ref.start_line == 1 and ref.end_line >= 68
+                   for ref in overview.sources)
+        assert request.reserved_input_tokens > 6000
+    else:
+        assert overview.status == "ready"
+        assert overview.omitted_materials
+        assert all(item.reason == "material_capacity" for item in overview.omitted_materials)
+
+
+async def test_overview_rejects_output_larger_than_context_without_model_request(tmp_path):
+    from app.models.orm import ReviewTaskOrm
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    limits = run.configuration.options.limits
+    limits.context_tokens, limits.output_tokens = 8192, 32768
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    report = build_report(run, store.work_items(run.id), [], store.usage(run.id))
+    overview = await generate_overview(report, provider, BudgetGate(store, run, lease), ReviewModel())
+    assert overview.status == "failed"
+    assert overview.error_code == "context_capacity"
+    assert store.usage(run.id)["model_calls"] == 0
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 async def test_saved_overview_keeps_paragraphs_and_code_through_publication(tmp_path, newline):
     from langchain_core.messages import AIMessage
@@ -250,6 +343,7 @@ async def test_saved_overview_keeps_paragraphs_and_code_through_publication(tmp_
             return self
         async def ainvoke(self, messages):
             packet = json.loads(messages[1].content)
+            assert all("content" not in item for item in packet["source_materials"])
             handle = packet["source_materials"][0]["source_ref"]
             return AIMessage(content="", usage_metadata={"input_tokens": 100, "output_tokens": 50,
                 "total_tokens": 150}, tool_calls=[{"id": "overview", "name": "OverviewOutput", "args": {

@@ -29,7 +29,7 @@ async function withServer(fn) {
   try { await fn(server); } finally { await server.close(); }
 }
 
-test('运行记录进入进度页，终态进入概览；范围计数不混入核验工作', async () => {
+test('运行记录进入进度页，终态进入概览；审查单元计数不混入核验工作', async () => {
   await withServer(async server => {
     const { initialReviewSection, progressSummary, formatElapsed, progressHeading, reviewRecordMissing } = await server.ssrLoadModule('/src/utils/reviewProgress.ts');
     const { ApiError } = await server.ssrLoadModule('/src/api/client.ts');
@@ -46,11 +46,11 @@ test('运行记录进入进度页，终态进入概览；范围计数不混入�
     assert.equal(formatElapsed('2026-11-01T00:00:00Z', '2026-11-01T00:02:18Z'), '2 分 18 秒');
     assert.equal(formatElapsed('', Date.now()), '—');
     assert.equal(progressHeading({ ...task, phase: 'overview' }), '正在整理审查结果');
-    assert.equal(progressHeading(run('partial')), '审查已结束，部分范围未完成');
+    assert.equal(progressHeading(run('partial')), '审查已结束，部分审查单元未完成');
   });
 });
 
-test('进度页优先显示范围和核验，未加载状态不冒充零，技术用量折叠', async () => {
+test('进度页优先显示审查单元和核验，未加载状态不冒充零，技术用量折叠', async () => {
   await withServer(async server => {
     const { default: Page } = await server.ssrLoadModule('/src/components/pages/ReviewActivityPage.vue');
     const render = props => renderToString(createSSRApp(Page, { task: run(), units: units(), report: null, findingsCount: 0, ...props }));
@@ -59,7 +59,7 @@ test('进度页优先显示范围和核验，未加载状态不冒充零，技�
       usage: { model_calls: 1, input_tokens: null, output_tokens: null, unknown_calls: 1 },
     });
     assert.match(html, /正在分析代码与核验问题/);
-    assert.match(html, /已完成 <strong>1<\/strong><span> \/ 2 个范围/);
+    assert.match(html, /已完成 <strong>1<\/strong><span> \/ 2 个审查单元/);
     assert.match(html, /暂未确认问题/);
     assert.match(html, /不代表整体完成比例或剩余时间/);
     assert.match(html, /auth\.py/);
@@ -67,9 +67,9 @@ test('进度页优先显示范围和核验，未加载状态不冒充零，技�
     assert.doesNotMatch(html, /<script>/);
     assert.match(html, /<details[^>]*><summary>用量与执行详情/);
     assert.match(html, /总输入 Token<\/small><strong>未知<\/strong>/);
-    assert.ok(html.indexOf('范围进展') < html.indexOf('总输入 Token'));
+    assert.ok(html.indexOf('审查单元进展') < html.indexOf('总输入 Token'));
     const loading = await render({ loaded: false, findingsLoaded: false });
-    assert.match(loading, /正在读取审查范围/);
+    assert.match(loading, /正在读取审查单元/);
     assert.match(loading, /正在读取核验状态/);
     assert.doesNotMatch(loading, /已完成 <strong>0|暂未确认问题/);
     const unlabeled = run('completed');
@@ -88,7 +88,7 @@ test('取消、部分完成和连接中断分别表达；终态用时固定', as
     }));
     assert.match(html, /审查已停止/);
     assert.match(html, /总用时 3 分 0 秒/);
-    assert.match(html, /未完成范围/);
+    assert.match(html, /未完成审查单元/);
     assert.match(html, /相关代码不能视为已通过审查/);
     assert.match(html, /重试读取进度/);
     assert.match(html, /查看审查结果/);

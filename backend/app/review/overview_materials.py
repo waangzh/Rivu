@@ -5,10 +5,9 @@ from collections import deque
 from app.review.domain import OverviewOmission, SourceRef, utcnow
 from app.review.evidence import source_lines
 from app.review.planner import members, tokens
-from app.review.store import BudgetExceeded
+from app.review.store import OVERVIEW_INPUT, BudgetExceeded
 
-MATERIAL_TOKENS = 4500
-_HEADROOM = 128
+MATERIAL_TOKENS = OVERVIEW_INPUT * 3 // 4
 
 
 def _active(provider):
@@ -35,7 +34,7 @@ def _change(provider, unit_id, member):
         for line in member["lines"]:
             if line[key] is not None and actual[line[key] - start].rstrip("\n") != line["content"]:
                 raise ValueError("diff_source_mismatch")
-        sources.append({"source": result["evidence"], "content": result["content"]})
+        sources.append({"source": result["evidence"]})
     change = {
         "unit_id": unit_id, "member_id": member["id"],
         "path": member["path"], "old_path": member["old_path"],
@@ -67,6 +66,7 @@ def _with_change(payload, change, sources):
 def overview_material(report, provider, *, max_tokens=MATERIAL_TOKENS):
     """Return bounded model input and full local omission diagnostics separately."""
     max_tokens = min(max_tokens, MATERIAL_TOKENS)
+    headroom = max_tokens * 128 // 4500
     payload = {
         "snapshot": provider.run.snapshot.model_dump(), "changes": [], "source_materials": [],
         "findings": [], "decision_boundaries": [],
@@ -97,8 +97,8 @@ def overview_material(report, provider, *, max_tokens=MATERIAL_TOKENS):
           "verdict": candidate.verification.verdict if candidate.verification else "unverified"})
         for candidate in report.candidates if candidate.finding is None
     ]
-    decision_allowance = min(400, tokens(decisions)) if decisions else 0
-    core_limit = max_tokens - _HEADROOM - decision_allowance
+    decision_allowance = min(max_tokens * 400 // 4500, tokens(decisions)) if decisions else 0
+    core_limit = max_tokens - headroom - decision_allowance
     fair_share = max(0, (core_limit - tokens(payload)) // max(1, len(provider.run.plan.units)))
     pending = []
     for unit in provider.run.plan.units:
@@ -131,7 +131,7 @@ def overview_material(report, provider, *, max_tokens=MATERIAL_TOKENS):
                 omit(unit_id, member, "material_capacity")
     for section, item in decisions:
         trial = {**payload, section: [*payload[section], item]}
-        if tokens(trial) <= max_tokens - _HEADROOM:
+        if tokens(trial) <= max_tokens - headroom:
             payload = trial
         else:
             payload["omitted"][section] += 1
@@ -161,7 +161,7 @@ def overview_material(report, provider, *, max_tokens=MATERIAL_TOKENS):
         item = {"source_ref": f"S{len(selected) + 1}", "source": ref.model_dump(), "content": content,
                 "background_only": True}
         trial = {**payload, "source_materials": [*payload["source_materials"], item]}
-        if tokens(trial) <= max_tokens - _HEADROOM:
+        if tokens(trial) <= max_tokens - headroom:
             payload = trial
             selected.append(ref)
         else:

@@ -13,7 +13,7 @@ from app.review.context import AgentContext
 from app.review.domain import utcnow
 from app.review.grouping import FileGroup, GroupingOutput, freeze_semantic_groups, grouped_plan
 from app.review.planner import plan_review
-from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
+from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
 from tests.review.vnext_helpers import setup_run
 
 
@@ -140,7 +140,7 @@ async def test_grouping_is_frozen_before_dispatch_and_not_replayed(tmp_path):
 
 @pytest.mark.parametrize(("resource", "value", "reason"), [
     ("total_model_calls", 3, "model_call_limit"),
-    ("total_input_tokens", 26000, "input_token_limit"),
+    ("total_input_tokens", OVERVIEW_INPUT + VERIFICATION_INPUT, "input_token_limit"),
     ("total_output_tokens", 3 * 4096, "output_token_limit"),
 ])
 async def test_grouping_skips_before_spending_minimum_review_budget(tmp_path, resource, value, reason):

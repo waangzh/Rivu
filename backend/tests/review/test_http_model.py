@@ -12,6 +12,7 @@ from app.review.agent import AgentRunner
 from app.review.domain import utcnow
 from app.review.orchestrator import ReviewOrchestrator
 from app.review.planner import tokens
+from app.review.store import OVERVIEW_INPUT
 from tests.review.vnext_helpers import setup_source_run
 
 
@@ -530,7 +531,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
     if boundary == "input_tokens":
         # Isolate token-driven closing from strict-call discovery buffers.
         run.configuration.options.limits.total_model_calls = None
-        run.configuration.options.limits.total_input_tokens = 12000
+        run.configuration.options.limits.total_input_tokens = OVERVIEW_INPUT + 6000
         run.pr.body = "预算调查上下文。" * 100
     elif boundary == "output_tokens":
         # One discovery, one possible first verification, and the overview.
