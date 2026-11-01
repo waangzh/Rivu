@@ -134,6 +134,7 @@ export interface WorkItem {
   attempt_id: string | null;
   delivered_hunk_ids: string[];
   visible_source_ids: string[];
+  context_archive_uri: string | null;
   delivered_materials: Record<string, unknown>;
   missing_material_reasons: Record<string, string>;
   material_delivery: 'complete' | 'incomplete' | 'not_started';

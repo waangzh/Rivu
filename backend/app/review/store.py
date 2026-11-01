@@ -204,6 +204,7 @@ class ReviewStore:
             work.delivered_hunk_ids, work.missing_material_reasons = [], {}
             work.delivered_materials = {}
             work.visible_source_ids = []
+            work.context_archive_uri = None
             work.material_delivery, work.error_code = "not_started", None
             row.payload = work.model_dump(mode="json")
             run_row.current_phase, run_row.updated_at = work.kind, utcnow()
@@ -264,6 +265,14 @@ class ReviewStore:
                 saved.missing_material_reasons.pop(key, None)
             saved.material_delivery = ("complete" if required <= set(saved.delivered_hunk_ids)
                                        else "incomplete")
+            row.payload = saved.model_dump(mode="json")
+
+    def save_context(self, run_id, work, uri, lease):
+        with self.sessions.begin() as session:
+            self._guard(session, run_id, lease)
+            row = self._attempt(session, run_id, work.id, work.attempt_id)
+            saved = WorkItem.model_validate(row.payload)
+            saved.context_archive_uri = uri
             row.payload = saved.model_dump(mode="json")
 
     def finish_work(self, run_id, work, status, result, error, lease, *, candidate=None, tool_calls=0):
@@ -393,6 +402,13 @@ class ReviewStore:
             except BudgetExceeded as exc:
                 return str(exc)
             return None
+
+    def request_headroom(self, run_id, work, lease):
+        """Size initial context with the same protections used by atomic admission."""
+        with self.sessions.begin() as session:
+            row = self._guard(session, run_id, lease)
+            self._attempt(session, run_id, work.id, work.attempt_id)
+            return self._admit_request(session, self._run(row), work, 0, False)
 
     def reserve(self, run_id, work, estimate, lease, *, overview=False, with_remaining=False):
         with self.sessions.begin() as session:

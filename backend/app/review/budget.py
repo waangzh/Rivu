@@ -22,5 +22,8 @@ class BudgetGate:
         return await asyncio.to_thread(self.store.reserve, self.run.id, work,
                                       estimate, self.lease, overview=overview, with_remaining=with_remaining)
 
+    async def headroom(self, work):
+        return await asyncio.to_thread(self.store.request_headroom, self.run.id, work, self.lease)
+
     async def settle(self, ticket, usage):
         await asyncio.to_thread(self.store.settle, self.run.id, ticket, usage, self.lease)

@@ -56,6 +56,180 @@ async def test_real_provider_adapter_uses_tools_and_all_calls_have_tickets(tmp_p
     assert report.usage["cache_hit_rate"] == 0.6
 
 
+async def test_short_investigation_notes_preserve_cache_prefix_and_unresolved_result(tmp_path):
+    store, run, lease, provider, _ = setup_source_run(tmp_path, support_sources={
+        "consumer.py": "def consume():\n    return 42\n",
+    })
+    reviews = []
+    handle = None
+    notes = {
+        "question_id": "consumer-contract", "question": "Does the consumer constrain the input?",
+        "status": "resolved", "source_refs": [],
+        "conclusion": "Only a constant-returning consumer was found; this says nothing about others.",
+    }
+
+    def transport(request):
+        nonlocal handle
+        payload = json.loads(request.content)
+        names = {tool["function"]["name"] for tool in payload["tools"]}
+        if "OverviewOutput" in names:
+            name, result = "OverviewOutput", {
+                "change_overview": [{"text": "调整比例计算。", "source_refs": ["S1"]}],
+            }
+        else:
+            reviews.append(payload)
+            receipts = [json.loads(message["content"]) for message in payload["messages"]
+                        if message["role"] == "tool" and message["tool_call_id"] in {"call-1", "call-3"}]
+            if len(reviews) in {1, 3}:
+                if len(reviews) == 3:
+                    assert "return 42" in receipts[0]["content"]
+                    assert payload["messages"][:len(reviews[-2]["messages"])] == reviews[-2]["messages"]
+                    assert "record_investigation" in names
+                name, result = "read_file", {
+                    "path": "consumer.py", "revision": "head", "start": 1, "end": 2,
+                }
+            elif len(reviews) == 2:
+                handle = receipts[0]["source_ref"]
+                notes["source_refs"] = [handle]
+                name, result = "record_investigation", {"note": notes}
+            elif len(reviews) == 4:
+                assert receipts[-1]["source_ref"] == handle
+                assert receipts[-1]["content_omitted"] is True
+                name, result = "record_investigation", {
+                    "note": {**notes, "status": "open", "missing_premise": "Check other consumers."},
+                }
+            else:
+                assert "return 42" in receipts[0]["content"]
+                name, result = "UnitCompletion", {
+                    "unresolved_reason": "仍需确认其他消费者的输入约束。",
+                }
+        return httpx.Response(200, json={
+            "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": f"call-{len(reviews)}", "type": "function", "function": {
+                        "name": name, "arguments": json.dumps(result)},
+                }],
+            }}], "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105},
+        })
+
+    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client,
+                          max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert len(reviews) == 5
+    assert report.usage["model_calls"] == 6
+    assert report.status == "partial"
+    assert "unresolved_investigation" in report.reasons[0]
+    assert report.findings == []
+    assert report.units[0].tool_calls == 4
+    state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
+    assert state["investigations"]["consumer-contract"]["status"] == "open"
+    assert state["context_metrics"]["epoch"] == 0
+    assert len(state["receipts"]) == 4
+
+
+async def test_capacity_epochs_restore_archived_query_and_source_through_http_tools(tmp_path):
+    support = {
+        f"branch_{branch}.py": "\n".join(
+            f"ITEM_{index} = '{branch} alpha{index} beta{index} gamma{index} delta{index} epsilon{index}'"
+            for index in range(100)) + "\n"
+        for branch in range(4)
+    }
+    store, run, lease, provider, sessions = setup_source_run(tmp_path, support_sources=support)
+    run.configuration.options.limits.context_tokens = 24576
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    reviews = []
+    restored = []
+    action_step = 0
+    checkpoint_calls = 0
+    recall_call_id = None
+    reread_call_id = None
+
+    def transport(request):
+        nonlocal action_step, checkpoint_calls, recall_call_id, reread_call_id
+        payload = json.loads(request.content)
+        names = {tool["function"]["name"] for tool in payload["tools"]}
+        if "OverviewOutput" in names:
+            name, result = "OverviewOutput", {
+                "change_overview": [{"text": "调整比例计算。", "source_refs": ["S1"]}],
+            }
+        else:
+            reviews.append(payload)
+            assert payload["tools"] == reviews[0]["tools"]
+            checkpoint = " Context checkpoint:" in payload["messages"][-1]["content"]
+            if not checkpoint:
+                action_step += 1
+            step = action_step
+            if checkpoint:
+                checkpoint_calls += 1
+                name, result = "record_investigation", {"note": {
+                    "question_id": "remaining-consumers", "question": "Which consumer premises remain?",
+                    "status": "open", "source_refs": ["S1"],
+                    "conclusion": "The ratio source is known; remaining consumer contracts need inspection.",
+                    "missing_premise": "Read remaining consumers.",
+                }}
+            elif step == 1:
+                name, result = "search_code", {"query": "ratio", "path": "a.py", "revision": "base"}
+            elif step <= 5:
+                name, result = "read_file", {
+                    "path": f"branch_{step - 2}.py", "revision": "head", "start": 1, "end": 100,
+                }
+            elif step == 6:
+                states = [json.loads(message["content"]) for message in payload["messages"]
+                          if message["role"] == "user" and message["content"].startswith("{")]
+                ledger = next(state for state in states if "retrieval_receipts" in state)
+                receipt = next(item for item in ledger["retrieval_receipts"] if item["tool"] == "search_code")
+                assert receipt["arguments"]["revision"] == "base"
+                assert receipt["arguments"]["path"] == "a.py"
+                name, result = "recall_context", {"receipt_ref": receipt["receipt_ref"]}
+                recall_call_id = f"step-{len(reviews)}"
+            elif step == 7:
+                receipt = next(json.loads(message["content"]) for message in payload["messages"]
+                               if message.get("tool_call_id") == recall_call_id)
+                assert receipt["original"]["result"]["source"] == "search_hint"
+                assert receipt["original"]["arguments"]["revision"] == "base"
+                restored.append("query")
+                name, result = "read_file", {
+                    "path": "branch_0.py", "revision": "head", "start": 1, "end": 100,
+                }
+                reread_call_id = f"step-{len(reviews)}"
+            else:
+                receipt = next(json.loads(message["content"]) for message in payload["messages"]
+                               if message.get("tool_call_id") == reread_call_id)
+                assert receipt["content"] == support["branch_0.py"]
+                restored.append("source")
+                name, result = "UnitCompletion", {"unresolved_reason": "消费者的输入契约仍未查明。"}
+        return httpx.Response(200, json={
+            "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": f"step-{len(reviews)}", "type": "function", "function": {
+                        "name": name, "arguments": json.dumps(result)},
+                }],
+            }}], "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105},
+        })
+
+    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client,
+                          max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert restored == ["query", "source"]
+    assert checkpoint_calls >= 1
+    assert len(reviews) == 8 + checkpoint_calls
+    assert report.status == "partial"
+    state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
+    assert state["context_metrics"]["epoch"] >= 1
+    assert len(state["receipts"]) == 7 + checkpoint_calls
+    with sessions() as session:
+        assert len(list(session.scalars(select(ReviewRequestOrm)))) == report.usage["model_calls"] == 9 + checkpoint_calls
+
+
 @pytest.mark.parametrize("unfinished", [False, True])
 async def test_small_unit_checkpoint_keeps_tools_for_concrete_followup(tmp_path, unfinished):
     store, run, lease, provider, _ = setup_source_run(tmp_path, support_sources={

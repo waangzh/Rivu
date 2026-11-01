@@ -9,7 +9,7 @@ from typing import Literal
 
 from langchain.tools import ToolRuntime, tool
 
-from app.review.context import AgentContext, TOOL_LOOP_WARNING
+from app.review.context import AgentContext, InvestigationState, TOOL_LOOP_WARNING
 from app.review.domain import CandidateInput
 from app.review.findings import admit_candidate
 from app.review.retrieval import find_paths, search
@@ -38,6 +38,13 @@ def bounded(function):
             logger.warning("工具调用被预算阻止 review_id=%.8s work_id=%.8s tool=%s reason=tool_call_limit",
                            context.provider.run.id, context.work.id, function.__name__)
             return {"ok": False, "error": "tool_call_limit"}
+        if (context.window and context.window.checkpoint_pending
+                and function.__name__ not in {"record_investigation", "submit_candidate"}):
+            result = {"ok": False, "error": "context_checkpoint_required",
+                      "next_action": "Record current questions, conclusions, counterevidence and "
+                                     "missing premises before continuing, or return the final result."}
+            context.note_tool_result(function.__name__, arguments, result)
+            return result
         try:
             result = await function(*args, **kwargs)
         except SourceReadError as exc:
@@ -113,10 +120,45 @@ async def submit_candidate(proposal: CandidateInput, runtime: ToolRuntime[AgentC
     candidate = admit_candidate(proposal, context, runtime.tool_call_id)
     candidate_id = await asyncio.to_thread(context.provider.store.submit,
         context.provider.run.id, context.work, candidate, context.provider.lease)
+    context.submitted[candidate_id] = {
+        "id": candidate_id, "claim": proposal.claim, "source_refs": proposal.source_refs,
+    }
     context.note_tool_result("submit_candidate", {}, {"ok": True, "candidate_id": candidate_id})
     logger.info("候选已保存并排队核验 review_id=%.8s work_id=%.8s candidate_id=%.8s",
                 context.provider.run.id, context.work.id, candidate_id)
     return {"ok": True, "candidate_id": candidate_id, "status": "unverified"}
+
+
+@tool
+@bounded
+async def record_investigation(note: InvestigationState, runtime: ToolRuntime[AgentContext]) -> dict:
+    """Save or replace a question's compact notes, not a finding or completion verdict.
+
+    Record supporting source_refs, counterevidence_refs, bounded retrieval_refs and scope.
+    depends_on links prerequisite question IDs; outcome is separate from progress status.
+    Notes guide batched context compaction. Open/blocked questions keep their premises.
+    Use at branch changes or a context checkpoint, preferably alongside the next read.
+    Submit supported defects separately with submit_candidate.
+    """
+    context = runtime.context
+    context.resolve(list(set(note.source_refs + note.counterevidence_refs)))
+    if (not set(note.retrieval_refs) <= context.visible_receipts
+            or not set(note.candidate_ids) <= context.submitted.keys()):
+        raise ValueError("investigation_reference_not_received")
+    context.investigations[note.question_id] = note
+    context.memory_revision += 1
+    return {"ok": True, "investigation": note.model_dump()}
+
+
+@tool
+@bounded
+async def recall_context(receipt_ref: str, runtime: ToolRuntime[AgentContext]) -> dict:
+    """Restore an archived tool receipt received in this attempt, using its R handle.
+
+    Preserves exact query/snapshot/scope and pagination. Search and relation results
+    remain hints, never source evidence. Use read_file or read_diff for source bytes.
+    """
+    return await runtime.context.recall(receipt_ref)
 
 
 @tool

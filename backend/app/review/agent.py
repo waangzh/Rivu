@@ -16,9 +16,12 @@ from app.core.config import settings
 from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
 from app.review.domain import UnitCompletion, VerificationOutput, utcnow
 from app.review.findings import admit_verification
-from app.review.planner import tokens, unit_capacity
+from app.review.planner import tokens
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped, verification_input_limit
-from app.review.tools import READ_TOOLS, read_discussion, submit_candidate
+from app.review.tools import (
+    READ_TOOLS, read_discussion, recall_context, record_investigation, submit_candidate,
+)
+from app.review.working_context import WorkingContext
 
 logger = logging.getLogger("RepoGuardian.Review.Agent")
 
@@ -57,6 +60,13 @@ class RequestGate(AgentMiddleware):
             result = ToolMessage(content=json.dumps(body), tool_call_id=request.tool_call["id"],
                                  name=request.tool_call["name"], status="error")
         await context.check_active()
+        if isinstance(result, ToolMessage):
+            fields = request.tool.tool_call_schema.model_fields if request.tool else {}
+            arguments = {name: field.get_default(call_default_factory=True)
+                         for name, field in fields.items() if not field.is_required()}
+            arguments.update(request.tool_call["args"])
+            result = await context.archive_tool(
+                request.tool_call["name"], arguments, result)
         return result
 
     @hook_config(can_jump_to=["model"])
@@ -91,17 +101,26 @@ class RequestGate(AgentMiddleware):
         limits = context.provider.run.configuration.options.limits
         schema = request.response_format.schema
         tools = request.tools
-        messages = context.compact_messages(request.messages)
+        def estimate_packet(messages):
+            return request_input_tokens(
+                ([request.system_message] if request.system_message else []) + messages,
+                tools, schema) + 1024
+
+        input_limit = limits.context_tokens - limits.output_tokens
+        messages = context.window.project(context, request.messages, estimate_packet, input_limit)
+        await context.persist()
         # Reserve the full packet, including all tools and room for budget guidance.
-        estimate = request_input_tokens(
-            ([request.system_message] if request.system_message else []) + messages, tools, schema) + 1024
+        estimate = estimate_packet(messages)
         try:
             ticket, available = await context.budget.reserve(context.work, estimate, with_remaining=True)
         except BudgetExceeded as exc:
-            logger.warning(
-                "模型请求被预算阻止 review_id=%.8s work_id=%.8s attempt_id=%.8s reason=%s",
-                context.provider.run.id, context.work.id, context.work.attempt_id, str(exc))
-            raise
+            if str(exc) in {"context_capacity", "input_token_limit"}:
+                messages = context.window.project(
+                    context, request.messages, estimate_packet, input_limit, force=True)
+                estimate = estimate_packet(messages)
+                ticket, available = await context.budget.reserve(context.work, estimate, with_remaining=True)
+            else:
+                raise
         context.model_calls += 1
         remaining = available["agent_model_calls"]
         call_remaining = min(remaining, available["model_calls"]) if available["model_calls"] is not None else remaining
@@ -145,8 +164,18 @@ class RequestGate(AgentMiddleware):
             "Time and per-agent call/tool fuses still apply. "
             "All limits include structured output and correction requests. "
             "Finish as soon as the necessary investigation is complete; do not repeat "
-            "reads or searches for already received evidence."
+            "reads or searches for source still present in the working context."
         )
+        if context.window.checkpoint_pending and not closing:
+            instruction += (
+                " Context checkpoint: before more investigation, call record_investigation to "
+                "preserve the questions already checked, their scoped conclusions, counterevidence "
+                "and the specific questions/premises still open. Link all relevant source_refs and "
+                "prerequisite questions. This is necessary to continue after old history is archived. "
+                "Tool definitions stay unchanged, but investigation execution pauses until the note "
+                "is saved. If the necessary investigation "
+                "is already complete, return the final result directly instead of creating notes."
+            )
         if repeated >= TOOL_LOOP_WARNING:
             instruction += (
                 f" The last {repeated} tool rounds repeated identical calls with identical results. "
@@ -204,6 +233,17 @@ class RequestGate(AgentMiddleware):
             context.provider.run.id, context.work.id, context.work.kind, context.work.attempt_id,
             ticket, context.model_calls, limits.model_calls, estimate, available["input_tokens"],
             available["output_tokens"], seconds, closing, ",".join(closing_reasons) or "-")
+        logger.info(
+            "上下文投影 review_id=%.8s work_id=%.8s original_tokens=%d projected_tokens=%d "
+            "saved_tokens=%d investigation_questions=%d epoch=%d compacted=%s pressure=%s "
+            "shared_message_prefix_tokens=%d pressure_reason=%s minimum_reclaim_tokens=%d "
+            "restored_sources=%d",
+            run.id, context.work.id, context.window.metrics["original_input_tokens"],
+            context.window.metrics["projected_input_tokens"], context.window.metrics["saved_input_tokens"],
+            len(context.investigations), context.window.epoch, context.window.metrics["compacted"],
+            context.window.metrics["pressure"], context.window.metrics["shared_message_prefix_tokens"],
+            context.window.metrics["pressure_reason"] or "-",
+            context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"])
         pending, hunks = dict(context.pending), dict(context.pending_hunks)
         try:
             response = await handler(request)
@@ -220,6 +260,9 @@ class RequestGate(AgentMiddleware):
             raise
         message = next((item for item in reversed(response.result) if isinstance(item, AIMessage)), None)
         usage = getattr(message, "usage_metadata", None)
+        context.window.observe_response(
+            usage["input_tokens"] if usage else None, usage["output_tokens"] if usage else None,
+            perf_counter() - started, settings.repoguardian_model_request_timeout_seconds)
         await context.budget.settle(ticket, usage)
         called_tools = {call["name"] for call in message.tool_calls} if message else set()
         tool_names = [tool.name for tool in tools if tool.name in called_tools]
@@ -235,6 +278,7 @@ class RequestGate(AgentMiddleware):
         await context.check_active()
         # A successful response proves the model received the full request packet.
         await context.acknowledge(pending, hunks)
+        await context.persist()
         # Keep the guidance at its original position in the append-only history.
         return ModelResponse(result=[guidance, *response.result],
                              structured_response=response.structured_response)
@@ -245,14 +289,14 @@ class AgentRunner:
         self.model = model
 
     async def run(self, work, provider, budget):
-        context = AgentContext(provider=provider, work=work, budget=budget)
+        context = AgentContext(provider=provider, work=work, budget=budget, window=WorkingContext())
         candidate = None
         started = perf_counter()
         logger.info("Agent开始 review_id=%.8s work_id=%.8s unit_id=%.8s kind=%s attempt=%d attempt_id=%.8s",
                     provider.run.id, work.id, work.unit_id, work.kind, work.attempt, work.attempt_id)
         try:
             role = "reviewer" if work.kind == "review" else "verifier"
-            tools = list(READ_TOOLS)
+            tools = [*READ_TOOLS, record_investigation, recall_context]
             if role == "reviewer":
                 tools.append(submit_candidate)
             if provider.run.configuration.options.include_pr_discussions and provider.discussions:
@@ -263,11 +307,14 @@ class AgentRunner:
                 candidate = next(item for item in await asyncio.to_thread(
                     provider.store.candidates, provider.run.id) if item.id == work.candidate_id)
             limits = provider.run.configuration.options.limits
-            request_budget = max(1, min(unit_capacity(limits),
-                                       limits.context_tokens - limits.output_tokens - 1024))
+            request_budget = context.window.initial_budget(limits)
             if role == "verifier":
                 usage = await asyncio.to_thread(provider.store.usage, provider.run.id)
-                request_budget = verification_input_limit(limits, usage["committed_input_tokens"])
+                request_budget = min(context.window.initial_ceiling(limits),
+                    verification_input_limit(limits, usage["committed_input_tokens"]))
+            if limits.total_input_tokens is not None:
+                headroom = await budget.headroom(work)
+                request_budget = min(request_budget, max(1, headroom["input_tokens"] - 1024))
             initial_message = HumanMessage(content="", id=work.attempt_id)
             def estimate_initial(packet):
                 return request_input_tokens([SystemMessage(content=prompt),
@@ -275,6 +322,7 @@ class AgentRunner:
                         "content": json.dumps(packet, ensure_ascii=False)})], tools, schema)
             initial = await provider.initial(context, candidate, request_budget=request_budget,
                                              estimate_request=estimate_initial)
+            context.initial_packet = initial
             agent = create_agent(self.model, tools=tools, system_prompt=prompt,
                 response_format=ToolStrategy(schema), middleware=[RequestGate()],
                 context_schema=AgentContext, name=role)

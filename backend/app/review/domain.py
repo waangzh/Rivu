@@ -53,7 +53,7 @@ class Configuration(Model):
     endpoint: str
     model: str
     options: Options
-    prompt_version: str = "review-vnext-4"
+    prompt_version: str = "review-vnext-7"
 
 
 class Snapshot(Model):
@@ -184,6 +184,7 @@ class WorkItem(Model):
     delivered_hunk_ids: list[str] = Field(default_factory=list)
     delivered_materials: dict[str, str] = Field(default_factory=dict)
     visible_source_ids: list[str] = Field(default_factory=list)
+    context_archive_uri: str | None = None
     missing_material_reasons: dict[str, str] = Field(default_factory=dict)
     material_delivery: Literal["complete", "incomplete", "not_started"] = "not_started"
     error_code: str | None = None

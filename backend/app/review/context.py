@@ -4,10 +4,12 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
-from app.review.domain import SourceRef
-from app.review.evidence import source_lines
+from pydantic import Field
+
+from app.review.domain import Model, SourceRef
+from app.review.evidence import digest, source_lines
 from app.review.planner import identity, members, tokens, unit_capacity
 from app.review.store import BudgetExceeded
 
@@ -18,6 +20,24 @@ TOOL_LOOP_LIMIT = 5
 
 class RepeatedToolLoop(RuntimeError):
     """An identical tool loop exhausted its bounded finalization attempts."""
+
+
+class InvestigationState(Model):
+    question_id: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=1, max_length=500)
+    status: Literal["open", "resolved", "blocked", "not_applicable"]
+    source_refs: list[str] = Field(default_factory=list, max_length=32)
+    counterevidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    retrieval_refs: list[str] = Field(default_factory=list, max_length=32)
+    depends_on: list[str] = Field(default_factory=list, max_length=16)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=16)
+    scope: str = Field(default="", max_length=500)
+    outcome: Literal["supported", "refuted", "undetermined"] = "undetermined"
+    conclusion: str = Field(min_length=1, max_length=1500, description=(
+        "Compact investigation notes, including counterevidence and the scope of the conclusion. "
+        "For an open question, record what is known so far. Not a verified finding."
+    ))
+    missing_premise: str | None = Field(default=None, max_length=500)
 
 
 @dataclass
@@ -45,6 +65,15 @@ class AgentContext:
     related_paths: set[str] = field(default_factory=set)
     delivered_hunks: set[str] = field(default_factory=set)
     coverage_checkpoint_sent: bool = False
+    investigations: dict[str, InvestigationState] = field(default_factory=dict)
+    memory_revision: int = 0
+    memory_only_round: bool = False
+    receipts: dict[str, dict] = field(default_factory=dict)
+    visible_receipts: set[str] = field(default_factory=set)
+    submitted: dict[str, dict] = field(default_factory=dict)
+    initial_packet: dict = field(default_factory=dict)
+    initial_archive: dict | None = None
+    window: Any = None
 
     @property
     def evidence(self):
@@ -62,6 +91,9 @@ class AgentContext:
         await self.budget.active()
 
     def note_tool_result(self, name, arguments, result) -> int:
+        if name == "record_investigation" and result.get("ok") is True:
+            self.memory_only_round = True
+            return 0
         normalized = dict(arguments)
         cursor = normalized.get("cursor")
         if cursor in self.cursors:
@@ -137,13 +169,10 @@ class AgentContext:
     def _source_items(value):
         if isinstance(value, dict):
             source = value.get("source")
-            if isinstance(source, dict) and isinstance(value.get("content"), str):
-                try:
-                    SourceRef.model_validate(source)
-                except ValueError:
-                    pass
-                else:
-                    yield value, source
+            if (isinstance(source, dict) and isinstance(value.get("content"), str)
+                    and {"commit_sha", "side", "path", "start_line", "end_line"} <= source.keys()):
+                # Projection also consumes compact metadata; evidence admission is separate.
+                yield value, source
             for item in value.values():
                 yield from AgentContext._source_items(item)
         elif isinstance(value, list):
@@ -159,7 +188,7 @@ class AgentContext:
 
     @classmethod
     def compact_messages(cls, messages):
-        """Omit duplicate source bodies while preserving handles and fixed ranges."""
+        """Deduplicate only source bodies present in this request projection."""
         ranges = {}
         tool_results = {}
         compacted = []
@@ -213,9 +242,73 @@ class AgentContext:
             }) if changed else message)
         return compacted
 
+    async def archive_tool(self, name, arguments, message):
+        """Archive the original result once; handles never grant source authority."""
+        payload = {
+            "review_id": self.provider.run.id, "attempt_id": self.work.attempt_id,
+            "snapshot": self.provider.run.snapshot.model_dump(),
+            "tool": name, "arguments": arguments, "tool_call_id": message.tool_call_id,
+            "result": json.loads(message.content),
+        }
+        artifact = await asyncio.to_thread(self.evidence.artifacts.put_text,
+            task_id=self.provider.run.id, kind="context-receipt",
+            content=json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        handle = f"R{len(self.receipts) + 1}"
+        result = payload["result"]
+        summary = {key: value for key, value in result.items() if key not in {
+            "content", "source", "sources", "matches", "edges", "paths", "member",
+            "investigation", "original",
+        }}
+        summary.update({f"{key}_count": len(result[key])
+                        for key in ("matches", "edges", "paths") if key in result})
+        self.receipts[handle] = {
+            "uri": artifact.uri, "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+            "tool": name, "arguments": arguments, "summary": summary,
+        }
+        return message.model_copy(update={
+            "content": json.dumps({**result, "receipt_ref": handle}, ensure_ascii=False)})
+
+    async def recall(self, handle):
+        if handle not in self.visible_receipts:
+            raise ValueError("receipt_not_visible_in_this_attempt")
+        receipt = self.receipts[handle]
+        encoded = await asyncio.to_thread(self.evidence.artifacts.read_text, receipt["uri"])
+        if digest(encoded) != receipt["sha256"]:
+            raise ValueError("context_receipt_corrupted")
+        payload = json.loads(encoded)
+        return {"ok": True, "original": payload}
+
+    async def persist(self):
+        if self.initial_archive is None:
+            initial = await asyncio.to_thread(self.evidence.artifacts.put_text,
+                task_id=self.provider.run.id, kind="context-initial",
+                content=json.dumps(self.initial_packet, ensure_ascii=False, sort_keys=True))
+            self.initial_archive = {"uri": initial.uri, "sha256": initial.sha256}
+        state = {
+            "review_id": self.provider.run.id, "unit_id": self.work.unit_id,
+            "attempt_id": self.work.attempt_id,
+            "initial_context": self.initial_archive,
+            "investigations": {key: value.model_dump() for key, value in self.investigations.items()},
+            "memory_revision": self.memory_revision,
+            "sources": {key: value.model_dump() for key, value in self.visible.items()},
+            "receipts": self.receipts, "visible_receipts": sorted(self.visible_receipts),
+            "candidates": self.submitted, "cursors": self.cursors,
+            "context_metrics": self.window.metrics if self.window else {},
+        }
+        artifact = await asyncio.to_thread(self.evidence.artifacts.put_text,
+            task_id=self.provider.run.id, kind="context-state",
+            content=json.dumps(state, ensure_ascii=False, sort_keys=True))
+        await asyncio.to_thread(self.provider.store.save_context, self.provider.run.id,
+            self.work, artifact.uri, self.provider.lease)
+
     def begin_round(self):
         # Parallel tool completion order must not change the round identity.
         fingerprint = identity(sorted(self.round_calls)) if self.round_calls else None
+        if fingerprint is None and self.memory_only_round:
+            self.memory_only_round = False
+            return self.repeated_tool_rounds
+        self.memory_only_round = False
         if fingerprint is None:
             self.repeated_tool_rounds = 0
         elif fingerprint == self.previous_tool_round:
@@ -246,12 +339,14 @@ class AgentContext:
             source_ids=[ref.id for ref in pending.values()], digests=hunks)
         self.visible.update(pending)
         self.delivered_hunks.update(hunks)
+        self.visible_receipts.update(self.receipts)
         for ref in pending.values():
             self.source_paths.add(ref.path)
         for handle in pending:
             self.pending.pop(handle, None)
         for key in hunks:
             self.pending_hunks.pop(key, None)
+            self.material_failures.pop(key, None)
 
     async def read(self, path, start, end, revision):
         result = await self.evidence.read(path, start, end, revision)
@@ -313,6 +408,9 @@ class ContextProvider:
     async def initial(self, context, candidate=None, *, request_budget=None, estimate_request=None):
         unit = next(unit for unit in self.run.plan.units if unit.id == context.work.unit_id)
         saved = await asyncio.to_thread(self.store.candidates, self.run.id)
+        context.submitted = {
+            item.id: {"id": item.id, "claim": item.proposal.claim}
+            for item in saved if item.unit_id == unit.id}
         material, candidate_materials = [], []
         missing_candidate_materials = [
             {"path": ref.path, "side": ref.side, "start_line": ref.start_line,
@@ -337,16 +435,20 @@ class ContextProvider:
         def fits_request():
             return request_budget is None or estimate_request(base) <= request_budget
 
-        # Account for omission metadata before admitting any source material.
-        if request_budget is not None:
+        def trim_background():
+            # Frozen source takes precedence over author claims and broad orientation.
+            if request_budget is None:
+                return
             for key in ("already_submitted", "history_untrusted", "change_map"):
                 while base[key] and not fits_request():
                     base[key] = base[key][:len(base[key]) // 2]
             for key in ("body", "title"):
                 if not fits_request():
                     base["author_statement_untrusted"][key] = ""
-            if not fits_request():
-                raise BudgetExceeded("input_token_limit")
+
+        trim_background()
+        if not fits_request():
+            raise BudgetExceeded("input_token_limit")
         spent = 0
         if candidate:
             for ref, omission in zip(candidate.sources, omissions):
@@ -359,6 +461,7 @@ class ContextProvider:
                 cost = tokens(item)
                 candidate_materials.append(item)
                 missing_candidate_materials.remove(omission)
+                trim_background()
                 if ((request_budget is None and spent + cost > self.material_capacity())
                         or not fits_request()):
                     candidate_materials.pop()
@@ -383,6 +486,7 @@ class ContextProvider:
             cost = tokens(packet)
             material.append(packet)
             context.material_failures.pop(key, None)
+            trim_background()
             if ((request_budget is None and spent + cost > self.material_capacity())
                     or not fits_request()):
                 material.pop()

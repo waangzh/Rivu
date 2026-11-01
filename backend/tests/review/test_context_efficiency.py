@@ -5,7 +5,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.models.review.diff import ChangedFile
-from app.review.context import AgentContext
+from app.review.context import AgentContext, InvestigationState
 from app.review.domain import Plan, SourceRef, Unit
 
 
@@ -75,6 +75,44 @@ def test_repeated_search_results_keep_scope_and_cursor_control_fields():
     assert duplicate["scope_complete"] is True
     assert duplicate["next_cursor"] is None
     assert "matches" not in duplicate
+
+
+def test_memory_only_round_does_not_reset_repeated_investigation_loop():
+    context = AgentContext(provider=None, work=None, budget=None)
+    for index in range(3):
+        context.note_tool_result("search_code", {"query": "race"}, {"ok": True, "matches": []})
+        assert context.begin_round() == index + 1
+    context.note_tool_result("record_investigation", {}, {"ok": True})
+    assert context.begin_round() == 3
+    context.note_tool_result("search_code", {"query": "race"}, {"ok": True, "matches": []})
+    assert context.begin_round() == 4
+
+
+async def test_recording_notes_uses_existing_attempt_authority_and_tool_budget(tmp_path):
+    from app.review.tools import record_investigation
+    from tests.review.vnext_helpers import setup_source_run
+
+    _, run, _, provider, _ = setup_source_run(tmp_path)
+    work = SimpleNamespace(id="work", unit_id=run.plan.units[0].id, kind="review")
+    context = AgentContext(provider=provider, work=work, budget=None)
+
+    async def active():
+        pass
+
+    context.check_active = active
+    note = InvestigationState(question_id="q1", question="Is this caller serialized?",
+                             status="resolved", source_refs=["S1"], conclusion="Caller has a lock.")
+    runtime = SimpleNamespace(context=context)
+    rejected = await record_investigation.coroutine(note=note, runtime=runtime)
+    assert rejected["ok"] is False
+    assert context.investigations == {}
+    ref = SourceRef.model_validate(source())
+    context.visible["S1"] = ref
+    receipt = await record_investigation.coroutine(note=note, runtime=runtime)
+    assert receipt["ok"] is True
+    assert context.investigations["q1"] == note
+    assert context.resolve(["S1"]) == [ref]
+    assert context.tool_calls == 2
 
 
 @pytest.mark.parametrize("missing", [
