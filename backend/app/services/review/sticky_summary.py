@@ -9,7 +9,7 @@ from app.tools.github.github_publisher import GitHubPublishError
 
 
 def summary_marker(context):
-    return (f"<!-- repoguardian:summary:v1\nrepository_id={context['repository_id']}\n"
+    return (f"<!-- rivu:summary:v1\nrepository_id={context['repository_id']}\n"
             f"pr={context['pr_number']}\npublisher={context['publisher_identity']}\n-->")
 
 
@@ -17,7 +17,7 @@ def controlled_body(content, attempt, context):
     metadata = {"hash": stable_hash(content), "publication": attempt.id, "review_id": attempt.review_id,
                 "head_sha": attempt.head_sha, "order": context["order"]}
     encoded = base64.urlsafe_b64encode(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
-    body = content + "\n\n" + summary_marker(context) + f"\n<!-- repoguardian:payload:v1 {encoded} -->"
+    body = content + "\n\n" + summary_marker(context) + f"\n<!-- rivu:payload:v1 {encoded} -->"
     if len(body.encode()) > 60_000:
         raise GitHubPublishError("publication_body_too_long")
     return body
@@ -26,7 +26,7 @@ def controlled_body(content, attempt, context):
 def summary_metadata(body, context):
     if not isinstance(body, str):
         raise GitHubPublishError("summary_identity_conflict")
-    match = re.search(r"\n<!-- repoguardian:payload:v1 ([A-Za-z0-9_-]+) -->$", body)
+    match = re.search(r"\n<!-- rivu:payload:v1 ([A-Za-z0-9_-]+) -->$", body)
     if not match or len(match[1]) > 4096:
         raise GitHubPublishError("summary_identity_conflict")
     try:

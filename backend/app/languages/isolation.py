@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.languages.base import AnalysisLevel, FileAnalysis
 from app.languages import parser_cache
 
-logger = logging.getLogger("RepoGuardian.Parser")
+logger = logging.getLogger("Rivu.Parser")
 PARSER_PROTOCOL = "isolated-parser-v4"
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -139,7 +139,7 @@ def _digest(value: dict) -> str:
 def _failure_directory() -> Path:
     from app.core.config import settings
 
-    return settings.repoguardian_artifact_dir.parent / "parser-failures"
+    return settings.rivu_artifact_dir.parent / "parser-failures"
 
 
 def _load_failure(key: str) -> FailureRecord | None:

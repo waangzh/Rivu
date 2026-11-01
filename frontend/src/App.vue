@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
-import { cancelReview, createReview, getAvailableModels, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
+import { ApiError, cancelReview, createReview, getAvailableModels, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
 import type { AppPage } from './types/operations';
 import type { Run } from './types/review';
 import type { ReviewCapabilities, ReviewPlanOptions } from './types/reviewPlan';
@@ -167,7 +167,7 @@ async function submitCreation() {
   } catch (cause) {
     if (disposed || owner !== generation || abort.signal.aborted) return;
     creationRejected.value = creationWasRejected(cause);
-    creationError.value = creationRejected.value && cause instanceof Error ? cause.message
+    creationError.value = cause instanceof ApiError ? cause.message
       : '未收到确定的创建结果。继续确认会沿用原请求标识，避免重复创建审查。';
     if (creationRejected.value) savePendingCreation(null);
   } finally {
@@ -223,7 +223,7 @@ async function retrySummary() {
 }
 
 watch(page, () => { mobileOpen.value = false; });
-watch(pageTitle, title => { if (typeof document !== 'undefined') document.title = title + ' · RepoGuardian'; });
+watch(pageTitle, title => { if (typeof document !== 'undefined') document.title = title + ' · Rivu'; });
 watch(() => [page.value, task.value?.id, !!creation.value], async () => {
   await nextTick();
   if (!disposed && page.value === 'dashboard') document.querySelector<HTMLElement>('#workspace-content h1')?.focus();

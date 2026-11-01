@@ -43,4 +43,4 @@ def build_provider(provider_name, api_key, base_url, default_model):
         raise ValueError("unsupported_provider")
     return OpenAICompatibleProvider(api_key, base_url, default_model,
         disable_thinking=normalized == "deepseek", provider_name=normalized,
-        request_timeout_seconds=settings.repoguardian_model_request_timeout_seconds)
+        request_timeout_seconds=settings.rivu_model_request_timeout_seconds)

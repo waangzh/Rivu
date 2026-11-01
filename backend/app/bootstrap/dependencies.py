@@ -27,13 +27,13 @@ def get_review_service() -> ReviewService:
         raise RuntimeError("database_schema_outdated: initialize a fresh vNext database with Alembic")
     return ReviewService(
         github_tool=GitHubTool(settings.github_token),
-        git_tool=GitTool(settings.repoguardian_workdir, settings.repoguardian_git_bin),
+        git_tool=GitTool(settings.rivu_workdir, settings.rivu_git_bin),
         diff_parser=DiffParser(),
         provider=build_provider(
-            settings.repoguardian_provider,
+            settings.rivu_provider,
             settings.openai_api_key,
             settings.openai_base_url,
-            settings.repoguardian_model,
+            settings.rivu_model,
         ),
         store=ReviewStore(),
     )
@@ -41,7 +41,7 @@ def get_review_service() -> ReviewService:
 
 @lru_cache
 def get_publication_service() -> PublicationService:
-    token = settings.repoguardian_github_publish_token
+    token = settings.rivu_github_publish_token
     return PublicationService(PublicationRepository(), GitHubPublisher(token.get_secret_value() if token else None),
                               settings, get_review_service().get_task,
                               artifacts=get_review_service()._artifacts)
@@ -58,7 +58,7 @@ async def lifespan(_app: FastAPI):
     await maintenance.run_once()
     maintenance_task = asyncio.create_task(maintenance.run_forever())
     service.start_worker()
-    publication = get_publication_service() if settings.repoguardian_github_publish_enabled else None
+    publication = get_publication_service() if settings.rivu_github_publish_enabled else None
     if publication:
         publication.start()
     try:

@@ -9,7 +9,7 @@ from app.review.domain import utcnow
 from app.review.report import build_report, generate_overview
 from app.review.store import LeaseLost, ReviewStopped
 
-logger = logging.getLogger("RepoGuardian.Review")
+logger = logging.getLogger("Rivu.Review")
 
 
 class ReviewOrchestrator:

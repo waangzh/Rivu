@@ -171,16 +171,18 @@ test('待确认请求可恢复；网络重试沿用同一 key 和请求体，422
   });
 });
 
-test('创建超时与主动中断会释放请求且不自动重复 POST，结果保持未知', async context => {
+test('长时间准备继续等待，主动中断会释放请求且不自动重复 POST', async context => {
   await withServer(async server => {
     const { createReview } = await server.ssrLoadModule('/src/api/client.ts');
     const { creationWasRejected } = await server.ssrLoadModule('/src/utils/reviewCreation.ts');
     const previousFetch = globalThis.fetch;
     const input = { pr_url: 'https://github.com/o/r/pull/1', depth: 'standard', paths: null, focus: ['correctness'], limits: {} };
     let calls = 0;
+    let accept;
     globalThis.fetch = (_url, { signal }) => {
       calls++;
-      return new Promise((_resolve, reject) => {
+      return new Promise((resolve, reject) => {
+        accept = resolve;
         const fail = () => reject(new DOMException('Aborted', 'AbortError'));
         if (signal.aborted) fail();
         else signal.addEventListener('abort', fail, { once: true });
@@ -188,20 +190,54 @@ test('创建超时与主动中断会释放请求且不自动重复 POST，结果
     };
     try {
       context.mock.timers.enable({ apis: ['setTimeout'] });
-      const timeout = createReview(input, undefined, 'timeout-key');
-      const rejected = assert.rejects(timeout, error => error.name === 'AbortError' && !creationWasRejected(error));
-      context.mock.timers.tick(120000);
-      await rejected;
+      let settled = false;
+      const waiting = createReview(input, undefined, 'slow-key');
+      void waiting.then(() => { settled = true; });
+      context.mock.timers.tick(193000);
+      await Promise.resolve();
+      assert.equal(settled, false);
       assert.equal(calls, 1);
+      accept(Response.json({ id: 'created-after-preparation' }));
+      assert.equal((await waiting).id, 'created-after-preparation');
       context.mock.timers.reset();
       const controller = new AbortController();
       const interrupted = createReview(input, controller.signal, 'abort-key');
       controller.abort();
-      await assert.rejects(interrupted, { name: 'AbortError' });
+      await assert.rejects(interrupted, error => error.name === 'AbortError' && !creationWasRejected(error));
       assert.equal(calls, 2);
     } finally {
       context.mock.timers.reset();
       globalThis.fetch = previousFetch;
     }
+  });
+});
+
+test('源码准备错误展示安全消息并遵守服务端的重试标记', async () => {
+  await withServer(async server => {
+    const { createReview, ApiError } = await server.ssrLoadModule('/src/api/client.ts');
+    const { creationWasRejected } = await server.ssrLoadModule('/src/utils/reviewCreation.ts');
+    const previousFetch = globalThis.fetch;
+    const input = { pr_url: 'https://github.com/o/r/pull/1', depth: 'standard', paths: null, focus: ['correctness'], limits: {} };
+    let calls = 0;
+    try {
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ detail: { code: 'git_snapshot_unavailable',
+          message: '无法获取本次 PR 的固定提交', retryable: false } }, { status: 502 });
+      };
+      await assert.rejects(createReview(input, undefined, 'missing-sha'), error =>
+        error instanceof ApiError && error.message === '无法获取本次 PR 的固定提交'
+          && error.retryable === false && creationWasRejected(error));
+      assert.equal(calls, 1);
+      calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ detail: { code: 'git_connection_failed',
+          message: '连接源码仓库失败', retryable: true } }, { status: 503 });
+      };
+      await assert.rejects(createReview(input, undefined, 'connection'), error =>
+        error instanceof ApiError && error.retryable === true && !creationWasRejected(error));
+      assert.equal(calls, 2);
+    } finally { globalThis.fetch = previousFetch; }
   });
 });

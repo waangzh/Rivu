@@ -10,7 +10,7 @@ from app.review.domain import Limits
 
 @pytest.mark.parametrize("depth", ["quick", "standard", "deep"])
 def test_depth_preserves_strategy_without_small_call_quota(monkeypatch, depth):
-    monkeypatch.setattr(settings, "repoguardian_agent_max_calls", 48)
+    monkeypatch.setattr(settings, "rivu_agent_max_calls", 48)
     provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
     frozen = freeze_configuration(ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth=depth), provider)
     assert frozen.options.depth == depth
@@ -22,7 +22,7 @@ def test_depth_preserves_strategy_without_small_call_quota(monkeypatch, depth):
 
 
 def test_explicit_call_fuse_is_honored_within_server_policy(monkeypatch):
-    monkeypatch.setattr(settings, "repoguardian_agent_max_calls", 48)
+    monkeypatch.setattr(settings, "rivu_agent_max_calls", 48)
     provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
     request = ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth="quick", limits={"model_calls": 9})
     assert freeze_configuration(request, provider).options.limits.model_calls == 9
@@ -32,10 +32,10 @@ def test_explicit_call_fuse_is_honored_within_server_policy(monkeypatch):
 
 
 def test_cumulative_token_and_total_call_limits_are_optional(monkeypatch):
-    monkeypatch.setattr(settings, "repoguardian_review_max_model_calls", None)
-    monkeypatch.setattr(settings, "repoguardian_review_max_input_tokens", None)
-    monkeypatch.setattr(settings, "repoguardian_review_max_output_tokens", None)
-    monkeypatch.setattr(settings, "repoguardian_model_context_tokens", 1_000_000)
+    monkeypatch.setattr(settings, "rivu_review_max_model_calls", None)
+    monkeypatch.setattr(settings, "rivu_review_max_input_tokens", None)
+    monkeypatch.setattr(settings, "rivu_review_max_output_tokens", None)
+    monkeypatch.setattr(settings, "rivu_model_context_tokens", 1_000_000)
     provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost",
                                _default_model="fake")
     frozen = freeze_configuration(ReviewRequest(pr_url="https://github.com/o/r/pull/1"), provider)

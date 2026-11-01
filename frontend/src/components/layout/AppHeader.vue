@@ -9,7 +9,7 @@ const { theme, toggleTheme } = usePreferences();
   <header class="topbar">
     <div class="breadcrumbs">
       <button type="button" class="icon-btn menu-btn" aria-label="切换导航" aria-controls="workspace-sidebar" :aria-expanded="menuOpen" @click="$emit('menu')"><AppIcon name="menu" /></button>
-      <span class="crumb-parent">RepoGuardian</span><span class="sep">/</span><strong>{{ title }}</strong>
+      <span class="crumb-parent">Rivu</span><span class="sep">/</span><strong>{{ title }}</strong>
     </div>
     <div class="top-actions">
       <span class="top-status" role="status">{{ statusText }}</span>

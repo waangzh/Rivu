@@ -521,7 +521,7 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
 async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, boundary, monkeypatch):
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "repoguardian_model_request_timeout_seconds", 60)
+    monkeypatch.setattr(settings, "rivu_model_request_timeout_seconds", 60)
     source = "def ratio(x):\n    return 10 / x\n" + "\n".join(
         f"VALUE_{index} = {index}" for index in range(30)) + "\n"
     store, run, lease, provider, sessions = setup_source_run(

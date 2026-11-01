@@ -5,11 +5,11 @@ from app.tools.github.github_publisher import GitHubPublishError
 
 
 class Config:
-    repoguardian_github_publish_enabled = True
-    repoguardian_github_publish_publisher_id = 7
-    repoguardian_github_publish_allowed_repositories = "123"
-    repoguardian_github_publish_pull_requests_write_confirmed = True
-    repoguardian_github_publish_max_inline = 10
+    rivu_github_publish_enabled = True
+    rivu_github_publish_publisher_id = 7
+    rivu_github_publish_allowed_repositories = "123"
+    rivu_github_publish_pull_requests_write_confirmed = True
+    rivu_github_publish_max_inline = 10
 
 
 class GitHub:

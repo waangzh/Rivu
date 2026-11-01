@@ -13,7 +13,7 @@ from app.tools.github.github_publisher import GitHubPublishError
 
 
 def require_operator(request: Request, authorization: str | None = Header(default=None)):
-    if not settings.repoguardian_github_publish_enabled:
+    if not settings.rivu_github_publish_enabled:
         raise HTTPException(503, detail={"code": "publication_disabled"})
     try:
         local = request.client is not None and ip_address(request.client.host).is_loopback
@@ -27,7 +27,7 @@ def require_operator(request: Request, authorization: str | None = Header(defaul
             local = local and parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         except ValueError:
             local = False
-    secret = settings.repoguardian_publication_api_token
+    secret = settings.rivu_publication_api_token
     if not local or not secret or not hmac.compare_digest((authorization or "").encode(), ("Bearer " + secret.get_secret_value()).encode()):
         raise HTTPException(403, detail={"code": "publication_operator_unauthorized"})
 

@@ -190,7 +190,7 @@ const highPriority = (key: string) => ["critical", "high"].includes(severityOf(k
     <template v-else>
       <p class="github-publication__notice" role="status">{{ capabilityError ? '暂时无法确认服务端发布能力。' : '服务端未启用直接发布。' }}完整评论仍可在上方阅读和复制，粘贴到 GitHub 即可。</p>
       <button v-if="capabilityError" type="button" class="button button--ghost button--compact" @click="$emit('retry-capability')">重新检查发布能力</button>
-      <details class="runtime-technical"><summary>如何启用直接发布</summary><p>在 <code>backend/.env</code> 配置独立发布凭据、仓库授权与操作口令，再设置 <code>REPOGUARDIAN_GITHUB_PUBLISH_ENABLED=true</code> 并重启后端。</p></details>
+      <details class="runtime-technical"><summary>如何启用直接发布</summary><p>在 <code>backend/.env</code> 配置独立发布凭据、仓库授权与操作口令，再设置 <code>RIVU_GITHUB_PUBLISH_ENABLED=true</code> 并重启后端。</p></details>
     </template>
   </section>
 </template>

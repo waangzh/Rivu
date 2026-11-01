@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Response
 from app.api import reviews as _reviews
 from app.review.contracts import ReviewRequest
 from app.review.domain import Run
+from app.tools.git_tool import GitToolError
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -17,6 +18,8 @@ async def create_review(request: ReviewRequest,
     try:
         return await _reviews.get_review_service().create(request, idempotency_key)
     except _reviews.GitHubToolError as exc:
+        raise HTTPException(exc.api_status, exc.public_detail()) from None
+    except GitToolError as exc:
         raise HTTPException(exc.api_status, exc.public_detail()) from None
     except ValueError as exc:
         code = str(exc) if str(exc) in {"idempotency_key_conflict", "review_deleted"} else "review_request_invalid"

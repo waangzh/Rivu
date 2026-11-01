@@ -9,7 +9,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-logger = logging.getLogger("RepoGuardian.ParserCache")
+logger = logging.getLogger("Rivu.ParserCache")
 CACHE_PROTOCOL = "parser-success-v1"
 MAX_ENTRY_BYTES = 16 * 1024 * 1024
 MAX_CACHE_BYTES = 128 * 1024 * 1024
@@ -19,7 +19,7 @@ MAX_CACHE_ENTRIES = 4096
 def _cache_path() -> Path:
     from app.core.config import settings
 
-    return settings.repoguardian_artifact_dir.parent / "parser-cache.db"
+    return settings.rivu_artifact_dir.parent / "parser-cache.db"
 
 
 def load(key: str) -> bytes | None:

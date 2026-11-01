@@ -26,7 +26,7 @@ logging.getLogger("tree_sitter").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-app = FastAPI(title="RepoGuardian API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Rivu API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

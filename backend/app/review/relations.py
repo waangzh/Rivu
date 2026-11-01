@@ -10,7 +10,7 @@ from app.review.planner import excluded_changes
 from app.review.tool_scope import list_git_tracked_blobs, validate_repository_file
 from app.tools.repository_graph import related_test_edges, resolved_import_edges
 
-logger = logging.getLogger("RepoGuardian.Review.Relations")
+logger = logging.getLogger("Rivu.Review.Relations")
 
 MAX_RELATION_FILES = 128
 MAX_RELATION_BYTES = 4 * 1024 * 1024

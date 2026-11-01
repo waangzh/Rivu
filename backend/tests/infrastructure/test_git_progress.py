@@ -102,7 +102,7 @@ def test_clone_and_diff_reports_all_repository_preparation_phases(tmp_path: Path
 
     git("init", "-b", "main")
     git("config", "user.email", "tests@example.test")
-    git("config", "user.name", "RepoGuardian Tests")
+    git("config", "user.name", "Rivu Tests")
     (source / "sample.py").write_text("value = 'base'\n", encoding="utf-8")
     git("add", "sample.py")
     git("commit", "-m", "base")

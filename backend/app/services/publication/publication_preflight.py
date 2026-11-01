@@ -17,7 +17,7 @@ class PublicationPreflight:
 
     async def check(self, task, finding_keys=None):
         config = self.config
-        if not config.repoguardian_github_publish_enabled:
+        if not config.rivu_github_publish_enabled:
             raise GitHubPublishError("publication_disabled")
         if task.status not in {"completed", "partial"}:
             raise GitHubPublishError("review_not_publishable")
@@ -27,17 +27,17 @@ class PublicationPreflight:
         owner, repo, number = parse_pr_url(task.pr_url)
         path = self.github.repo_path(owner, repo)
         user = await self.github.get("/user")
-        if type(user.get("id")) is not int or user["id"] != config.repoguardian_github_publish_publisher_id:
+        if type(user.get("id")) is not int or user["id"] != config.rivu_github_publish_publisher_id:
             raise GitHubPublishError("publisher_identity_mismatch")
         repository = await self.github.get(path)
         repository_id = repository.get("id")
         if repository_id != task.snapshot.repository_id:
             raise GitHubPublishError("repository_identity_mismatch")
-        allowlist = {int(value.strip()) for value in config.repoguardian_github_publish_allowed_repositories.split(",") if value.strip().isdigit()}
+        allowlist = {int(value.strip()) for value in config.rivu_github_publish_allowed_repositories.split(",") if value.strip().isdigit()}
         if type(repository_id) is not int or repository_id not in allowlist or repository.get("full_name", "").casefold() != f"{owner}/{repo}".casefold():
             raise GitHubPublishError("repository_not_authorized")
         permissions = repository.get("permissions") or {}
-        if (not config.repoguardian_github_publish_pull_requests_write_confirmed
+        if (not config.rivu_github_publish_pull_requests_write_confirmed
                 or not any(permissions.get(role) is True for role in ("push", "maintain", "admin"))):
             raise GitHubPublishError("github_permission_denied")
         pr = await self.github.get(f"{path}/pulls/{number}")
@@ -59,7 +59,7 @@ class PublicationPreflight:
         if not set(keys) <= available:
             raise GitHubPublishError("invalid_finding_selection")
         inline = [item for item in plan.inline_drafts if item.finding_key in keys]
-        if len(inline) > config.repoguardian_github_publish_max_inline:
+        if len(inline) > config.rivu_github_publish_max_inline:
             raise GitHubPublishError("too_many_inline_findings")
         files = await self.github.paginate(f"{path}/pulls/{number}/files") if inline else []
         complete = not inline or (type(pr.get("changed_files")) is int and len(files) == pr["changed_files"] and len(files) <= 3000)

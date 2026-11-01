@@ -20,7 +20,7 @@ from app.review.tool_scope import (
 )
 from app.tools.workspace_cleanup import cleanup_workspace
 
-logger = logging.getLogger("RepoGuardian.GitTool")
+logger = logging.getLogger("Rivu.GitTool")
 
 # 生产审查与 Preview 共用的 Diff 策略：内容基准取唯一 merge base，
 # PR 声明 base 只保留身份用途。修改命令或上下文行数时必须同步该版本号。
@@ -67,16 +67,60 @@ GitProgressCallback = Callable[[GitProgressEvent], None]
 
 
 class GitToolError(RuntimeError):
-    """Git 命令执行失败时抛出。"""
-    pass
+    """Internal diagnostics stay separate from the public preparation error."""
+
+    code = "git_preparation_failed"
+    retryable = False
+
+    def __init__(self, message: str, *, code: str | None = None, phase: str | None = None):
+        super().__init__(message)
+        self.code = code or type(self).code
+        self.phase = phase
+
+    @property
+    def api_status(self):
+        return 504 if self.code == "git_timeout" else 503 if self.retryable else 502
+
+    def public_detail(self):
+        messages = {
+            "git_preparation_failed": "准备固定源码失败，请检查 Git 环境及仓库访问权限。",
+            "git_connection_failed": "连接源码仓库失败，请检查网络或代理后重试。",
+            "git_timeout": "准备固定源码超时，请稍后重试。",
+            "git_snapshot_unavailable": "无法获取本次 PR 的固定提交，请检查提交是否仍可访问。",
+            "git_cancelled": "源码准备已取消。",
+        }
+        return {"code": self.code, "message": messages.get(self.code, messages["git_preparation_failed"]),
+                "retryable": self.retryable, "phase": self.phase}
 
 
 class GitToolCancelled(GitToolError):
     """Git 命令被任务取消。"""
 
+    code = "git_cancelled"
+
 
 class GitToolTimeout(GitToolError):
     """Git 命令超过允许执行时间。"""
+
+    code = "git_timeout"
+    retryable = True
+
+
+class GitToolNetworkError(GitToolError):
+    """A recognized transient Git transport failure."""
+
+    code = "git_connection_failed"
+    retryable = True
+
+
+def _is_transport_error(error: GitToolError) -> bool:
+    return isinstance(error, GitToolNetworkError) or bool(re.search(
+        r"failed to connect|could not resolve (?:host|proxy)|"
+        r"(?:connection|operation) timed out|connection (?:reset|aborted)|"
+        r"(?:recv|send) failure|remote end hung up unexpectedly|"
+        r"rpc failed; curl (?:5|6|7|18|28|35|52|55|56)\b|"
+        r"requested url returned error: (?:429|500|502|503|504)\b",
+        str(error), re.IGNORECASE))
 
 
 class DiffPreparationError(GitToolError):
@@ -103,7 +147,7 @@ def _normalized_commit_sha(value: str, label: str) -> str:
 class GitTool:
     """在临时目录中执行 Git 操作：克隆、fetch refs、生成 unified diff。
 
-    克隆到 settings.repoguardian_workdir 下随机命名的子目录中，
+    克隆到 settings.rivu_workdir 下随机命名的子目录中，
     避免并发任务冲突。
     """
 
@@ -114,12 +158,12 @@ class GitTool:
         command_timeout_seconds: float | None = None,
     ) -> None:
         from app.core.config import settings
-        self._workdir = workdir or settings.repoguardian_workdir
+        self._workdir = workdir or settings.rivu_workdir
         self._git = git_executable
         self._command_timeout_seconds = (
             command_timeout_seconds
             if command_timeout_seconds is not None
-            else settings.repoguardian_git_timeout_seconds
+            else settings.rivu_git_timeout_seconds
         )
 
     def get_file_content(
@@ -282,6 +326,7 @@ class GitTool:
                 phase_label="正在获取 Head 分支",
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
+                pull_ref=(pr.clone_url, f"refs/pull/{pr.number}/head"),
             )
             # 生成 unified diff（上下文 80 行，足够 LLM 理解）
             self._notify(progress_callback, "diff", "正在生成 PR Diff")
@@ -461,13 +506,19 @@ class GitTool:
         return repo_dir
 
     def _commit_exists(
-        self, repo_dir: str | Path, sha: str, *, cancel_event: threading.Event | None = None
+        self, repo_dir: str | Path, sha: str, *, cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> bool:
         """判断完整 SHA 是否已在本地对象库中解析为 commit；不访问远端、不解析 refname。"""
         if cancel_event is not None and cancel_event.is_set():
             raise GitToolCancelled("Git 操作已取消")
         repo_path = self._validate_worktree(repo_dir)
         timeout = self._command_timeout_seconds if self._command_timeout_seconds > 0 else None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GitToolTimeout("Git 提交校验已超过准备期限")
+            timeout = min(timeout, remaining) if timeout is not None else remaining
         try:
             completed = subprocess.run(
                 [self._git, "-C", str(repo_path), "rev-parse", "--verify", "--quiet",
@@ -491,10 +542,17 @@ class GitTool:
         phase: str | None = None,
         phase_label: str | None = None,
         cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> str:
         """执行参数化 Git 命令，同时排空双管道并解析 stderr 中的进度。"""
         if cancel_event is not None and cancel_event.is_set():
             raise GitToolCancelled("Git 操作已取消")
+        started_at = time.monotonic()
+        if self._command_timeout_seconds > 0:
+            command_deadline = started_at + self._command_timeout_seconds
+            deadline = min(deadline, command_deadline) if deadline is not None else command_deadline
+        if deadline is not None and started_at >= deadline:
+            raise GitToolTimeout("Git 操作已超过准备期限", phase=phase)
         try:
             process = subprocess.Popen(
                 command,
@@ -527,7 +585,6 @@ class GitTool:
         stderr_chunks: list[bytes] = []
         stderr_buffer = ""
         remaining_streams = {"stdout", "stderr"}
-        started_at = time.monotonic()
         stop_reason: str | None = None
         last_progress_key: tuple[str, int] | None = None
         last_progress_at = 0.0
@@ -538,8 +595,8 @@ class GitTool:
                 _terminate_process(process)
             elif (
                 stop_reason is None
-                and self._command_timeout_seconds > 0
-                and time.monotonic() - started_at > self._command_timeout_seconds
+                and deadline is not None
+                and time.monotonic() > deadline
             ):
                 stop_reason = f"Git 操作超过 {self._command_timeout_seconds:g} 秒超时"
                 _terminate_process(process)
@@ -585,11 +642,37 @@ class GitTool:
         if stop_reason is not None:
             if cancel_event is not None and cancel_event.is_set():
                 raise GitToolCancelled(stop_reason)
-            raise GitToolTimeout(stop_reason)
+            raise GitToolTimeout(stop_reason, phase=phase)
         if return_code != 0:
             detail = (stderr or stdout).strip()[-8000:]
-            raise GitToolError(f"Git 命令执行失败（exit {return_code}）\n{detail}")
+            error = GitToolError(f"Git 命令执行失败（exit {return_code}）\n{detail}", phase=phase)
+            if _is_transport_error(error):
+                raise GitToolNetworkError(str(error), phase=phase)
+            raise error
         return stdout
+
+    def _run_remote(self, command, *, cancel_event=None, deadline=None, **options):
+        if deadline is None and self._command_timeout_seconds > 0:
+            deadline = time.monotonic() + self._command_timeout_seconds
+        for attempt in range(3):
+            try:
+                return self._run(command, cancel_event=cancel_event, deadline=deadline, **options)
+            except (GitToolCancelled, GitToolTimeout):
+                raise
+            except GitToolError as exc:
+                if not _is_transport_error(exc):
+                    raise
+                if attempt == 2:
+                    raise GitToolNetworkError("Git transport retries exhausted",
+                                              phase=options.get("phase")) from None
+            delay = 0.25 * 2 ** attempt
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise GitToolTimeout("Git 重试已超过准备期限", phase=options.get("phase"))
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise GitToolCancelled("Git 操作已取消")
+            else:
+                time.sleep(delay)
 
     def _fetch_ref(
         self,
@@ -602,54 +685,36 @@ class GitTool:
         phase_label: str,
         progress_callback: GitProgressCallback | None,
         cancel_event: threading.Event | None,
+        pull_ref: tuple[str, str] | None = None,
     ) -> None:
-        """拉取指定 SHA，失败时回退到 ref 名称重试。
+        """Fetch a fixed SHA, then branch/PR refs; all attempts share one deadline.
 
-        降级只影响如何把对象取到本地；身份语义不降级——调用方必须以请求的
-        SHA 是否真实存在为准，不能信任 ``FETCH_HEAD``（分支可能已被 force push
-        指向另一个提交，也可能只是请求的 SHA 恰好不可按 SHA 获取）。
+        A fetched ref only supplies objects. It never replaces the requested SHA.
         """
         self._notify(progress_callback, phase, phase_label)
-        command = [self._git, "-C", str(repo_dir), "fetch", "--progress", remote, sha]
-        try:
-            self._run(
-                command,
-                progress_callback=progress_callback,
-                phase=phase,
-                phase_label=phase_label,
-                cancel_event=cancel_event,
-            )
-        except GitToolError as primary_error:
-            if isinstance(primary_error, (GitToolCancelled, GitToolTimeout)):
-                raise
-            if self._commit_exists(repo_dir, sha, cancel_event=cancel_event):
-                # 请求的 SHA 已在本地对象库（例如来自 clone 或上一次 fetch），
-                # 无需降级：分支名的当前 tip 与本次身份无关。
-                self._notify(
-                    progress_callback,
-                    phase,
-                    f"{phase_label}：按 SHA 获取失败，使用本地已有提交",
-                )
-            else:
-                self._notify(progress_callback, phase, f"{phase_label}：按分支名重试")
-                fallback = [self._git, "-C", str(repo_dir), "fetch", "--progress", remote, ref]
+        deadline = (time.monotonic() + self._command_timeout_seconds
+                    if self._command_timeout_seconds > 0 else None)
+        if not self._commit_exists(repo_dir, sha, cancel_event=cancel_event, deadline=deadline):
+            sources = [(remote, sha), (remote, ref)]
+            if pull_ref is not None:
+                sources.append(pull_ref)
+            last_error = None
+            for fetch_remote, fetch_ref in dict.fromkeys(sources):
                 try:
-                    self._run(
-                        fallback,
-                        progress_callback=progress_callback,
-                        phase=phase,
-                        phase_label=phase_label,
-                        cancel_event=cancel_event,
-                    )
-                except GitToolError as fallback_error:
-                    raise GitToolError(
-                        f"按 SHA 和分支名获取 {phase} 均失败：{fallback_error}"
-                    ) from primary_error
-                if not self._commit_exists(repo_dir, sha, cancel_event=cancel_event):
-                    # 降级 fetch 只把分支当前 tip 取回；请求的 SHA 仍不存在，禁止继续。
-                    raise GitToolError(
-                        f"{phase}：按分支名获取后仍缺少请求的提交 {sha}"
-                    ) from primary_error
+                    self._run_remote(
+                        [self._git, "-C", str(repo_dir), "fetch", "--progress",
+                         fetch_remote, fetch_ref],
+                        progress_callback=progress_callback, phase=phase, phase_label=phase_label,
+                        cancel_event=cancel_event, deadline=deadline)
+                except (GitToolCancelled, GitToolTimeout, GitToolNetworkError):
+                    raise
+                except GitToolError as exc:
+                    last_error = exc
+                if self._commit_exists(repo_dir, sha, cancel_event=cancel_event, deadline=deadline):
+                    break
+            else:
+                raise GitToolError(f"{phase}：缺少请求的提交 {sha}",
+                                   code="git_snapshot_unavailable", phase=phase) from last_error
         self._notify(
             progress_callback,
             phase,

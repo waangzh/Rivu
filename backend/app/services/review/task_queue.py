@@ -21,7 +21,7 @@ from app.models.orm import ReviewTaskOrm, WorkerJobOrm, utcnow
 from app.services.review.review_task_access import lock_live_review
 from app.review.store import ReviewStore, as_utc
 
-logger = logging.getLogger("RepoGuardian.Review.Worker")
+logger = logging.getLogger("Rivu.Review.Worker")
 
 
 class NonRetryableJobError(ValueError):
@@ -83,7 +83,7 @@ class DatabaseTaskQueue:
                 idempotency_key=key,
                 payload=payload or {},
                 priority=priority,
-                max_attempts=settings.repoguardian_worker_max_attempts,
+                max_attempts=settings.rivu_worker_max_attempts,
                 available_at=available_at or utcnow(),
             )
             session.add(row)
@@ -98,7 +98,7 @@ class DatabaseTaskQueue:
     ) -> ClaimedJob | None:
         now = utcnow()
         lease_until = now + timedelta(
-            seconds=lease_seconds or settings.repoguardian_worker_lease_seconds
+            seconds=lease_seconds or settings.rivu_worker_lease_seconds
         )
         for _ in range(8):
             with self._session_factory.begin() as session:
@@ -177,7 +177,7 @@ class DatabaseTaskQueue:
                 .values(
                     heartbeat_at=now,
                     lease_until=now + timedelta(
-                        seconds=lease_seconds or settings.repoguardian_worker_lease_seconds
+                        seconds=lease_seconds or settings.rivu_worker_lease_seconds
                     ),
                     updated_at=now,
                 )
@@ -299,7 +299,7 @@ class ReviewWorker:
             if not worked:
                 try:
                     await asyncio.wait_for(
-                        self._stopping.wait(), timeout=settings.repoguardian_worker_poll_seconds
+                        self._stopping.wait(), timeout=settings.rivu_worker_poll_seconds
                     )
                 except TimeoutError:
                     pass
@@ -318,7 +318,7 @@ class ReviewWorker:
         return cancelled
 
     async def _heartbeat(self, job: ClaimedJob, handler_task: asyncio.Task | None = None) -> None:
-        interval = max(1.0, settings.repoguardian_worker_lease_seconds / 3)
+        interval = max(1.0, settings.rivu_worker_lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
             renewed = await asyncio.to_thread(self.queue.heartbeat, job.id, self.worker_id, attempt=job.attempts)

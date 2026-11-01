@@ -82,9 +82,9 @@ def payload(github):
 async def test_webhook_delivery_and_head_idempotency_with_rate_limit(service_pipeline, monkeypatch):
     from app.core.config import settings
     service, github, _ = service_pipeline
-    monkeypatch.setattr(settings, "repoguardian_incremental_review_webhook_enabled", True)
-    monkeypatch.setattr(settings, "repoguardian_incremental_review_webhook_repositories", "o/r")
-    monkeypatch.setattr(settings, "repoguardian_incremental_review_max_runs_per_hour", 1)
+    monkeypatch.setattr(settings, "rivu_incremental_review_webhook_enabled", True)
+    monkeypatch.setattr(settings, "rivu_incremental_review_webhook_repositories", "o/r")
+    monkeypatch.setattr(settings, "rivu_incremental_review_max_runs_per_hour", 1)
     webhook = IncrementalWebhookService(service, service.store)
     first = await webhook.handle(payload=payload(github), delivery_id="delivery-1")
     repeated = await webhook.handle(payload=payload(github), delivery_id="delivery-1")
@@ -103,7 +103,7 @@ def test_webhook_signature_remains_required(monkeypatch):
     import hashlib
     import hmac
     from app.core.config import settings
-    monkeypatch.setattr(settings, "repoguardian_github_webhook_secret", "fixture-secret")
+    monkeypatch.setattr(settings, "rivu_github_webhook_secret", "fixture-secret")
     body = b'{"action":"synchronize"}'
     signature = "sha256=" + hmac.new(b"fixture-secret", body, hashlib.sha256).hexdigest()
     assert verify_signature(body, signature)

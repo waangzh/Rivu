@@ -1,7 +1,7 @@
 [project]
-name = "repo-guardian-backend"
+name = "rivu-backend"
 version = "0.1.0"
-description = "RepoGuardian basic pull request review backend"
+description = "Rivu basic pull request review backend"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",

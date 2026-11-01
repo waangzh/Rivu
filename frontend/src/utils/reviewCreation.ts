@@ -12,7 +12,8 @@ const retryableStatuses = new Set([408, 429, 500, 502, 503, 504]);
 
 export function creationWasRejected(error: unknown) {
   return error instanceof ApiError && error.status != null
-    && error.status >= 400 && error.status < 500 && !retryableStatuses.has(error.status);
+    && error.status >= 400 && (error.retryable === false
+      || (error.status < 500 && !retryableStatuses.has(error.status)));
 }
 
 export function savePendingCreation(value: PendingReviewCreation | null) {

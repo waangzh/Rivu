@@ -11,8 +11,8 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
 
-Path(settings.repoguardian_db_path).parent.mkdir(parents=True, exist_ok=True)
-_sqlite_path = Path(settings.repoguardian_db_path).resolve().as_posix()
+Path(settings.rivu_db_path).parent.mkdir(parents=True, exist_ok=True)
+_sqlite_path = Path(settings.rivu_db_path).resolve().as_posix()
 SYNC_DATABASE_URL = f"sqlite:///{_sqlite_path}"
 
 sync_engine = create_engine(

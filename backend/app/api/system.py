@@ -35,7 +35,7 @@ async def get_review_capabilities():
 @router.get("/publication-capability", response_model=PublicationCapability)
 async def get_publication_capability() -> PublicationCapability:
     """发布页进入前探测；未启用时前端只提供复制评论路径。"""
-    enabled = settings.repoguardian_github_publish_enabled
+    enabled = settings.rivu_github_publish_enabled
     return PublicationCapability(enabled=enabled, mode="publish" if enabled else "copy_only")
 
 
@@ -48,10 +48,10 @@ async def get_available_models() -> ModelCatalogResponse:
     """使用后端配置的凭证查询当前 Provider 实际开放的模型。"""
     try:
         return await fetch_model_catalog(
-            provider=settings.repoguardian_provider,
+            provider=settings.rivu_provider,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
-            default_model=settings.repoguardian_model,
+            default_model=settings.rivu_model,
         )
     except ModelCatalogError as exc:
         raise HTTPException(
@@ -63,30 +63,30 @@ async def get_available_models() -> ModelCatalogResponse:
 @router.get("/diagnostics", response_model=SystemDiagnostics)
 async def get_system_diagnostics() -> SystemDiagnostics:
     try:
-        app_version = version("repo-guardian-backend")
+        app_version = version("rivu-backend")
     except PackageNotFoundError:
         app_version = "0.1.0"
 
     service = get_review_service()
     worker_running = service.worker_running()
-    artifact_path = settings.repoguardian_artifact_dir.resolve()
+    artifact_path = settings.rivu_artifact_dir.resolve()
     writable_target = artifact_path if artifact_path.exists() else artifact_path.parent
 
     return SystemDiagnostics(
         version=app_version,
-        provider=settings.repoguardian_provider,
-        default_model=settings.repoguardian_model,
+        provider=settings.rivu_provider,
+        default_model=settings.rivu_model,
         model_base_url=settings.openai_base_url,
         database_schema_current=schema_is_current(),
         worker_status="running" if worker_running else "idle",
         artifact_directory_writable=writable_target.exists() and os.access(writable_target, os.W_OK),
-        langsmith_enabled=settings.repoguardian_langsmith_tracing,
-        retention_days=settings.repoguardian_retention_days,
+        langsmith_enabled=settings.rivu_langsmith_tracing,
+        retention_days=settings.rivu_retention_days,
         configured_secrets={
             "github": bool(settings.github_token),
             "llm_provider": bool(settings.openai_api_key),
             "langsmith": bool(settings.langsmith_api_key),
-            "github_webhook": bool(settings.repoguardian_github_webhook_secret),
+            "github_webhook": bool(settings.rivu_github_webhook_secret),
         },
 
     )
@@ -97,9 +97,9 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
     """更新本地单用户可编辑配置；密钥和执行安全边界不在此接口内。"""
     updates: dict[str, object] = {}
     mapping = {
-        "retention_days": "repoguardian_retention_days",
+        "retention_days": "rivu_retention_days",
         "model_base_url": "openai_base_url",
-        "model_name": "repoguardian_model",
+        "model_name": "rivu_model",
     }
     changes: dict[str, object] = {}
     for field, setting_name in mapping.items():
@@ -108,9 +108,9 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
             continue
         changes[setting_name] = item
         env_key = {
-            "repoguardian_retention_days": "REPOGUARDIAN_RETENTION_DAYS",
+            "rivu_retention_days": "RIVU_RETENTION_DAYS",
             "openai_base_url": "OPENAI_BASE_URL",
-            "repoguardian_model": "REPOGUARDIAN_MODEL",
+            "rivu_model": "RIVU_MODEL",
         }[setting_name]
         updates[env_key] = item
     if updates:
@@ -119,10 +119,10 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
             for setting_name, item in changes.items():
                 setattr(settings, setting_name, item)
             get_review_service().reload_provider(build_provider(
-                settings.repoguardian_provider,
+                settings.rivu_provider,
                 settings.openai_api_key,
                 settings.openai_base_url,
-                settings.repoguardian_model,
+                settings.rivu_model,
             ))
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="保存本地配置失败") from exc
@@ -136,7 +136,7 @@ async def preview_workspace_cleanup() -> WorkspaceCleanupPreview:
     async with workspace_cleanup_lock:
         result = await asyncio.to_thread(
             inspect_orphaned_workspaces,
-            workdir=settings.repoguardian_workdir,
+            workdir=settings.rivu_workdir,
             older_than_seconds=ttl_seconds,
             active_paths=_active_workspace_paths(),
         )
@@ -158,7 +158,7 @@ async def cleanup_expired_workspaces(
     async with workspace_cleanup_lock:
         result = await asyncio.to_thread(
             reap_orphaned_workspaces,
-            workdir=settings.repoguardian_workdir,
+            workdir=settings.rivu_workdir,
             older_than_seconds=ttl_seconds,
             active_paths=_active_workspace_paths(),
         )

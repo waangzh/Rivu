@@ -14,7 +14,7 @@ from app.review.overview_materials import overview_material
 from app.review.planner import identity, tokens
 from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
 
-logger = logging.getLogger("RepoGuardian.Review.Overview")
+logger = logging.getLogger("Rivu.Review.Overview")
 OVERVIEW_POLICY_VERSION = "change-first-prose-v1"
 
 

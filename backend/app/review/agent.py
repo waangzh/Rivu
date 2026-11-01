@@ -23,7 +23,7 @@ from app.review.tools import (
 )
 from app.review.working_context import WorkingContext
 
-logger = logging.getLogger("RepoGuardian.Review.Agent")
+logger = logging.getLogger("Rivu.Review.Agent")
 
 
 class MissingStructuredResult(ValueError):
@@ -136,7 +136,7 @@ class RequestGate(AgentMiddleware):
         if (available["output_tokens"] is not None
                 and available["output_tokens"] < 2 * limits.output_tokens):
             closing_reasons.append("output_tokens")
-        if seconds <= settings.repoguardian_model_request_timeout_seconds:
+        if seconds <= settings.rivu_model_request_timeout_seconds:
             closing_reasons.append("time")
         if call_remaining <= 1:
             closing_reasons.append("call_fuse")
@@ -249,7 +249,7 @@ class RequestGate(AgentMiddleware):
         usage = getattr(message, "usage_metadata", None)
         context.window.observe_response(
             usage["input_tokens"] if usage else None, usage["output_tokens"] if usage else None,
-            perf_counter() - started, settings.repoguardian_model_request_timeout_seconds)
+            perf_counter() - started, settings.rivu_model_request_timeout_seconds)
         await context.budget.settle(ticket, usage)
         called_tools = {call["name"] for call in message.tool_calls} if message else set()
         tool_names = [tool.name for tool in tools if tool.name in called_tools]

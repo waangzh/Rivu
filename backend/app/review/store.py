@@ -102,7 +102,7 @@ class ReviewStore:
                 model=run.configuration.model, provider=run.configuration.provider,
                 task_snapshot=run.model_dump(mode="json"),
                 created_at=run.created_at, updated_at=run.updated_at,
-                retention_until=utcnow() + timedelta(days=settings.repoguardian_retention_days)
+                retention_until=utcnow() + timedelta(days=settings.rivu_retention_days)
             ).on_conflict_do_nothing(index_elements=["id"]))
             existing = session.scalar(select(ReviewCreateIntentOrm).where(
                 ReviewCreateIntentOrm.caller_id == caller_id, ReviewCreateIntentOrm.key == key))
@@ -118,7 +118,7 @@ class ReviewStore:
                     ReviewTaskOrm.repository == run.snapshot.repository, ReviewTaskOrm.pr_number == run.pr.number,
                     ReviewCreateIntentOrm.caller_id == caller_id,
                     ReviewTaskOrm.created_at > utcnow() - timedelta(hours=1))))
-                if len(recent) >= settings.repoguardian_incremental_review_max_runs_per_hour:
+                if len(recent) >= settings.rivu_incremental_review_max_runs_per_hour:
                     raise ValueError("review_frequency_limited")
             session.add(ReviewCreateIntentOrm(id=uuid4().hex, caller_id=caller_id, key=key,
                                              request_hash=request_hash, run_id=run.id))

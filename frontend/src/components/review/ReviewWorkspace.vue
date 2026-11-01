@@ -135,7 +135,7 @@ function exportReport() {
   const url = URL.createObjectURL(new Blob([markdown.value], { type: 'text/markdown;charset=utf-8' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'RepoGuardian-' + props.task.id + '-' + props.task.snapshot.head_sha.slice(0, 8) + '.md';
+  link.download = 'Rivu-' + props.task.id + '-' + props.task.snapshot.head_sha.slice(0, 8) + '.md';
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }

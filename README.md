@@ -1,10 +1,10 @@
-# RepoGuardian
+# Rivu
 
 > 基于固定源码证据、理解仓库上下文、严格只读的 AI Pull Request 审查 Agent。
 
 输入 GitHub PR URL，选择范围和资源上限，即可启动审查。Reviewer 按需调查并即时保存候选，独立 Verifier 寻找反证、判断归因，最终提供问题、证据、运行范围和默认 LLM 变更总览。
 
-**RepoGuardian Server 不执行目标仓库代码。** 不安装目标依赖，不运行目标测试、构建或脚本，不触发目标 CI，也不自动修复或写回补丁。
+**Rivu Server 不执行目标仓库代码。** 不安装目标依赖，不运行目标测试、构建或脚本，不触发目标 CI，也不自动修复或写回补丁。
 
 ## 项目特点
 
@@ -21,8 +21,8 @@
 需要 Git、uv、Python 3.12+、Node.js 21+、npm，以及支持原生工具调用的模型服务。
 
 ```sh
-git clone https://github.com/waangzh/RepoGuardian.git
-cd RepoGuardian
+git clone https://github.com/waangzh/Rivu.git
+cd Rivu
 cp .env.example backend/.env
 cd backend
 uv sync --extra test
@@ -31,10 +31,10 @@ uv sync --extra test
 在 `backend/.env` 配置模型：
 
 ```env
-REPOGUARDIAN_PROVIDER=openai
+RIVU_PROVIDER=openai
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
-REPOGUARDIAN_MODEL=gpt-4.1-mini
+RIVU_MODEL=gpt-4.1-mini
 ```
 
 在 `backend/` 初始化**新的空数据库**并启动：
@@ -44,7 +44,7 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-默认数据库为 `backend/.repoguardian/reviews.db`，Schema 基线为 `20261031_0001`，不再使用独立 Checkpointer。若曾运行旧架构，先停止旧 Worker 与 Publisher，保存旧数据库、Checkpoint 和 Artifact，并核对所有 `uncertain` 发布；自定义数据库路径必须改到新的空库。旧数据库不会自动转换或删除，旧 Alembic 版本会被拒绝。不要用 `stamp` 伪装完成切换。
+默认数据库为 `backend/.rivu/reviews.db`，Schema 基线为 `20261031_0001`，不再使用独立 Checkpointer。若曾运行旧架构，先停止旧 Worker 与 Publisher，保存旧数据库、Checkpoint 和 Artifact，并核对所有 `uncertain` 发布；自定义数据库路径必须改到新的空库。旧数据库不会自动转换或删除，旧 Alembic 版本会被拒绝。不要用 `stamp` 伪装完成切换。
 
 API 默认位于 `http://127.0.0.1:8000`；[健康检查](http://127.0.0.1:8000/health) 返回 `{"status":"ok"}`，[接口文档](http://127.0.0.1:8000/docs) 列出当前契约。
 
@@ -86,7 +86,7 @@ npm run dev
 
 Unit 以文件为完整性边界：1–3 个文件的小变更确定性分组；纳入文件达到 4 个且没有复用完成范围时，正式任务使用一次只含文件元数据和静态关系提示的 LLM 分组。预览不调用分组模型，因此不代表最终语义分组。结果经服务端去重、补齐遗漏、10 文件上限和上下文容量校验后，与工作项一起事务冻结；失败或恢复时已有请求状态不明，回退逐文件审查，不盲目重发收费请求。超大单文件保留一个 Unit，其材料继续分页交付，不因此丢弃变更。
 
-累计输入/输出 Token 与整轮模型调用上限默认不设门禁；仍持久化每次请求的预留、实际用量和未知用量。可通过 `.env.example` 中的 `REPOGUARDIAN_REVIEW_MAX_*` 显式设置成本上限，已有运行保持创建时冻结的配置。单次上下文窗口默认 1M，须按实际执行模型能力配置；它不是建议填满的目标。单 Agent 调用/工具熔断、扫描量和总期限仍有效。连续工具轮次没有新信息时先警告，再关闭调查工具，最多允许两次受原预算约束的结构化收尾请求；仍不能交付结果时中断为未完成，实际证据缺口继续保留。已收到源码范围的重叠读取不算新进展；合法分页、BASE/HEAD 对照和新源码仍可推进调查。
+累计输入/输出 Token 与整轮模型调用上限默认不设门禁；仍持久化每次请求的预留、实际用量和未知用量。可通过 `.env.example` 中的 `RIVU_REVIEW_MAX_*` 显式设置成本上限，已有运行保持创建时冻结的配置。单次上下文窗口默认 1M，须按实际执行模型能力配置；它不是建议填满的目标。单 Agent 调用/工具熔断、扫描量和总期限仍有效。连续工具轮次没有新信息时先警告，再关闭调查工具，最多允许两次受原预算约束的结构化收尾请求；仍不能交付结果时中断为未完成，实际证据缺口继续保留。已收到源码范围的重叠读取不算新进展；合法分页、BASE/HEAD 对照和新源码仍可推进调查。
 
 Agent 保持 System Prompt 固定，预算、时间和收尾提示作为独立消息追加并保留在历史中，便于复用稳定的请求前缀。工具结果使用确定性压缩：首次源码正文保留，重复源码和检索结果引用此前收到的内容，证据句柄、侧别、行范围和分页控制信息仍可使用；完整来源继续归档。小 Unit 在收到全部变更材料、相关测试源码、搜索关联的消费者源码后会收到收尾提醒，仍可针对具体缺失前提继续补查。
 
@@ -112,8 +112,8 @@ Agent 保持 System Prompt 固定，预算、时间和收尾提示作为独立�
 
 发布默认关闭，仅支持可信的本地单用户部署。Review Agent 没有 GitHub 写工具，Publisher 使用独立 PAT，绝不回退使用只读 `GITHUB_TOKEN`。
 
-1. 配置独立 `REPOGUARDIAN_GITHUB_PUBLISH_TOKEN`、数字仓库 ID allowlist、PAT 用户数字 ID 和至少 32 字符的 `REPOGUARDIAN_PUBLICATION_API_TOKEN`。
-2. 在 GitHub 核对 PAT 的 **Pull requests: write** grant 后，设置 `REPOGUARDIAN_GITHUB_PUBLISH_PULL_REQUESTS_WRITE_CONFIRMED=true`，再启用发布。完整字段见 [环境变量示例](.env.example)。
+1. 配置独立 `RIVU_GITHUB_PUBLISH_TOKEN`、数字仓库 ID allowlist、PAT 用户数字 ID 和至少 32 字符的 `RIVU_PUBLICATION_API_TOKEN`。
+2. 在 GitHub 核对 PAT 的 **Pull requests: write** grant 后，设置 `RIVU_GITHUB_PUBLISH_PULL_REQUESTS_WRITE_CONFIRMED=true`，再启用发布。完整字段见 [环境变量示例](.env.example)。
 3. 在 Publish 页输入操作口令、选择 Finding 并预检，再查看实际 Summary / Inline、报告版本和部分发布提示，最后明确确认。操作口令只保留在页面内存，不是 GitHub PAT。
 4. `uncertain` 必须先对账，不盲目重发 POST。Sticky Summary 不覆盖更新审查或人工编辑；精确 LEFT / RIGHT 映射失败时转入 Summary。
 
@@ -123,18 +123,18 @@ Publisher 独立复验规范化 Finding、核验准入、固定快照、来源�
 
 [环境变量示例](.env.example) 是配置清单。模型端点、默认模型和记录保留天数可在设置页修改；已有 Run 的配置保持冻结。源码会发送到所配置的模型服务，使用前确认数据边界；LangSmith 默认关闭。
 
-- 整轮成本主要由 `REPOGUARDIAN_REVIEW_MAX_INPUT_TOKENS`、`REPOGUARDIAN_REVIEW_MAX_OUTPUT_TOKENS` 和总期限控制；模型每次请求会获知扣除核验、总览保护份额后的共享余额，并在余额或时间接近边界时收尾。
-- `REPOGUARDIAN_MODEL_CONTEXT_TOKENS` 限制请求上下文容量；预估包括消息、工具和结构化 Schema。使用分词估算，不能当成所有模型的精确计费上界。
-- `REPOGUARDIAN_AGENT_MAX_CALLS` 与 `REPOGUARDIAN_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认分别为 48 与 64。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
-- `REPOGUARDIAN_AGENT_MAX_TOOL_CALLS` 继续限制单次 Agent 的工具调用，扫描量和工具超时约束保留；并发由 `REPOGUARDIAN_REVIEW_CONCURRENCY` 控制。
-- 总时长由 `REPOGUARDIAN_REVIEW_TIMEOUT_SECONDS` 冻结。软截止停止新发现请求；硬截止阻止所有新模型请求，停止在途工作，只做合法的本地事实收尾。
+- 整轮成本主要由 `RIVU_REVIEW_MAX_INPUT_TOKENS`、`RIVU_REVIEW_MAX_OUTPUT_TOKENS` 和总期限控制；模型每次请求会获知扣除核验、总览保护份额后的共享余额，并在余额或时间接近边界时收尾。
+- `RIVU_MODEL_CONTEXT_TOKENS` 限制请求上下文容量；预估包括消息、工具和结构化 Schema。使用分词估算，不能当成所有模型的精确计费上界。
+- `RIVU_AGENT_MAX_CALLS` 与 `RIVU_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认分别为 48 与 64。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
+- `RIVU_AGENT_MAX_TOOL_CALLS` 继续限制单次 Agent 的工具调用，扫描量和工具超时约束保留；并发由 `RIVU_REVIEW_CONCURRENCY` 控制。
+- 总时长由 `RIVU_REVIEW_TIMEOUT_SECONDS` 冻结。软截止停止新发现请求；硬截止阻止所有新模型请求，停止在途工作，只做合法的本地事实收尾。
 - 请求前原子预留，未知用量保持未知并占用预留；恢复不清零。实际用量超过估算后如实记录，停止后续超预算请求。
 
 SQLite 与本地 Artifact 是单用户持久化，不是多租户安全隔离。源码读取保留 tracked blob、路径、敏感文件、realpath / symlink、大小和调用预算约束；不向模型暴露 Shell、任意网络或发布权限。日志不输出源码、凭据和供应商异常正文。
 
 ## 开发与验证
 
-后端使用 Python / FastAPI，前端使用 Vue 3 / TypeScript / Vite。开发测试可执行 RepoGuardian 自身代码，不能因此为产品增加目标代码执行权限。
+后端使用 Python / FastAPI，前端使用 Vue 3 / TypeScript / Vite。开发测试可执行 Rivu 自身代码，不能因此为产品增加目标代码执行权限。
 
 ```sh
 cd backend
@@ -149,7 +149,7 @@ git diff --check
 
 单元与集成测试覆盖固定源码、工具循环、预算、Lease、取消、恢复和 HTTP 模拟发布对账。模拟模型验证执行契约，不证明真实模型的误报、召回、成本收益或总览质量。本次未建设离线 Eval 平台；真实模型内容验收、浏览器验收、真实 GitHub 写入和具体数据库切换须单独进行。
 
-阶段实施与调整记录见 [重构进度](docs/refactor-progress.md)。反馈问题时，通过 [GitHub Issue](https://github.com/waangzh/RepoGuardian/issues) 提供复现步骤、预期、实际结果和脱敏错误信息；不要提交 `.env`、Token、数据库或运行产物。
+阶段实施与调整记录见 [重构进度](docs/refactor-progress.md)。反馈问题时，通过 [GitHub Issue](https://github.com/waangzh/Rivu/issues) 提供复现步骤、预期、实际结果和脱敏错误信息；不要提交 `.env`、Token、数据库或运行产物。
 
 ## 许可证
 

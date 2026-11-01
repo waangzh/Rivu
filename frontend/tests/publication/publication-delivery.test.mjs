@@ -15,7 +15,7 @@ test("发布面板未启用时只说明复制可用，启用后展示问题选�
 
     const disabled = await render({ enabled: false, mode: "copy_only" });
     // 未启用时评论仍可阅读和复制，配置说明按需展开。
-    for (const text of ["服务端未启用直接发布", "完整评论仍可在上方阅读和复制", "如何启用直接发布", "REPOGUARDIAN_GITHUB_PUBLISH_ENABLED"]) assert.ok(disabled.includes(text), text);
+    for (const text of ["服务端未启用直接发布", "完整评论仍可在上方阅读和复制", "如何启用直接发布", "RIVU_GITHUB_PUBLISH_ENABLED"]) assert.ok(disabled.includes(text), text);
     assert.ok(!disabled.includes("2. 发布授权"));
     assert.ok(!disabled.includes("检查发布条件并预览"));
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AppPage } from '../../types/operations'; import { reviewPrimarySections, type ReviewSection } from '../../types/workspace'; import AppIcon from '../common/AppIcon.vue'; import brandSymbol from '../../assets/repoguardian-symbol-color.svg'; import brandSymbolWhite from '../../assets/repoguardian-symbol-white.svg'; import { usePreferences } from '../../composables/usePreferences';
+import type { AppPage } from '../../types/operations'; import { reviewPrimarySections, type ReviewSection } from '../../types/workspace'; import AppIcon from '../common/AppIcon.vue'; import brandSymbol from '../../assets/rivu-symbol-color.svg'; import brandSymbolWhite from '../../assets/rivu-symbol-white.svg'; import { usePreferences } from '../../composables/usePreferences';
 const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: ReviewSection; hasReview: boolean; hasPending?: boolean; taskActive: boolean; mobileOpen: boolean; busy: boolean }>(); defineEmits<{ 'update:modelValue': [page: AppPage]; section: [value: ReviewSection]; create: []; close: [] }>();
 </script>
 <template>
@@ -9,7 +9,7 @@ const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: 
 <img :src="theme === 'dark' ? brandSymbolWhite : brandSymbol" alt="" width="36" height="36" />
 </div>
 <div class="brand-word">
-<strong>RepoGuardian</strong>
+<strong>Rivu</strong>
 <small>Evidence-first review</small>
 </div>
 <button class="icon-btn mobile-close" aria-label="关闭导航" @click="$emit('close')">

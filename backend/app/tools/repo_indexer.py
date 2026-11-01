@@ -36,7 +36,7 @@ from app.tools.repository_graph import (
 _IGNORED_DIRS = frozenset({
     ".git", "venv", "node_modules", "dist", "build",
     "__pycache__", ".pytest_cache", ".coverage", ".mypy_cache",
-    ".ruff_cache", ".tox", ".eggs", ".repoguardian",
+    ".ruff_cache", ".tox", ".eggs", ".rivu",
 })
 
 _IGNORED_FILES = frozenset({".DS_Store", "Thumbs.db"})

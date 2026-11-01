@@ -30,7 +30,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const retryableCreateStatuses = new Set([408, 429, 500, 502, 503, 504]);
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number | null) {
+  constructor(message: string, readonly status: number | null, readonly retryable?: boolean) {
     super(message);
     this.name = 'ApiError';
   }
@@ -61,7 +61,9 @@ function requestError(payload: unknown, status: number) {
         ?? '请求失败 (' + status + ')')
       : '请求失败 (' + status + ')';
 
-  return new ApiError(message, status);
+  const retryable = typeof detail === 'object' && detail !== null
+    ? (detail as { retryable?: unknown }).retryable : undefined;
+  return new ApiError(message, status, typeof retryable === 'boolean' ? retryable : undefined);
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -137,7 +139,8 @@ function aborted(signal: AbortSignal | undefined, error: unknown) {
 }
 
 function retryableCreateError(error: unknown) {
-  return !(error instanceof ApiError) || retryableCreateStatuses.has(error.status ?? 0);
+  return !(error instanceof ApiError)
+    || (error.retryable !== false && retryableCreateStatuses.has(error.status ?? 0));
 }
 
 export async function createReview(
@@ -149,7 +152,6 @@ export async function createReview(
   const cancel = () => controller.abort();
   if (signal?.aborted) cancel();
   else signal?.addEventListener('abort', cancel, { once: true });
-  const timeout = setTimeout(cancel, 120_000);
   const init: RequestInit = {
     method: 'POST',
     headers: { 'Idempotency-Key': key },
@@ -165,7 +167,6 @@ export async function createReview(
       return await request<Run>('/api/reviews', init);
     }
   } finally {
-    clearTimeout(timeout);
     signal?.removeEventListener('abort', cancel);
   }
 }

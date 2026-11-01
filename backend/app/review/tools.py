@@ -15,7 +15,7 @@ from app.review.findings import admit_candidate
 from app.review.retrieval import find_paths, search
 from app.review.evidence import SourceReadError
 
-logger = logging.getLogger("RepoGuardian.Review.Tools")
+logger = logging.getLogger("Rivu.Review.Tools")
 
 
 def bounded(function):

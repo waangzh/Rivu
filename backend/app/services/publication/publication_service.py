@@ -57,7 +57,7 @@ class PublicationService:
     async def create(self, review_id, selection, key):
         if await asyncio.to_thread(self.task_loader, review_id) is None:
             raise KeyError("review_not_found")
-        publisher = f"user:{self.config.repoguardian_github_publish_publisher_id}"
+        publisher = f"user:{self.config.rivu_github_publish_publisher_id}"
         existing = await asyncio.to_thread(self.repo.existing_request, review_id, selection, publisher, key)
         if existing:
             self.authorize(existing)
@@ -72,8 +72,8 @@ class PublicationService:
         return await asyncio.to_thread(self.repo.create, checked["plan"], selection, checked["context"], key)
 
     def authorize(self, attempt):
-        allowed = {int(value.strip()) for value in self.config.repoguardian_github_publish_allowed_repositories.split(",") if value.strip().isdigit()}
-        if (attempt.repository_id not in allowed or attempt.publisher_identity != f"user:{self.config.repoguardian_github_publish_publisher_id}"):
+        allowed = {int(value.strip()) for value in self.config.rivu_github_publish_allowed_repositories.split(",") if value.strip().isdigit()}
+        if (attempt.repository_id not in allowed or attempt.publisher_identity != f"user:{self.config.rivu_github_publish_publisher_id}"):
             raise GitHubPublishError("repository_not_authorized")
 
     async def get(self, review_id, identity):

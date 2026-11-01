@@ -28,7 +28,7 @@ class StoredArtifact:
 
 class LocalArtifactStore:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = (root or settings.repoguardian_artifact_dir).resolve()
+        self.root = (root or settings.rivu_artifact_dir).resolve()
 
     def put_text(self, *, task_id: str, kind: str, content: str) -> StoredArtifact:
         # Parallel native tools can produce the same evidence simultaneously.

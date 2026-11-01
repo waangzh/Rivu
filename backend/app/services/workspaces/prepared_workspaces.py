@@ -25,7 +25,7 @@ from app.tools.workspace_cleanup import (
     PREPARED_WORKSPACE_PREFIX, _directory_size, cleanup_workspace,
 )
 
-logger = logging.getLogger("RepoGuardian.PreparedWorkspaces")
+logger = logging.getLogger("Rivu.PreparedWorkspaces")
 
 
 def prepared_workspace_key(pr):
@@ -46,7 +46,7 @@ def _is_link(path: Path) -> bool:
 class PreparedWorkspaces:
     def __init__(self, repository, workdir=None):
         self.sessions = repository.sessions
-        self.root = Path(workdir if workdir is not None else settings.repoguardian_workdir).resolve()
+        self.root = Path(workdir if workdir is not None else settings.rivu_workdir).resolve()
 
     @contextmanager
     def guard(self, *, wait=True, cancel_event=None):
@@ -129,15 +129,15 @@ class PreparedWorkspaces:
                     removed += 1
         total = sum(max(0, row.size_bytes) for row in rows)
         for row in list(rows):
-            if (len(rows) + reserve_entries <= settings.repoguardian_prepared_workspace_max_entries
-                    and total + reserve_bytes <= settings.repoguardian_prepared_workspace_max_bytes):
+            if (len(rows) + reserve_entries <= settings.rivu_prepared_workspace_max_entries
+                    and total + reserve_bytes <= settings.rivu_prepared_workspace_max_bytes):
                 break
             if self._remove(row):
                 rows.remove(row)
                 total -= max(0, row.size_bytes)
                 removed += 1
-        fits = (len(rows) + reserve_entries <= settings.repoguardian_prepared_workspace_max_entries
-                and total + reserve_bytes <= settings.repoguardian_prepared_workspace_max_bytes)
+        fits = (len(rows) + reserve_entries <= settings.rivu_prepared_workspace_max_entries
+                and total + reserve_bytes <= settings.rivu_prepared_workspace_max_bytes)
         return removed, fits
 
     def maintain(self):
@@ -146,7 +146,7 @@ class PreparedWorkspaces:
                 return 0
             removed, _ = self._prune()
             registered = {row.directory for row in self._rows()}
-            cutoff = time.time() - settings.repoguardian_prepared_workspace_ttl_seconds
+            cutoff = time.time() - settings.rivu_prepared_workspace_ttl_seconds
             for path in self.root.iterdir():
                 if (not path.name.startswith(PREPARED_WORKSPACE_PREFIX)
                         or path.name in registered or _is_link(path) or not path.is_dir()):
@@ -168,7 +168,7 @@ class PreparedWorkspaces:
                         PreparedWorkspaceOrm.input_key == key, PreparedWorkspaceOrm.state == "ready",
                         PreparedWorkspaceOrm.expires_at > now).values(
                             last_used_at=now, expires_at=now + timedelta(
-                                seconds=settings.repoguardian_prepared_workspace_ttl_seconds)))
+                                seconds=settings.rivu_prepared_workspace_ttl_seconds)))
 
     def publish(self, key, repo_path, pr, diff_context, *, cancel_event=None):
         path = Path(repo_path)
@@ -183,8 +183,8 @@ class PreparedWorkspaces:
                    and self._path(row.directory).is_dir() for row in self._rows()):
                 return False
             size = _directory_size(path)
-            if (settings.repoguardian_prepared_workspace_max_entries == 0
-                    or size > settings.repoguardian_prepared_workspace_max_bytes):
+            if (settings.rivu_prepared_workspace_max_entries == 0
+                    or size > settings.rivu_prepared_workspace_max_bytes):
                 return False
             _, fits = self._prune(reserve_bytes=size, reserve_entries=1)
             if not fits:
@@ -199,7 +199,7 @@ class PreparedWorkspaces:
                         directory=destination.name, base_sha=pr.base.sha, head_sha=pr.head.sha,
                         effective_base_sha=diff_context.get("effective_base_sha") or pr.base.sha,
                         size_bytes=size, state="ready", created_at=now, last_used_at=now,
-                        expires_at=now + timedelta(seconds=settings.repoguardian_prepared_workspace_ttl_seconds)))
+                        expires_at=now + timedelta(seconds=settings.rivu_prepared_workspace_ttl_seconds)))
             except BaseException:
                 cleanup_workspace(destination, workdir=self.root)
                 raise
@@ -208,8 +208,8 @@ class PreparedWorkspaces:
     def copy(self, pr, git_tool, *, progress_callback=None, cancel_event=None):
         key = prepared_workspace_key(pr)
         with self.guard(cancel_event=cancel_event):
-            if (settings.repoguardian_prepared_workspace_max_entries == 0
-                    or settings.repoguardian_prepared_workspace_max_bytes == 0):
+            if (settings.rivu_prepared_workspace_max_entries == 0
+                    or settings.rivu_prepared_workspace_max_bytes == 0):
                 return None
             for row in reversed(self._rows()):
                 if (row.input_key != key or row.state != "ready"
@@ -233,7 +233,7 @@ class PreparedWorkspaces:
                         session.execute(update(PreparedWorkspaceOrm).where(
                             PreparedWorkspaceOrm.id == row.id).values(last_used_at=now,
                                 expires_at=now + timedelta(
-                                    seconds=settings.repoguardian_prepared_workspace_ttl_seconds)))
+                                    seconds=settings.rivu_prepared_workspace_ttl_seconds)))
                 except BaseException:
                     cleanup_workspace(result[0], workdir=self.root)
                     raise

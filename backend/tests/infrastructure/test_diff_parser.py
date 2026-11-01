@@ -9,7 +9,7 @@ index 1111111..2222222 100644
 @@ -1,2 +1,3 @@
  def hello():
 -    return "hi"
-+    name = "RepoGuardian"
++    name = "Rivu"
 +    return f"hi {name}"
 """
     files = DiffParser().parse(diff)

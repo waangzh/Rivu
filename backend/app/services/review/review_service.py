@@ -30,7 +30,7 @@ from app.services.workspaces.prepared_workspaces import (
 )
 from app.tools.workspace_cleanup import cleanup_workspace
 
-logger = logging.getLogger("RepoGuardian.Review.Service")
+logger = logging.getLogger("Rivu.Review.Service")
 
 
 class ReviewService:
@@ -42,6 +42,7 @@ class ReviewService:
         self._worker = ReviewWorker(self._task_queue, self._handle_job, kinds=("review", "overview"))
         self._worker_task = None
         self._repo_paths = {}
+        self._creations = {}
 
     @property
     def repository(self):
@@ -83,6 +84,10 @@ class ReviewService:
             self._worker_task = asyncio.create_task(self._worker.run_forever())
 
     async def close(self):
+        preparations = [task for _, task in self._creations.values()]
+        for task in preparations:
+            task.cancel()
+        await asyncio.gather(*preparations, return_exceptions=True)
         self._worker.stop()
         for task in list(self._worker._active.values()):
             task.cancel()
@@ -170,6 +175,28 @@ class ReviewService:
         if normalized["paths"] is not None:
             normalized["paths"] = sorted(set(normalized["paths"]))
         request_hash = identity(normalized)
+        scope = (caller_id, key)
+        fingerprint = (request_hash, expected_snapshot)
+        pending = self._creations.get(scope)
+        if pending:
+            if pending[0] != fingerprint:
+                raise ValueError("idempotency_key_conflict")
+            task = pending[1]
+        else:
+            task = asyncio.create_task(self._create(request, key, caller_id, request_hash,
+                                                     expected_snapshot))
+            self._creations[scope] = (fingerprint, task)
+            task.add_done_callback(lambda done: self._creation_finished(scope, done))
+        # A disconnected HTTP waiter must not cancel preparation shared by another request.
+        return await asyncio.shield(task)
+
+    def _creation_finished(self, scope, task):
+        if self._creations.get(scope, (None, None))[1] is task:
+            self._creations.pop(scope)
+        if not task.cancelled():
+            task.exception()
+
+    async def _create(self, request, key, caller_id, request_hash, expected_snapshot):
         existing = await asyncio.to_thread(self.store.find_intent, caller_id, key, request_hash)
         if existing:
             saved = await asyncio.to_thread(self.get_task, existing)

@@ -6,9 +6,9 @@ from app.core.config import Settings
 
 
 def publish_config(**updates):
-    values = dict(repoguardian_github_publish_enabled=True, repoguardian_github_publish_token="github-fixture",
-        repoguardian_publication_api_token="x" * 32, repoguardian_github_publish_publisher_id=7,
-        repoguardian_github_publish_allowed_repositories="123", repoguardian_github_publish_pull_requests_write_confirmed=True)
+    values = dict(rivu_github_publish_enabled=True, rivu_github_publish_token="github-fixture",
+        rivu_publication_api_token="x" * 32, rivu_github_publish_publisher_id=7,
+        rivu_github_publish_allowed_repositories="123", rivu_github_publish_pull_requests_write_confirmed=True)
     return Settings(_env_file=None, **(values | updates))
 
 

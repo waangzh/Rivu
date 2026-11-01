@@ -140,11 +140,11 @@ async def test_model_failure_logs_unknown_usage_without_provider_exception(tmp_p
                 raise ValueError("PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE")
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
-    caplog.set_level(logging.INFO, logger="RepoGuardian.Review")
+    caplog.set_level(logging.INFO, logger="Rivu.Review")
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     report = await ReviewOrchestrator(store, AgentRunner(PrivateFailureModel())).run(run.id, provider, lease)
     text = "\n".join(record.getMessage() for record in caplog.records
-                     if record.name.startswith("RepoGuardian.Review"))
+                     if record.name.startswith("Rivu.Review"))
     assert report.status == "partial"
     assert "模型请求失败" in text
     assert "error_type=ValueError usage=unknown" in text

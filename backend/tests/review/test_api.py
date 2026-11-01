@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import logging
 import json
@@ -14,7 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from app.review.contracts import ReviewRequest
 from app.services.review.review_service import ReviewService
 from app.tools.diff_parser import DiffParser
-from app.tools.git_tool import GitTool
+from app.tools.git_tool import GitTool, GitToolError, GitToolTimeout
 from tests.review.test_orchestrator import ReviewModel
 from tests.review.vnext_helpers import setup_source_run
 
@@ -47,8 +48,8 @@ def service_pipeline(tmp_path, monkeypatch):
     model = ReviewModel()
     provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost",
         _default_model="fake", agent_model=lambda *args, **kwargs: model)
-    monkeypatch.setattr(settings, "repoguardian_pr_discussions_enabled", False)
-    monkeypatch.setattr(settings, "repoguardian_prepared_workspace_max_entries", 0)
+    monkeypatch.setattr(settings, "rivu_pr_discussions_enabled", False)
+    monkeypatch.setattr(settings, "rivu_prepared_workspace_max_entries", 0)
     service = ReviewService(github, FixedGit(workdir), DiffParser(), provider, store,
                             source_provider.evidence.artifacts)
     monkeypatch.setattr(service, "start_worker", lambda: None)
@@ -202,14 +203,14 @@ async def test_review_logs_correlate_lifecycle_without_review_content(service_pi
     service, github, app = service_pipeline
     github.pr.title = "PRIVATE_TITLE_MUST_NOT_BE_LOGGED"
     github.pr.body = "PRIVATE_DESCRIPTION_MUST_NOT_BE_LOGGED"
-    caplog.set_level(logging.INFO, logger="RepoGuardian.Review")
+    caplog.set_level(logging.INFO, logger="Rivu.Review")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/reviews", json={"pr_url": github.pr.html_url},
                                      headers={"Idempotency-Key": "log-lifecycle"})
         assert response.status_code == 202
         run_id = response.json()["id"]
         assert await service._worker.run_once()
-    records = [record for record in caplog.records if record.name.startswith("RepoGuardian.Review")]
+    records = [record for record in caplog.records if record.name.startswith("Rivu.Review")]
     messages = [record.getMessage() for record in records]
     text = "\n".join(messages)
     for event in ("审查准备开始", "审查规划完成", "审查已入队", "作业已领取", "Agent开始",
@@ -228,7 +229,7 @@ async def test_review_logs_correlate_lifecycle_without_review_content(service_pi
 
 async def test_job_failure_logs_error_type_without_exception_body(service_pipeline, caplog):
     service, github, _ = service_pipeline
-    caplog.set_level(logging.INFO, logger="RepoGuardian.Review")
+    caplog.set_level(logging.INFO, logger="Rivu.Review")
     run = await service.create(ReviewRequest(pr_url=github.pr.html_url), "log-job-failure")
 
     def unavailable(*args, **kwargs):
@@ -237,9 +238,102 @@ async def test_job_failure_logs_error_type_without_exception_body(service_pipeli
     service._provider.agent_model = unavailable
     assert await service._worker.run_once()
     text = "\n".join(record.getMessage() for record in caplog.records
-                     if record.name.startswith("RepoGuardian.Review"))
+                     if record.name.startswith("Rivu.Review"))
     assert f"审查作业失败 review_id={run.id[:8]}" in text
     assert "status=dead_letter" in text
     assert "error_type=RuntimeError" in text
     assert "PRIVATE_PROVIDER_CREDENTIAL_AND_RESPONSE" not in text
     assert service.store.get(run.id).status == "failed"
+
+
+@pytest.mark.parametrize("path", ["/api/reviews", "/api/reviews/preview"])
+@pytest.mark.parametrize("error,code,status", [
+    (GitToolError("PRIVATE_GIT_URL_AND_STDERR"), "git_preparation_failed", 502),
+    (GitToolTimeout("PRIVATE_GIT_URL_AND_STDERR"), "git_timeout", 504),
+])
+async def test_preparation_failure_has_safe_error_protocol(service_pipeline, monkeypatch,
+                                                          path, error, code, status):
+    service, github, app = service_pipeline
+
+    async def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(service, "_prepare", fail)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                base_url="http://test") as client:
+        response = await client.post(path, json={"pr_url": github.pr.html_url},
+                                     headers={"Idempotency-Key": "preparation-failure"})
+    assert response.status_code == status
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert detail["retryable"] is (status == 504)
+    assert "PRIVATE" not in response.text
+    assert not service._creations
+
+
+async def test_concurrent_creation_shares_preparation_and_survives_waiter_cancel(
+        service_pipeline, monkeypatch):
+    service, github, _ = service_pipeline
+    entered, release = asyncio.Event(), asyncio.Event()
+    original, preparations = service._inputs, []
+
+    async def blocked(*args, **kwargs):
+        preparations.append(True)
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_inputs", blocked)
+    request = ReviewRequest(pr_url=github.pr.html_url)
+    first = asyncio.create_task(service.create(request, "shared"))
+    await entered.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    second = asyncio.create_task(service.create(request, "shared"))
+    await asyncio.sleep(0)
+    with pytest.raises(ValueError, match="idempotency_key_conflict"):
+        await service.create(request.model_copy(update={"depth": "deep"}), "shared")
+    release.set()
+    result = await second
+    assert preparations == [True]
+    assert github.calls == 1
+    assert (await service.create(request, "shared")).id == result.id
+    assert not service._creations
+
+
+async def test_failed_preparation_releases_same_key_for_retry(service_pipeline, monkeypatch):
+    service, github, _ = service_pipeline
+    original = service._inputs
+
+    async def fail(*args, **kwargs):
+        raise GitToolError("unavailable")
+
+    monkeypatch.setattr(service, "_inputs", fail)
+    request = ReviewRequest(pr_url=github.pr.html_url)
+    with pytest.raises(GitToolError):
+        await service.create(request, "retry-preparation")
+    assert not service._creations
+    monkeypatch.setattr(service, "_inputs", original)
+    assert (await service.create(request, "retry-preparation")).status == "queued"
+
+
+async def test_close_cancels_shared_preparation(service_pipeline, monkeypatch):
+    service, github, _ = service_pipeline
+    entered, stopped = asyncio.Event(), asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(service, "_inputs", blocked)
+    pending = asyncio.create_task(service.create(ReviewRequest(pr_url=github.pr.html_url), "closing"))
+    await entered.wait()
+    await service.close()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert stopped.is_set()
+    assert not service._creations

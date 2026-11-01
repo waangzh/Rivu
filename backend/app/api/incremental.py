@@ -26,7 +26,7 @@ async def incremental_webhook(
     delivery_id: str | None = Header(default=None, alias="X-GitHub-Delivery"),
 ) -> IncrementalWebhookReceipt:
     body = await request.body()
-    if not settings.repoguardian_github_webhook_secret:
+    if not settings.rivu_github_webhook_secret:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="GitHub webhook secret is not configured")
     if not verify_signature(body, signature):
@@ -41,7 +41,7 @@ async def incremental_webhook(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Invalid webhook payload") from None
     # 先做无副作用的策略判断，避免未启用时仍构造仓储或触发迁移检查。
-    if not settings.repoguardian_incremental_review_webhook_enabled:
+    if not settings.rivu_incremental_review_webhook_enabled:
         return IncrementalWebhookReceipt(delivery_id=delivery_id or "unknown",
                                          status="skipped", reason="webhook_disabled")
     parsed = parse_synchronize(payload)

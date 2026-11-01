@@ -8,12 +8,12 @@ from app.services.workspaces.prepared_workspaces import PreparedWorkspaces
 from app.tools.workspace_cleanup import reap_orphaned_workspaces
 from app.services.review.artifact_store import LocalArtifactStore
 
-logger = logging.getLogger("RepoGuardian.Maintenance")
+logger = logging.getLogger("Rivu.Maintenance")
 workspace_cleanup_lock = asyncio.Lock()
 
 
 def workspace_ttl_seconds():
-    return settings.repoguardian_orphan_workspace_ttl_seconds
+    return settings.rivu_orphan_workspace_ttl_seconds
 
 
 class MaintenanceService:
@@ -31,7 +31,7 @@ class MaintenanceService:
             await asyncio.to_thread(PreparedWorkspaces(self.store).maintain)
             async with workspace_cleanup_lock:
                 await asyncio.to_thread(reap_orphaned_workspaces,
-                    workdir=settings.repoguardian_workdir, older_than_seconds=workspace_ttl_seconds(),
+                    workdir=settings.rivu_workdir, older_than_seconds=workspace_ttl_seconds(),
                     active_paths=list(self.active_paths()))
         except Exception:
             logger.warning("maintenance_failed")
@@ -40,7 +40,7 @@ class MaintenanceService:
         while not self._stopped.is_set():
             try:
                 await asyncio.wait_for(self._stopped.wait(),
-                                       timeout=settings.repoguardian_maintenance_interval_seconds)
+                                       timeout=settings.rivu_maintenance_interval_seconds)
             except TimeoutError:
                 await self.run_once()
 

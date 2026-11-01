@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-logger = logging.getLogger("RepoGuardian.WorkspaceCleanup")
+logger = logging.getLogger("Rivu.WorkspaceCleanup")
 PREPARED_WORKSPACE_PREFIX = ".prepared-"
 
 
@@ -67,7 +67,7 @@ def cleanup_workspace(
     if workdir is None:
         from app.core.config import settings
 
-        workdir = settings.repoguardian_workdir
+        workdir = settings.rivu_workdir
     try:
         _, target = _resolve_cleanup_target(repo_path, workdir)
     except (OSError, ValueError) as exc:

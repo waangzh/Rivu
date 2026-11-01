@@ -25,7 +25,7 @@ def review_event_key(parsed):
 
 
 def verify_signature(body: bytes, signature: str | None) -> bool:
-    secret = settings.repoguardian_github_webhook_secret
+    secret = settings.rivu_github_webhook_secret
     if (not secret or not isinstance(signature, str)
             or not re.fullmatch(r"sha256=[0-9a-f]{64}", signature)):
         return False
@@ -35,7 +35,7 @@ def verify_signature(body: bytes, signature: str | None) -> bool:
 
 def allowed_repositories() -> set[str]:
     return {value.strip().casefold()
-            for value in settings.repoguardian_incremental_review_webhook_repositories.split(",")
+            for value in settings.rivu_incremental_review_webhook_repositories.split(",")
             if value.strip()}
 
 
@@ -85,7 +85,7 @@ class IncrementalWebhookService:
         self.repository = repository
 
     async def handle(self, *, payload: dict, delivery_id: str | None) -> IncrementalWebhookReceipt:
-        if not settings.repoguardian_incremental_review_webhook_enabled:
+        if not settings.rivu_incremental_review_webhook_enabled:
             return IncrementalWebhookReceipt(delivery_id=delivery_id or "unknown",
                                              status="skipped", reason="webhook_disabled")
         if not delivery_id:
@@ -119,7 +119,7 @@ class IncrementalWebhookService:
         previous_id = await asyncio.to_thread(self.repository.find_intent,
             "github-webhook", review_event_key(parsed), request_hash)
         count = await asyncio.to_thread(self.repository.webhook_count, parsed["repository"], parsed["pr_number"])
-        if previous_id is None and count >= settings.repoguardian_incremental_review_max_runs_per_hour:
+        if previous_id is None and count >= settings.rivu_incremental_review_max_runs_per_hour:
             await self.review_service.stop_obsolete(parsed)
             await self._finish(delivery_id, status="skipped", reason="review_frequency_limited")
             return IncrementalWebhookReceipt(delivery_id=delivery_id, status="skipped",

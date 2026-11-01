@@ -12,11 +12,11 @@ from app.tools.github.github_publisher import GitHubPublishError
 
 
 def batch_marker(publication_id, batch_id):
-    return f"<!-- repoguardian:review-batch:v1\npublication={publication_id}\nbatch={batch_id}\n-->"
+    return f"<!-- rivu:review-batch:v1\npublication={publication_id}\nbatch={batch_id}\n-->"
 
 
 def finding_body(finding, publication_id):
-    return (finding.body_markdown + f"\n\n<!-- repoguardian:finding:v1\npublication={publication_id}\n"
+    return (finding.body_markdown + f"\n\n<!-- rivu:finding:v1\npublication={publication_id}\n"
             f"finding={finding_fingerprint(finding)}\n-->")
 
 
@@ -66,7 +66,7 @@ class PublicationDelivery:
         for review in reviews:
             if ((review.get("user") or {}).get("id") == context["publisher_id"]
                     and review.get("commit_id") == head_sha and review.get("state") == "COMMENTED"):
-                match = re.search(r"<!-- repoguardian:review-batch:v1\npublication=([a-f0-9]{32})\nbatch=([a-f0-9]{64})\n-->$", review.get("body") or "")
+                match = re.search(r"<!-- rivu:review-batch:v1\npublication=([a-f0-9]{32})\nbatch=([a-f0-9]{64})\n-->$", review.get("body") or "")
                 if match:
                     validate_comment(review, context, review=True)
                     valid_reviews[review["id"]] = match[1]
@@ -75,7 +75,7 @@ class PublicationDelivery:
         for remote in await self.github.paginate(f"{path}/pulls/{context['pr_number']}/comments"):
             if ((remote.get("user") or {}).get("id") != context["publisher_id"] or remote.get("commit_id") != head_sha):
                 continue
-            match = re.search(r"\n\n<!-- repoguardian:finding:v1\npublication=([a-f0-9]{32})\nfinding=([a-f0-9]{64})\n-->$", remote.get("body") or "")
+            match = re.search(r"\n\n<!-- rivu:finding:v1\npublication=([a-f0-9]{32})\nfinding=([a-f0-9]{64})\n-->$", remote.get("body") or "")
             if not match or match[2] not in by_fingerprint:
                 continue
             finding = by_fingerprint[match[2]]
@@ -140,13 +140,13 @@ class PublicationDelivery:
                 raise GitHubPublishError("inline_result_unknown", uncertain=True)
             else:
                 pending.append(item)
-        size = self.preflight.config.repoguardian_github_publish_batch_size
+        size = self.preflight.config.rivu_github_publish_batch_size
         path = self.github.repo_path(context["owner"], context["repo"])
         for offset in range(0, len(pending), size):
             batch = pending[offset:offset + size]
             identity = stable_hash([attempt.id, [item.id for item in batch]])
             payload = {"commit_id": attempt.head_sha, "event": "COMMENT", "body":
-                "RepoGuardian 已提交本次快照的代码行审查意见；总体审查结论请查看本 PR 的审查摘要。\n\n"
+                "Rivu 已提交本次快照的代码行审查意见；总体审查结论请查看本 PR 的审查摘要。\n\n"
                 + batch_marker(attempt.id, identity),
                 "comments": [{**checked["locations"][item.finding_key], "body": finding_body(by_key[item.finding_key], attempt.id)} for item in batch]}
             if any(len(comment["body"].encode()) > 60_000 for comment in payload["comments"]):

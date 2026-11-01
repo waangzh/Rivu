@@ -1,5 +1,5 @@
 {
-  "brand": "RepoGuardian",
+  "brand": "Rivu",
   "tagline": "Evidence-grounded code review",
   "date": "2026-10-29",
   "deck_title": "Source Pair / selected identity",
@@ -24,14 +24,14 @@
   "concepts": [
     {
       "name": "Source Pair / 双侧对照",
-      "symbol": "../svg/repoguardian-symbol-color.svg",
-      "avatar": "../svg/repoguardian-symbol-small-color.svg",
-      "lockup": "../svg/repoguardian-horizontal-color.svg",
-      "stacked": "../svg/repoguardian-stacked-color.svg",
-      "symbol_on_tile": "../svg/repoguardian-symbol-white.svg",
-      "symbol_on_dark": "../svg/repoguardian-symbol-white.svg",
-      "lockup_on_dark": "../svg/repoguardian-horizontal-white.svg",
-      "stacked_on_tile": "../svg/repoguardian-stacked-white.svg",
+      "symbol": "../svg/rivu-symbol-color.svg",
+      "avatar": "../svg/rivu-symbol-small-color.svg",
+      "lockup": "../svg/rivu-horizontal-color.svg",
+      "stacked": "../svg/rivu-stacked-color.svg",
+      "symbol_on_tile": "../svg/rivu-symbol-white.svg",
+      "symbol_on_dark": "../svg/rivu-symbol-white.svg",
+      "lockup_on_dark": "../svg/rivu-horizontal-white.svg",
+      "stacked_on_tile": "../svg/rivu-stacked-white.svg",
       "idea": "Two source boundaries focus on one fact.",
       "rationale": [
         "Paired boundaries echo Base / Head comparison.",
