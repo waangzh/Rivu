@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import Field
 
-from app.review.domain import Model, SourceRef
+from app.review.domain import Model, Snapshot, SourceRef
 from app.review.evidence import digest, source_lines
 from app.review.planner import identity, members, tokens, unit_capacity
 from app.review.store import BudgetExceeded
@@ -364,12 +365,28 @@ class ContextProvider:
     denied_paths: frozenset[str] = frozenset()
     discussions: list[dict] = field(default_factory=list)
     index: Any = None
+    _member_index: dict | None = field(default=None, init=False, repr=False, compare=False)
+    _member_snapshot: Snapshot | None = field(default=None, init=False, repr=False, compare=False)
+    _member_changes: list | None = field(default=None, init=False, repr=False, compare=False)
 
     def material_capacity(self) -> int:
         return unit_capacity(self.run.configuration.options.limits)
 
+    @property
+    def _member_map(self):
+        changes = self.run.changed_files
+        if self._member_index is None:
+            self._member_snapshot = self.run.snapshot.model_copy(deep=True)
+            self._member_index = members(changes)
+        elif (self.run.snapshot != self._member_snapshot
+                or (changes is not self._member_changes and changes != self._member_changes)):
+            raise ValueError("fixed_snapshot_inputs_changed")
+        # Frozen diff inputs are immutable; compare content only when the list is replaced.
+        self._member_changes = changes
+        return self._member_index
+
     def _member(self, key):
-        return members(self.run.changed_files)[key]
+        return deepcopy(self._member_map[key])
 
     async def material(self, context, key):
         member = self._member(key)
@@ -470,7 +487,7 @@ class ContextProvider:
                     continue
                 spent += cost
         by_path = {}
-        member_map = members(self.run.changed_files)
+        member_map = self._member_map
         for key in unit.required_hunk_ids:
             by_path.setdefault(member_map[key]["path"], []).append(key)
         # Give every related file a chance before consuming the remaining space.
