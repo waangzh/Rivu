@@ -47,7 +47,21 @@ test("发布结果与预检使用用户语言，不直接展示协议值", async
     // 错误码翻译保留可排障信息，但不再以英文短句作为用户提示。
     assert.match(utils.publicationErrorText("publication_disabled"), /只能复制评论/);
     assert.match(utils.publicationErrorText("summary_newer_review"), /更新版本/);
+    assert.match(utils.publicationErrorText("summary_operation_uncertain"), /此前审查的交付记录/);
     assert.match(utils.publicationErrorText("unknown_code_xyz"), /unknown_code_xyz/);
     assert.match(utils.publicationWarningText("diff_line_not_commentable"), /总结评论/);
   } finally { await server.close(); }
+});
+
+test("预检失败向界面返回明确的旧发布阻塞原因", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: "custom" });
+  const original = globalThis.fetch;
+  try {
+    const { preflightPublication } = await server.ssrLoadModule("/src/api/client.ts");
+    globalThis.fetch = async () => Response.json({ detail: { code: "summary_operation_uncertain" } }, { status: 409 });
+    await assert.rejects(preflightPublication("review", [], "fixture-operator"), /此前审查的交付记录/);
+  } finally {
+    globalThis.fetch = original;
+    await server.close();
+  }
 });

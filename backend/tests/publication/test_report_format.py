@@ -97,11 +97,14 @@ def test_question_markdown_is_escaped_and_bound_to_plan_hash(normalized_run):
     candidate.question_digest = finding_digest(candidate, run.snapshot)
     second = PublicationPlanner(artifacts).build(run)
     assert stable_hash(first.model_dump(mode="json")) != stable_hash(second.model_dump(mode="json"))
-    comment = compose_summary(second, {"finding_keys": []}, set(), [], "pending")
+    comment = compose_summary(second, {"finding_keys": []}, set(), [])
     assert "### 待核实项" in comment
     assert "@author" not in comment and "<script>" not in comment
     assert "javascript\\:run" in comment and "\n\\- injected" in comment
     assert "＠author" in comment
+    assert "投递状态" not in comment
+    assert "Publishing" not in comment
+    assert "Inline 失败" not in comment
 
 
 def test_large_question_summary_is_bounded_without_losing_local_report_details(large_question_run):
@@ -170,9 +173,16 @@ def test_invalid_terminal_candidate_cannot_produce_clean_advice(normalized_run, 
 def test_summary_fallback_keeps_the_verifier_comment(normalized_run):
     run, artifacts = normalized_run
     plan = PublicationPlanner(artifacts).build(run)
-    finding = plan.inline_drafts[0].model_copy(update={"placement": "summary"})
+    finding = plan.inline_drafts[0].model_copy(update={
+        "placement": "summary",
+        "title": "SUMMARY TITLE ONCE",
+        "recommendation": "Use `guard` before dividing.",
+    })
     plan.inline_drafts, plan.summary_findings = [], [finding]
-    assert finding.body_markdown in render_summary(plan)
+    summary = render_summary(plan)
+    assert summary.count("SUMMARY TITLE ONCE") == 1
+    assert "Use `guard` before dividing\\." in summary
+    assert finding.body_markdown not in summary
 
 
 def test_exact_duplicate_does_not_become_a_false_withheld_gap(normalized_run):
@@ -319,7 +329,7 @@ def test_selecting_no_comments_does_not_change_overall_review_conclusion(normali
     from app.services.publication.publication_worker import compose_summary
     run, artifacts = normalized_run
     plan = PublicationPlanner(artifacts).build(run)
-    comment = compose_summary(plan, {"finding_keys": []}, set(), [], "pending")
+    comment = compose_summary(plan, {"finding_keys": []}, set(), [])
     assert "完整静态审查未发现需要处理的已确认问题" not in comment
     assert "发现需要处理的已确认问题" in comment
 

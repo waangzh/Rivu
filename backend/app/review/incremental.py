@@ -8,7 +8,7 @@ DOCUMENTS = (".md", ".mdx", ".rst", ".adoc")
 
 def refine_plan(run, previous, previous_work, git, repo, history):
     included = {path for unit in run.plan.units for path in unit.paths}
-    run.plan.history = [item for item in history if any(
+    relevant_history = [item for item in history if any(
         source["path"] in included for source in item["sources"])]
     if previous is None or previous.report is None:
         run.plan.incremental_reason = "no_prior_report"
@@ -74,4 +74,5 @@ def refine_plan(run, previous, previous_work, git, repo, history):
             reused |= previous_work_id is not None
     run.plan.units = units
     run.plan.incremental_from = previous.id if reused else None
+    run.plan.history = relevant_history if reused else []
     run.plan.incremental_reason = "document_only_identical_blobs" if reused else "no_reusable_unit"

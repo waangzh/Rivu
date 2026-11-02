@@ -323,11 +323,17 @@ class ReviewService:
                 sources.append(SourceRef.model_validate(result["evidence"]))
             if not sources:
                 continue
+            location = old.get("location")
+            if location and not any(
+                    source.path == location["path"] and source.side == location["side"]
+                    and source.start_line <= location["line"] <= source.end_line
+                    for source in sources):
+                location = None
             candidate = Candidate(id=identity([provider.run.id, old["candidate_id"]])[:32],
                 unit_id=unit.id, attempt_id=provider.run.id, tool_call_id=f"history:{old['candidate_id']}",
                 previous_candidate_id=old["candidate_id"],
                 proposal=CandidateInput(claim=old["claim"], trigger=old["trigger"], impact=old["impact"],
-                    source_refs=[ref.id for ref in sources]), sources=sources)
+                    source_refs=[ref.id for ref in sources], location=location), sources=sources)
             await asyncio.to_thread(self.store.seed_history, provider.run.id, candidate, provider.lease)
 
     async def cancel_task(self, run_id):

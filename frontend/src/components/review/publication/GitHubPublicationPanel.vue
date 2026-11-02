@@ -46,7 +46,7 @@ function renderMarkdown(value: string) {
 }
 function clearTimer() { if (timer) clearTimeout(timer); timer = null; }
 function invalidate() { preview.value = null; acknowledge.value = false; confirmationKey.value = ""; dialog.value?.close(); }
-watch(() => props.plan, (value, previous) => {
+watch(() => JSON.stringify(props.plan), (value, previous) => {
   generation += 1; controller?.abort(); clearTimer(); current.value = null; history.value = []; busy.value = false;
   selected.value = findings.value.map(item => item.finding_key); token.value = ""; error.value = ""; expandAll.value = false;
   invalidate();
@@ -124,7 +124,7 @@ const highPriority = (key: string) => ["critical", "high"].includes(severityOf(k
 </script>
 
 <template>
-<section class="github-publication" aria-label="发布到 GitHub">
+<section class="github-publication" aria-label="发布到 GitHub" :aria-busy="busy">
 <header class="github-publication__head">
 <h3>发布到 GitHub</h3>
 <p>由服务端使用独立发布身份写入 PR：更新总结评论并创建所选代码行评论。复制评论不受此限制。</p>
@@ -145,8 +145,8 @@ const highPriority = (key: string) => ["critical", "high"].includes(severityOf(k
 </label>
 <button type="button" class="button button--secondary button--compact" :disabled="busy || !token" @click="preflight">检查发布条件并预览</button>
 </div>
-<p v-if="busy" role="status">正在处理发布请求…</p>
-<p v-if="error" role="alert">{{ error }}</p>
+<p v-if="busy" role="status">正在核对发布条件及已有评论，必要时检查此前未确认的写入，请稍候…</p>
+<p v-if="error" class="notice warn" role="alert">{{ error }}</p>
 <section v-if="preview" aria-label="实际发布预览">
 <h3>3. 实际发布预览</h3>
 <p>PR 总结评论{{ preview.summary_action === 'update' ? '将更新已有评论' : '将新建评论' }} · 审查版本 <code>{{ preview.head_sha.slice(0, 8) }}</code>

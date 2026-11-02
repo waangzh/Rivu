@@ -141,13 +141,21 @@ class PublicationRepository:
             ids = list(session.scalars(select(Attempt.id).where(Attempt.review_id == review_id).order_by(Attempt.requested_at.desc())))
         return [self.get(identity) for identity in ids]
 
-    def acquire(self, attempt, owner, job=None):
+    def acquire(self, attempt, owner, job=None, *, reconciliation=False):
         slot_id = stable_hash([attempt.repository_id, attempt.pr_number, attempt.publisher_identity])
         now = utcnow()
         with self.sessions.begin() as session:
             review = session.get(ReviewTaskOrm, attempt.review_id)
             if review is None or review.status not in {"completed", "partial"}:
                 raise PublicationConflict("review_not_publishable")
+            if reconciliation:
+                current = session.get(Attempt, attempt.id)
+                pending_job = session.scalar(select(WorkerJobOrm).where(
+                    WorkerJobOrm.idempotency_key == "github_publication:" + attempt.id))
+                if (current.state not in {"failed", "partial", "uncertain"}
+                        or (pending_job and pending_job.status == "leased" and pending_job.lease_until
+                            and pending_job.lease_until.replace(tzinfo=now.tzinfo) > now)):
+                    raise PublicationConflict("publication_busy")
             session.execute(insert(Slot).values(id=slot_id, repository_id=attempt.repository_id,
                 pr_number=attempt.pr_number, publisher_identity=attempt.publisher_identity).on_conflict_do_nothing())
             result = session.execute(update(Slot).where(Slot.id == slot_id,
@@ -289,7 +297,9 @@ class PublicationRepository:
             row = session.get(Batch, identity)
             row.state, row.last_error_code = state, error
             slot = session.get(Slot, lease.slot_id)
-            if state in {"published", "failed"} and slot.pending_publication_id == row.publication_id:
+            remaining = session.scalar(select(Batch.id).where(Batch.publication_id == row.publication_id,
+                Batch.id != row.id, Batch.state.in_(["publishing", "uncertain"])).limit(1))
+            if state in {"published", "failed"} and not remaining and slot.pending_publication_id == row.publication_id:
                 slot.pending_publication_id = None
             for item_id in row.item_ids:
                 item = session.get(Item, item_id)

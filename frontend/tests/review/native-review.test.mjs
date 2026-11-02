@@ -86,7 +86,7 @@ test('活动页显示输入缓存细分，缺失明细保持未知', async () =>
   } finally { await server.close(); }
 });
 
-test('新运行投影保留终态、快照和安全链接语义', async () => { const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' }); try { const { terminal, phaseLabel, safeGitHubLink, isFileContextFor } = await server.ssrLoadModule('/src/utils/nativeReview.ts'); assert.equal(terminal('partial'), true); assert.equal(terminal('running'), false); assert.equal(phaseLabel('finished'), '审查结束'); assert.equal(safeGitHubLink('javascript:alert(1)'), undefined); assert.equal(safeGitHubLink('https://github.com/o/r/pull/1'), 'https://github.com/o/r/pull/1'); assert.equal(isFileContextFor({ file_id: 0, file_path: 'a.py', snapshot: task('completed').snapshot, base_lines: [], head_lines: [] }, 0, 'a.py', task('completed').snapshot), true); } finally { await server.close(); } });
+test('新运行投影保留终态、快照和安全链接语义', async () => { const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' }); try { const { terminal, phaseLabel, reviewReasonLabel, safeGitHubLink, isFileContextFor } = await server.ssrLoadModule('/src/utils/nativeReview.ts'); assert.equal(terminal('partial'), true); assert.equal(terminal('running'), false); assert.equal(phaseLabel('finished'), '审查结束'); assert.equal(reviewReasonLabel('unverified_historical_candidates'), '仍有增量复核项未完成。'); assert.equal(safeGitHubLink('javascript:alert(1)'), undefined); assert.equal(safeGitHubLink('https://github.com/o/r/pull/1'), 'https://github.com/o/r/pull/1'); assert.equal(isFileContextFor({ file_id: 0, file_path: 'a.py', snapshot: task('completed').snapshot, base_lines: [], head_lines: [] }, 0, 'a.py', task('completed').snapshot), true); } finally { await server.close(); } });
 test('五切片工作台展示运行中和失败状态，不渲染不可信 HTML', async () => { const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' }); try { const { default: Component } = await server.ssrLoadModule('/src/components/review/ReviewWorkspace.vue'); for (const status of ['running', 'failed', 'cancelled']) { const html = await renderToString(createSSRApp(Component, { task: task(status) })); assert.match(html, /概览|变更|问题|活动|发布/); assert.match(html, /未执行目标代码/); assert.match(html, /&lt;script&gt;/); assert.doesNotMatch(html, /<script>alert/); if (status === 'running') assert.match(html, /停止审查/); } } finally { await server.close(); } });
 
 test('总览经 JSON 读取后保留自然段和行内代码，只把其他标记作为文本', async () => {
@@ -128,6 +128,33 @@ test('总览经 JSON 读取后保留自然段和行内代码，只把其他标�
     assert.match(html, /材料容量不足/);
     assert.match(html, /&lt;script&gt;unsafe.py&lt;\/script&gt;/);
   } finally { await server.close(); }
+});
+
+test('增量概览说明范围复用但不展示历史意见', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewOverviewPage.vue');
+    const incremental = task('completed');
+    incremental.plan.incremental_from = 'previous-review';
+    incremental.plan.history = [{ claim: 'OLD CLAIM', candidate_id: 'old' }];
+    const report = {
+      candidates: [], excluded: {}, findings: [], reasons: ['unverified_historical_candidates'],
+      units: [], usage: {}, overview: { status: 'pending', omitted: {}, omitted_materials: [] },
+    };
+    const html = await renderToString(createSSRApp(Component, {
+      task: incremental, report, findings: [], loading: false,
+    }));
+    assert.match(html, /审查单元与复用/);
+    assert.match(html, /复用范围内的候选仍须本轮独立核验/);
+    assert.match(html, /仍有增量复核项未完成/);
+    assert.doesNotMatch(html, /历史意见|OLD CLAIM|unverified_historical_candidates/);
+  } finally {
+    await server.close();
+  }
 });
 
 test('行内代码组件不把围栏、跨行反引号、HTML 和链接当作可执行内容', async () => {

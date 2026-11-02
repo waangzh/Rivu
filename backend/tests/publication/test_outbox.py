@@ -26,6 +26,11 @@ class GitHubAPI:
         self.comments, self.reviews, self.inline, self.writes = {}, {}, {}, []
         self.timeout_summary = False
         self.timeout_inline = False
+        self.omit_inline_location = False
+        self.detail_reads = []
+        self.detail_changes = {}
+        self.detail_missing = False
+        self.detail_timeout = False
 
     def __call__(self, request):
         path, method = request.url.path, request.method
@@ -75,13 +80,27 @@ class GitHubAPI:
                 return httpx.Response(404, json={})
         elif path.endswith("/issues/1/comments"):
             value = list(self.comments.values())
+        elif "/pulls/comments/" in path:
+            identity = int(path.rsplit("/", 1)[-1])
+            self.detail_reads.append(identity)
+            if self.detail_timeout:
+                raise httpx.ReadTimeout("comment detail unavailable")
+            if self.detail_missing:
+                return httpx.Response(404, json={})
+            value = {**self.inline[identity], **self.detail_changes}
         elif "/reviews/" in path and path.endswith("/comments"):
             identity = int(path.split("/")[-2])
             value = [comment for comment in self.inline.values() if comment["pull_request_review_id"] == identity]
+            if self.omit_inline_location:
+                value = [{key: field for key, field in comment.items() if key not in {"line", "side"}}
+                         for comment in value]
         elif path.endswith("/pulls/1/reviews"):
             value = list(self.reviews.values())
         elif path.endswith("/pulls/1/comments"):
             value = list(self.inline.values())
+            if self.omit_inline_location:
+                value = [{key: field for key, field in comment.items() if key not in {"line", "side"}}
+                         for comment in value]
         else:
             raise AssertionError((method, path))
         return httpx.Response(200, json=value)
@@ -139,6 +158,165 @@ async def test_unknown_accepted_post_reconciles_without_duplicate(publication_pi
     posts = [path for method, path, _ in api.writes if method == "POST"]
     assert posts.count("/repos/local/repo/issues/1/comments") == 1
     assert posts.count("/repos/local/repo/pulls/1/reviews") == 1
+
+
+async def test_incomplete_inline_list_uses_verified_comment_details(publication_pipeline):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    api.omit_inline_location = True
+    attempt, _ = await create_attempt(task, delivery)
+    assert await delivery.worker.run_once()
+    result = delivery.repo.get(attempt.id)
+    assert result.state == "succeeded"
+    assert all(item.state == "published" for item in result.items)
+    assert api.detail_reads
+    writes = list(api.writes)
+    checked = await delivery.preflight(task.id)
+    assert checked.inline.already_published == 1
+    assert checked.inline.ready == 0
+    assert api.writes == writes
+
+
+@pytest.mark.parametrize("changes", [
+    {"id": 9999}, {"line": 99}, {"side": "LEFT"}, {"path": "other.py"},
+    {"body": "modified"}, {"commit_id": "0" * 40}, {"pull_request_review_id": 999},
+    {"user": {"id": 999}}, {"pull_request_url": "https://api.github.com/repos/local/repo/pulls/2"},
+    {"line": None, "side": None},
+])
+async def test_untrusted_comment_details_keep_batch_uncertain(publication_pipeline, changes):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    api.omit_inline_location = True
+    api.detail_changes = changes
+    attempt, _ = await create_attempt(task, delivery)
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "uncertain"
+    slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+    assert slot.pending_publication_id == attempt.id
+    assert len(api.reviews) == len(api.inline) == 1
+
+
+async def test_missing_comment_detail_keeps_batch_uncertain(publication_pipeline):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    api.omit_inline_location = api.detail_missing = True
+    attempt, _ = await create_attempt(task, delivery)
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "uncertain"
+    assert len(api.reviews) == len(api.inline) == 1
+
+
+async def test_comment_detail_timeout_keeps_batch_uncertain(publication_pipeline):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    api.omit_inline_location = api.detail_timeout = True
+    attempt, _ = await create_attempt(task, delivery)
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "uncertain"
+    slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+    assert slot.pending_publication_id == attempt.id
+    assert len(api.reviews) == len(api.inline) == 1
+
+
+async def test_preflight_reconciles_old_batch_without_github_writes(publication_pipeline):
+    from app.models.orm import ReviewTaskOrm
+
+    task, api, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    api.timeout_inline = True
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "uncertain"
+    api.omit_inline_location = True
+    with store.sessions.begin() as session:
+        row = session.get(ReviewTaskOrm, task.id)
+        payload = dict(row.task_snapshot)
+        payload["report"] = {**payload["report"], "version": stable_hash("new-report")}
+        row.task_snapshot = payload
+    writes = list(api.writes)
+    checked = await delivery.preflight(task.id)
+    assert checked.ready
+    assert checked.inline.already_published == 1
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+    assert slot.pending_publication_id is None
+    assert api.writes == writes
+
+
+async def test_new_review_preflight_reconciles_previous_review_batch(publication_pipeline):
+    from app.models.orm import ReviewTaskOrm
+
+    task, api, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    api.timeout_inline = True
+    assert await delivery.worker.run_once()
+    api.omit_inline_location = True
+    newer = task.model_copy(deep=True)
+    newer.id = "next-review"
+    newer.snapshot.review_id = newer.id
+    newer.report.candidates.clear()
+    newer.report.findings.clear()
+    with store.sessions.begin() as session:
+        session.add(ReviewTaskOrm(id=newer.id, pr_url=newer.pr_url, status="completed",
+            current_phase=newer.phase, provider=newer.configuration.provider,
+            retention_until=newer.hard_deadline,
+            task_snapshot=newer.model_dump(mode="json")))
+    writes = list(api.writes)
+    checked = await delivery.preflight(newer.id)
+    assert checked.ready
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+    assert slot.pending_publication_id is None
+    assert api.writes == writes
+
+
+async def test_reconciling_one_batch_keeps_other_unknown_batch_blocking(publication_pipeline):
+    from app.models.orm import PublicationBatchOrm
+
+    task, api, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    api.timeout_inline = True
+    assert await delivery.worker.run_once()
+    batch = delivery.repo.batches(attempt.id)[0]
+    with store.sessions.begin() as session:
+        session.add(PublicationBatchOrm(id="z" * 64, publication_id=attempt.id,
+            state="uncertain", item_ids=batch["item_ids"], payload=batch["payload"]))
+    lease = delivery.repo.acquire(attempt, "reconcile-owner", reconciliation=True)
+    try:
+        _, _, context = delivery.repo.frozen(attempt.id)
+        with pytest.raises(GitHubPublishError, match="batch_result_unknown"):
+            await delivery.delivery.recover_batches(attempt, lease, context)
+        slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+        assert slot.pending_publication_id == attempt.id
+    finally:
+        delivery.repo.release(lease)
+
+
+async def test_preflight_cannot_reconcile_an_active_publication(publication_pipeline):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    api.timeout_inline = True
+    assert await delivery.worker.run_once()
+    lease = delivery.repo.acquire(attempt, "active-owner")
+    writes = list(api.writes)
+    try:
+        with pytest.raises(PublicationConflict, match="publication_busy"):
+            await delivery.preflight(task.id)
+        assert delivery.repo.get(attempt.id).state == "uncertain"
+        assert api.writes == writes
+    finally:
+        delivery.repo.release(lease)
+
+
+async def test_preflight_does_not_release_unverified_old_batch(publication_pipeline):
+    task, api, delivery, _ = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    api.timeout_inline = True
+    assert await delivery.worker.run_once()
+    api.omit_inline_location = True
+    api.detail_changes = {"line": 99}
+    writes = list(api.writes)
+    with pytest.raises(GitHubPublishError, match="batch_result_unknown"):
+        await delivery.preflight(task.id)
+    slot = delivery.repo.lookup_slot(task.snapshot.repository_id, task.pr.number, "user:7")
+    assert slot.pending_publication_id == attempt.id
+    assert delivery.repo.get(attempt.id).state == "uncertain"
+    assert api.writes == writes
 
 
 async def test_stale_head_and_permission_denied_never_write(publication_pipeline):

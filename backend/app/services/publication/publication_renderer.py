@@ -42,8 +42,7 @@ def _review_conclusion(plan):
         return "审查尚未结束，暂不提供合并建议。"
     incomplete = (outcome.coverage != "complete" or outcome.unresolved_count
                   or outcome.kind == "inconclusive" or plan.withheld_findings
-                  or plan.scope_reasons or plan.blocking_reasons
-                  or any(not item["rechecked"] for item in plan.historical_findings))
+                  or plan.scope_reasons or plan.blocking_reasons)
     if incomplete:
         prefix = ("本轮存在已确认问题，且"
                   if outcome.confirmed_count or outcome.publishable_count else "")
@@ -60,6 +59,16 @@ def _review_conclusion(plan):
 
 def render_finding(finding):
     return finding.body_markdown
+
+
+def _indented_markdown(value):
+    return "\n".join(f"  {line}" if line else "  " for line in value.splitlines())
+
+
+def _scope_reason(reason):
+    if reason == "unverified_historical_candidates":
+        return "仍有增量复核项未完成。"
+    return markdown_text(reason, 500)
 
 
 def _question_section(questions, byte_budget):
@@ -108,10 +117,10 @@ def render_summary(plan, *, discussion_urls=None, all_questions=False):
         for finding in findings:
             location = (f"（{finding.anchor.file_path}:{finding.anchor.start_line}）"
                         if finding.anchor.start_line else "")
-            lines += [f"- **{finding.severity.title()}** {markdown_text(finding.title, 300)} "
+            lines += [f"- **{finding.severity.title()}** {overview_markdown(finding.title, 300)} "
                       f"{markdown_text(location, 600)}"]
             if finding.placement == "summary":
-                lines += ["", finding.body_markdown, ""]
+                lines += ["", _indented_markdown(overview_markdown(finding.recommendation, 3000)), ""]
             url = (discussion_urls or {}).get(finding.finding_key)
             if isinstance(url, str) and re.fullmatch(
                 r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#discussion_r[0-9]+", url):
@@ -127,20 +136,10 @@ def render_summary(plan, *, discussion_urls=None, all_questions=False):
             if remaining > 0:
                 lines += [f"其中 {remaining} 项尚未形成通过校验的待核实内容，"
                           "请在本地报告查看复核状态与证据校验说明。", ""]
-        lines += [f"- {markdown_text(reason, 500)}" for reason in plan.scope_reasons[:100]]
+        lines += [f"- {_scope_reason(reason)}" for reason in plan.scope_reasons[:100]]
     if plan.withheld_findings:
         lines += ["", "### 未发布记录", ""]
         lines += [f"- `{item.candidate_id}`：{item.reason_code}" for item in plan.withheld_findings]
-    if plan.historical_findings:
-        lines += ["", "### 历史意见", ""]
-        for item in plan.historical_findings:
-            state = "已在本轮重新核验，结论见本轮结果" if item["rechecked"] else "本轮尚未完成核验"
-            lines += [f"- {markdown_text(item['claim'], 300)}：{state}；历史 Head "
-                      f"`{markdown_text(item['head_sha'], 64)}`"]
-            url = item.get("url")
-            if isinstance(url, str) and re.fullmatch(
-                r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#discussion_r[0-9]+", url):
-                lines.append(f"  [查看历史讨论]({url})")
     lines += ["", "本轮仅进行静态审查，未执行目标仓库代码、测试或构建。", "",
               "<details>", "<summary>审查详情</summary>", "",
               f"审查报告版本：`{plan.report_version}`", "",

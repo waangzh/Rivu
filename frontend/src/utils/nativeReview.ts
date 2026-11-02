@@ -44,6 +44,11 @@ export const executionErrorLabel = (code: string | null) =>
     review_deadline: '达到本轮审查总期限',
   })[code || ''] || '执行异常，未取得有效结果';
 
+export const reviewReasonLabel = (reason: string) =>
+  ({
+    unverified_historical_candidates: '仍有增量复核项未完成。',
+  })[reason] || reason;
+
 export function observedUsage(report: Pick<Report, 'usage'> | null) {
   if (!report) return {
     calls: null, tokens: null, input: null, output: null,

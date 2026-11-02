@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import type { Candidate, Report, ReviewUsage, Run, WorkItem } from '../../types/review';
 import type { ReviewSection } from '../../types/workspace';
-import { executionErrorLabel, observedUsage, phaseLabel, terminal } from '../../utils/nativeReview';
+import { executionErrorLabel, observedUsage, phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
 import { formatElapsed, progressHeading, progressSummary } from '../../utils/reviewProgress';
 import { useReviewClock } from '../../composables/useReviewClock';
 import AppIcon from '../common/AppIcon.vue';
@@ -171,6 +171,6 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
   </details>
   <section v-if="report?.reasons.length" class="card card-pad space-top">
     <h3>需要注意的限制</h3>
-    <p v-for="reason in report.reasons" :key="reason">{{ reason }}</p>
+    <p v-for="reason in report.reasons" :key="reason">{{ reviewReasonLabel(reason) }}</p>
   </section>
 </template>

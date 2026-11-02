@@ -80,7 +80,7 @@ const errorLabels: Record<string, string> = {
   publication_not_found: '发布记录不存在。',
   publication_not_retryable: '当前状态不支持继续处理，请查看发布历史。',
   publication_internal_error: '发布过程中出现内部错误，结果保持未知，请检查远端状态。',
-  summary_operation_uncertain: '总结评论存在未确认的写入，请从发布历史检查远端状态。',
+  summary_operation_uncertain: '该 PR 的此前发布仍有写入无法确认。预检会先核对远端评论；若仍被阻塞，请打开此前审查的交付记录检查发布状态。',
   summary_newer_review: '已有更新版本的审查摘要，旧结果不能覆盖。',
   summary_modified_remotely: '总结评论已被其他人修改，系统不会覆盖。',
   summary_multiple_matches: '检测到多条受控总结评论，需要人工核对。',

@@ -37,6 +37,7 @@ class PublicationService:
         if task is None:
             raise KeyError("review_not_found")
         checked = await self.preflight_checker.check(task, keys)
+        await self.delivery.reconcile_pending(checked["context"])
         checked.update(await self.delivery.sticky.preview(checked["context"]))
         findings = [item for item in checked["plan"].inline_drafts if item.finding_key in checked["locations"]]
         existing = await self.delivery.remote_findings(checked["context"], checked["head_sha"], findings, checked["locations"])
@@ -51,7 +52,7 @@ class PublicationService:
                     item.anchor.file_path, item.anchor.start_line or 0, item.finding_key))
             if item.finding_key in checked["finding_keys"]]
         checked["summary_markdown"] = compose_summary(checked["plan"], {"finding_keys": checked["finding_keys"]}, checked["fallback"],
-            [SimpleNamespace(kind="inline", state="published") for _ in existing], "Prepared")
+            [SimpleNamespace(kind="inline", state="published") for _ in existing])
         if len(checked["summary_markdown"].encode()) > 59_000:
             raise GitHubPublishError("publication_body_too_long")
         return checked

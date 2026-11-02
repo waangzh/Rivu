@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue';
 import type { Finding, Report, Run } from '../../types/review';
 import type { ReviewSection } from '../../types/workspace';
-import { phaseLabel, terminal } from '../../utils/nativeReview';
+import { phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
 import AppIcon from '../common/AppIcon.vue';
 import InlineCodeText from '../common/InlineCodeText.vue';
 import ReportMarkdown from '../report/ReportMarkdown.vue';
@@ -158,16 +158,15 @@ const omissionLabel = {
     </div>
 
     <section class="ov-panel ov-boundary">
-      <header class="ov-section-head"><h2>审查单元与历史</h2></header>
+      <header class="ov-section-head"><h2>审查单元与复用</h2></header>
       <p class="ov-note"><AppIcon name="info" />只读静态审查。未执行目标仓库的测试、构建或脚本。</p>
       <p v-if="task.plan.incremental_from" class="ov-note">
         本轮复用了此前完成且源码字节一致的审查单元，来源审查 <code>{{ task.plan.incremental_from }}</code>；
-        复用项在活动页单独标记。历史问题仍须本轮独立核验。
+        复用项在活动页单独标记，复用范围内的候选仍须本轮独立核验。
       </p>
       <p v-else-if="task.plan.incremental_reason" class="muted small">本轮按全量审查单元执行：{{ task.plan.incremental_reason }}</p>
-      <p v-if="task.plan.history.length" class="ov-note">包含 {{ task.plan.history.length }} 条历史意见作为调查线索；历史结论不代表当前 Head 仍成立。</p>
       <ul v-if="report?.reasons.length" class="ov-limitations">
-        <li v-for="reason in report.reasons" :key="reason">{{ reason }}</li>
+        <li v-for="reason in report.reasons" :key="reason">{{ reviewReasonLabel(reason) }}</li>
       </ul>
       <ul v-if="excluded.length" class="ov-limitations">
         <li v-for="[path, reason] in excluded" :key="path"><code>{{ path }}</code> · {{ reason }}</li>

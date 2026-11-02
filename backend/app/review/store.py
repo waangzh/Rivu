@@ -636,6 +636,7 @@ class ReviewStore:
             return [{"candidate_id": finding.candidate_id, "finding_id": finding.id,
                 "claim": finding.claim, "trigger": finding.trigger, "impact": finding.impact,
                 "head_sha": previous.snapshot.head_sha, "run_id": previous.id,
+                "location": finding.location.model_dump(mode="json") if finding.location else None,
                 "sources": [source.model_dump() for source in finding.sources],
                 "needs_verification": True, "receipt": receipts.get(finding.id)}
                 for finding in previous.report.findings[:MAX_CANDIDATES]]

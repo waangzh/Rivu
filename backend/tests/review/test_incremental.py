@@ -40,9 +40,11 @@ async def test_document_update_reuses_delivered_source_and_rechecks_history(serv
     assert second.report.overview.status == "ready"
     from app.services.publication.publication_planner import PublicationPlanner
     plan = PublicationPlanner(service._artifacts).build(second)
-    assert not plan.inline_drafts  # Rechecked historical claim never invents a new line anchor.
-    assert len(plan.summary_findings) == 1
-    assert plan.historical_findings[0]["rechecked"]
+    assert len(plan.inline_drafts) == 1
+    assert plan.summary_findings == []
+    assert candidate.proposal.location == first.report.candidates[0].proposal.location
+    assert "### 历史意见" not in plan.user_report_markdown
+    assert plan.user_report_markdown.count(plan.inline_drafts[0].title) == 1
 
 
 async def test_source_changes_and_explicit_rereview_get_full_pass(service_pipeline):
@@ -53,10 +55,12 @@ async def test_source_changes_and_explicit_rereview_get_full_pass(service_pipeli
     assert same.id != first.id
     assert same.plan.incremental_reason == "explicit_same_snapshot_review"
     assert not any(unit.reused_from for unit in same.plan.units)
+    assert same.plan.history == []
     commit(github, "a.py", "def ratio(x):\n    return 20 / x\n")
     changed = await service.create(ReviewRequest(pr_url=github.pr.html_url), "changed")
     assert changed.plan.incremental_reason == "source_change_requires_full_review"
     assert not any(unit.reused_from for unit in changed.plan.units)
+    assert changed.plan.history == []
     assert service.store.get(same.id).status == "cancelled"
     assert service.store.get(same.id).error_code == "review_superseded"
 
@@ -70,6 +74,7 @@ async def test_baseline_change_does_not_reuse_old_scope(service_pipeline):
     second = await service.create(ReviewRequest(pr_url=github.pr.html_url), "base-changed")
     assert second.plan.incremental_reason == "baseline_or_configuration_changed"
     assert not any(unit.reused_from for unit in second.plan.units)
+    assert second.plan.history == []
 
 
 def payload(github):

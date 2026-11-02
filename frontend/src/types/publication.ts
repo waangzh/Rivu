@@ -85,7 +85,6 @@ export interface PublicationPlan {
   overview_status: string;
   overview_omitted: Record<string, number>;
   scope_reasons: string[];
-  historical_findings: { claim: string; head_sha: string; rechecked: boolean; url: string | null }[];
 }
 
 export interface ReviewSummary {

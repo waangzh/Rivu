@@ -7,7 +7,7 @@ from app.models.publication import (
     ReviewDigest, ReviewOutcome, ReviewSummary, WithheldFinding,
 )
 from app.services.publication.publication_renderer import (
-    markdown_text, overview_markdown, render_review_comment, render_summary, render_user_report,
+    overview_markdown, render_review_comment, render_summary, render_user_report,
 )
 from app.services.publication.review_publication import (
     validated_findings, validated_questions, validated_refutations,
@@ -88,10 +88,6 @@ class PublicationPlanner:
             overview_status=report.overview.status if report else "pending",
             overview_omitted=report.overview.omitted if report else {},
             scope_reasons=report.reasons if report else [],
-            historical_findings=[{"claim": item["claim"], "head_sha": item["head_sha"],
-                "rechecked": bool(report and any(candidate.previous_candidate_id == item["candidate_id"]
-                    and candidate.verification is not None for candidate in report.candidates)),
-                "url": (item.get("receipt") or {}).get("url")} for item in run.plan.history],
             withheld_findings=[WithheldFinding(candidate_id=identity, reason_code=reason)
                                for identity, reason in sorted(set(withheld))])
         if not blockers:
@@ -110,8 +106,8 @@ class PublicationPlanner:
                 anchor=anchor, title=finding.claim, affected_behavior=finding.impact,
                 failure_scenario=finding.trigger, recommendation=finding.author_comment,
                 evidence_ids=[source.id for source in finding.sources],
-                body_markdown=(f"**[{finding.severity.title()}] {markdown_text(finding.claim, 300)}**\n\n"
-                    f"{markdown_text(finding.author_comment, 3000)}"))
+                body_markdown=(f"**[{finding.severity.title()}] {overview_markdown(finding.claim, 300)}**\n\n"
+                    f"{overview_markdown(finding.author_comment, 3000)}"))
             (plan.inline_drafts if draft.placement == "inline" else plan.summary_findings).append(draft)
         rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         for drafts in (plan.inline_drafts, plan.summary_findings):
