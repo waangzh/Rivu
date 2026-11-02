@@ -233,7 +233,7 @@ async function retrySummary() {
 
 watch(page, () => { mobileOpen.value = false; });
 watch(pageTitle, title => { if (typeof document !== 'undefined') document.title = title + ' · Rivu'; });
-watch(() => [page.value, task.value?.id, !!creation.value], async () => {
+watch([page, () => task.value?.id, () => !!creation.value], async () => {
   await nextTick();
   if (!disposed && page.value === 'dashboard') document.querySelector<HTMLElement>('#workspace-content h1')?.focus();
 });

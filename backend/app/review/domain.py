@@ -53,7 +53,7 @@ class Configuration(Model):
     endpoint: str
     model: str
     options: Options
-    prompt_version: str = "review-vnext-8"
+    prompt_version: str = "review-vnext-9"
 
 
 class Snapshot(Model):

@@ -42,7 +42,8 @@ the established scope. A speculative downstream impact is not evidence of severi
 
 For insufficient results with a source-supported observation and an actual missing
 premise, supply question with observation, missing_premise and a concrete author
-question in Simplified Chinese, citing the source bodies in source_refs. Phrase the
+question in Simplified Chinese, citing the source bodies in a nonempty source_refs
+list even though the verdict is insufficient. Phrase the
 uncertain behavior as a question, never an established defect. Do not copy the
 candidate's unverified claim/impact into this question. Leave question null for
 technical failures, invalid references or speculation without a sourced observation.

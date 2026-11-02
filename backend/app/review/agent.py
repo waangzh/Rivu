@@ -333,7 +333,10 @@ class AgentRunner:
             "and MUST NOT appear in source_refs. Do not treat search results as decision evidence. "
             "No more investigation is available. Reassess the existing source: confirm/refute "
             "only when it supports that decision; otherwise return insufficient with the specific "
-            "missing premise. Do not simply preserve your previous verdict. "
+            "missing premise. An insufficient result containing a question must also cite "
+            "the actual S source_ref handles supporting its observation. If no received source "
+            "supports an author question, leave question null and explain the missing premise. "
+            "Do not simply preserve your previous verdict. "
             f"Authorized source handles include: {', '.join(list(context.visible)[:64])}."
         ))
         try:

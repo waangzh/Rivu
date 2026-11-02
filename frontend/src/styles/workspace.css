@@ -125,6 +125,7 @@ button { color: inherit; }
 .rg-app .button--secondary { background: var(--surface); border-color: var(--line2); color: var(--ink); }
 .rg-app .button--ghost { color: var(--muted); }
 .rg-app .status-badge { border: 0; font-size: .8125rem; font-weight: 650; padding: 3px 8px; border-radius: 99px; white-space: normal; }
+.rg-app .card-header > .status-badge { flex: 0 0 auto; white-space: nowrap; }
 .rg-app .status-badge[data-tone='neutral'] { background: var(--surface3); color: var(--muted); }
 .rg-app .status-badge[data-tone='success'] { background: var(--successWash); color: var(--success); }
 .rg-app .status-badge[data-tone='danger'] { background: var(--dangerWash); color: var(--danger); }

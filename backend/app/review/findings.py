@@ -35,7 +35,8 @@ def verified_description(candidate):
 
 def verification_problem(output, refs, changed_files):
     """Return the admission failure code for a verifier output, if any."""
-    if output.verdict in {"confirmed", "refuted"} and not refs:
+    if not refs and (output.verdict in {"confirmed", "refuted"}
+                     or (output.verdict == "insufficient" and output.question is not None)):
         return "missing_decision_sources"
     if output.verdict == "confirmed":
         if (output.severity is None or not output.reason.strip()

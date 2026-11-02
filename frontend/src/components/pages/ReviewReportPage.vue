@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'; import { getPub
 const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; loading: boolean }>(); defineEmits<{ export: [] }>();
 const showPublish = ref(false), capability = ref<PublicationCapability | null>(null), capabilityError = ref(false);
 const shortHead = computed(() => props.task.snapshot.head_sha.slice(0,8));
+// 页面工具栏已显示标题，正文去掉重复的一级标题；导出文件仍保留。
+const displayReport = computed(() => props.report.replace(/^#\s+Rivu 审查评论\s*(?:\r?\n)+/, ''));
 const commentMarkdown = computed(() => props.plan?.review_comment_markdown || props.plan?.summary_markdown || '');
 const copyState = ref<'idle' | 'copied' | 'failed'>('idle');
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,7 +72,7 @@ try { capability.value = await getPublicationCapability(); } catch { capabilityE
 </div>
 <div class="rd-document">
 <p v-if="loading" class="muted">正在读取报告…</p>
-<ReportMarkdown v-else-if="report" :content="report" />
+<ReportMarkdown v-else-if="report" :content="displayReport" />
 <p v-else class="muted">尚无可读取的 Markdown 报告。</p>
 </div>
 </div>

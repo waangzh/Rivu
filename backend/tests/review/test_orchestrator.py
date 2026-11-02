@@ -97,6 +97,96 @@ class ReferenceCorrectionModel(ReviewModel):
         return result
 
 
+class QuestionReferenceModel(ReferenceCorrectionModel):
+    corrected_verdict: str = "insufficient"
+    missing_after_correction: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        if str(messages[0].content).startswith("Independently"):
+            payload = result.generations[0].message.tool_calls[0]["args"]
+            payload.update(verdict="insufficient", severity=None, author_comment=None,
+                verified_claim=None, question={
+                    "observation": "函数直接以 x 为除数。",
+                    "missing_premise": "尚未确定接口是否允许零输入。",
+                    "question": "请确认接口是否允许零输入。",
+                })
+            if self.missing_after_correction:
+                payload["source_refs"] = []
+        return result
+
+
+@pytest.mark.parametrize("missing_sources", [False, True])
+async def test_unsourced_question_is_corrected_and_reaches_final_comment(tmp_path, missing_sources):
+    from app.review.findings import finding_digest
+    from app.services.publication.publication_planner import PublicationPlanner
+
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    model = QuestionReferenceModel(missing_sources=missing_sources)
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    candidate = report.candidates[0]
+    assert model.correction_count == 1
+    assert report.usage["model_calls"] == 5
+    assert candidate.verification.verdict == "insufficient"
+    assert candidate.admission_reason is None
+    assert candidate.verification_sources
+    assert candidate.question_digest == finding_digest(candidate, run.snapshot)
+    assert candidate.finding is None and report.findings == []
+    saved = store.get(run.id)
+    plan = PublicationPlanner(provider.evidence.artifacts).build(saved)
+    assert plan.outcome.unresolved_count == 1
+    assert plan.outcome.publishable_count == plan.outcome.confirmed_count == 0
+    assert len(plan.unresolved_questions) == 1
+    assert candidate.verification.question.question in plan.review_comment_markdown
+    assert "未计入已确认问题" in plan.review_comment_markdown
+    assert plan.inline_drafts == plan.summary_findings == []
+
+
+@pytest.mark.parametrize("budget_limited", [False, True])
+async def test_question_stays_withheld_when_reference_correction_cannot_succeed(tmp_path, budget_limited):
+    from app.models.orm import ReviewTaskOrm
+    from app.services.publication.publication_planner import PublicationPlanner
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    if budget_limited:
+        run.configuration.options.limits.total_model_calls = 4
+        with sessions.begin() as session:
+            session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = QuestionReferenceModel(missing_sources=True, missing_after_correction=True)
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    candidate = report.candidates[0]
+    assert model.correction_count == (0 if budget_limited else 1)
+    assert report.usage["model_calls"] == (4 if budget_limited else 5)
+    assert candidate.verification.verdict == "insufficient"
+    assert candidate.admission_reason == "missing_decision_sources"
+    assert candidate.question_digest is None
+    assert candidate.verification_sources == []
+    assert report.findings == []
+    plan = PublicationPlanner(provider.evidence.artifacts).build(store.get(run.id))
+    assert plan.unresolved_questions == []
+    assert plan.outcome.unresolved_count == 1
+
+
+async def test_insufficient_without_question_does_not_require_decision_sources(tmp_path):
+    class InsufficientModel(ReviewModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            if str(messages[0].content).startswith("Independently"):
+                result.generations[0].message.tool_calls[0]["args"].update(
+                    verdict="insufficient", source_refs=[], question=None, severity=None, author_comment=None)
+            return result
+
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    report = await ReviewOrchestrator(store, AgentRunner(InsufficientModel())).run(run.id, provider, lease)
+    candidate = report.candidates[0]
+    assert report.usage["model_calls"] == 4
+    assert candidate.verification.verdict == "insufficient"
+    assert candidate.admission_reason is None
+    assert candidate.question_digest is None
+    assert candidate.verification_sources == []
+    assert report.findings == []
+
+
 async def test_actual_agent_loop_candidate_verifier_and_default_overview(tmp_path):
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     report = await ReviewOrchestrator(store, AgentRunner(ReviewModel())).run(run.id, provider, lease)
