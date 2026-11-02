@@ -57,6 +57,15 @@ export interface WithheldFinding {
   reason_code: string;
 }
 
+export interface PublicationQuestion {
+  candidate_id: string;
+  anchor: PublicationAnchor;
+  observation: string;
+  missing_premise: string;
+  question: string;
+  evidence_ids: string[];
+}
+
 export interface PublicationPlan {
   review_id: string;
   report_version: string;
@@ -68,6 +77,7 @@ export interface PublicationPlan {
   review_comment_markdown: string;
   inline_drafts: PublicationFinding[];
   summary_findings: PublicationFinding[];
+  unresolved_questions: PublicationQuestion[];
   withheld_findings: WithheldFinding[];
   content_eligible: boolean;
   blocking_reasons: string[];

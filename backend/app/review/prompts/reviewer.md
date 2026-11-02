@@ -46,6 +46,10 @@ deep investigates shared contracts further. These are resource strategies, not
 different proof rules. Describe a specific trigger, causal failure and observable
 impact. Style preferences and unspecified hypothetical consumers are not bugs.
 Missing optional tests alone are not a failure. Cite locations only when sourced.
+For new reusable functions, check clear source-supported input/output contracts
+even before production integration. State the directly observable function-level
+failure; do not invent downstream API, UI or online effects without caller evidence.
+An incomplete or bounded search cannot prove the absence of all consumers.
 
 Use read_diff to request missing required member IDs. Tool corrections consume
 the same budget. Stop when the necessary investigation is complete and return

@@ -1,7 +1,11 @@
-"""Thin formatting for Publisher-approved findings only."""
+"""Thin formatting for Publisher-validated findings and unresolved questions."""
 
 import html
 import re
+
+
+# Leave space for delivery status and Publisher metadata below the comment limits.
+SUMMARY_CONTENT_BYTES = 57_000
 
 
 def markdown_text(value, limit=4000):
@@ -58,7 +62,33 @@ def render_finding(finding):
     return finding.body_markdown
 
 
-def render_summary(plan, *, discussion_urls=None):
+def _question_section(questions, byte_budget):
+    header = "\n".join(["", "### 待核实项", "",
+                       "以下观察仍缺少必要前提，未计入已确认问题或严重度统计。", ""])
+    blocks = []
+    for index, item in enumerate(questions, 1):
+        location = (f"{item.anchor.file_path}:{item.anchor.start_line} · {item.anchor.side.upper()}"
+                    if item.anchor.start_line and item.anchor.side else item.anchor.file_path)
+        blocks.append("\n".join([
+            f"**{index}. {markdown_text(location, 600) or '位置未确定'}**", "",
+            f"源码观察：{overview_markdown(item.observation, 1500)}", "",
+            f"缺失前提：{overview_markdown(item.missing_premise, 1500)}", "",
+            f"请确认：{overview_markdown(item.question, 1500)}", ""]))
+    sizes = [len(block.encode("utf-8")) + 1 for block in blocks]
+    size = len(header.encode("utf-8")) + sum(sizes)
+    if byte_budget is None or size <= byte_budget:
+        return "\n".join([header, *blocks])
+    kept = len(blocks)
+    while True:
+        notice = (f"另有 {len(questions) - kept} 条待核实项因评论长度限制省略，"
+                  "完整内容见本地报告；这些项目仍计入未决总数。")
+        if kept == 0 or size + len(notice.encode("utf-8")) + 2 <= byte_budget:
+            return "\n".join([header, *blocks[:kept], notice, ""])
+        kept -= 1
+        size -= sizes[kept]
+
+
+def render_summary(plan, *, discussion_urls=None, all_questions=False):
     findings = _findings(plan)
     lines = ["### 审查结论", "", _review_conclusion(plan), "", "### 变更总览", ""]
     if plan.overview_markdown:
@@ -86,12 +116,17 @@ def render_summary(plan, *, discussion_urls=None):
             if isinstance(url, str) and re.fullmatch(
                 r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#discussion_r[0-9]+", url):
                 lines.append(f"  [查看代码讨论]({url})")
+    question_position = len(lines)
     if plan.outcome.coverage != "complete" or plan.scope_reasons or plan.outcome.unresolved_count:
         lines += ["", "### 限制与待办", ""]
         if plan.outcome.coverage != "complete":
             lines += ["审查范围尚未完整处理，请先补查未完成的部分。", ""]
         if plan.outcome.unresolved_count:
             lines += [f"存在 {plan.outcome.unresolved_count} 个未决问题，需补齐证据或必要前提。", ""]
+            remaining = plan.outcome.unresolved_count - len(plan.unresolved_questions)
+            if remaining > 0:
+                lines += [f"其中 {remaining} 项尚未形成通过校验的待核实内容，"
+                          "请在本地报告查看复核状态与证据校验说明。", ""]
         lines += [f"- {markdown_text(reason, 500)}" for reason in plan.scope_reasons[:100]]
     if plan.withheld_findings:
         lines += ["", "### 未发布记录", ""]
@@ -114,6 +149,10 @@ def render_summary(plan, *, discussion_urls=None):
         lines += ["", "变更文件统计（不代表行为总结）：", "",
                   *[f"- {markdown_text(item, 500)}" for item in plan.digest.actual_changes[:100]]]
     lines += ["", "</details>"]
+    if plan.unresolved_questions:
+        byte_budget = (None if all_questions else
+                       max(0, SUMMARY_CONTENT_BYTES - len("\n".join(lines).encode("utf-8")) - 1))
+        lines.insert(question_position, _question_section(plan.unresolved_questions, byte_budget))
     return "\n".join(lines)
 
 
@@ -130,7 +169,7 @@ def comment_selection(plan, *, exclude_resolved=False):
 
 
 def render_user_report(run, plan):
-    lines = ["# Rivu 审查评论", "", render_summary(plan)]
+    lines = ["# Rivu 审查评论", "", render_summary(plan, all_questions=True)]
     if run.report and run.report.overview.omitted_materials:
         lines += ["", "### 总览省略范围", ""]
         reasons = {"material_capacity": "材料容量不足", "source_unavailable": "源码不可用",

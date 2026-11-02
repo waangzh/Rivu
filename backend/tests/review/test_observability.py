@@ -175,8 +175,9 @@ async def test_model_confirmation_is_recorded_after_durable_admission_as_insuffi
                  if operation == "create" and payload["name"] == "candidate.verified")
     assert event["model_verdict"] == "confirmed"
     assert event["verdict"] == "insufficient"
-    assert event["reason"] == "missing_change_attribution_sources"
+    assert event["reason"] == "missing_decision_sources"
     assert event["finding"] is False
+    assert report.usage["model_calls"] == 5
 
 
 async def test_duplicate_settlement_observes_ledger_instead_of_ignored_usage(tmp_path, recorder):

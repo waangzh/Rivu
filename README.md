@@ -63,7 +63,7 @@ npm run dev
 1. 输入 PR 地址，选择 Quick / Standard / Deep、调查重点、文件范围及资源上限，直接创建审查。`POST /api/reviews/preview` 可选，不再强制预览确认。
 2. 服务端固定数字仓库身份、声明 Base、唯一 merge base、Head 和计划成员；Reviewer 先处理高风险基础范围，并按需读取调用者、测试源码和相关 BASE 行为。
 3. 候选保存后即可独立核验，不必等待所有 Reviewer 结束。核验结果为 `confirmed`、`refuted` 或 `insufficient`；缺失来源、必要字段或归因证据的确认不能成为可发布 Finding。
-4. 在 **Overview / Changes / Findings / Activity / Publish** 查看总览、固定 Diff、来源、未决问题、工作项、材料缺口、用量和发布预览。人工注记与机器结论分开保存。
+4. 在 **Overview / Changes / Findings / Activity / Publish** 查看总览、固定 Diff、来源、未决问题、工作项、材料缺口、用量和发布预览。
 5. 完成工作项在恢复时复用，中断项从头重跑。重试沿用原预算和硬截止时间；总览可单独重试。中断的外部请求可能再次计费，不承诺模型执行 exactly-once。
 
 创建请求必须带客户端生成的 `Idempotency-Key`。当前是本地单用户应用，键作用域为同一安装实例；相同键和规范化请求返回同一 Run，不重复创建收费任务。相同键但不同请求会冲突。主动重审必须使用新键。

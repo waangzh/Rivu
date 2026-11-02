@@ -53,7 +53,7 @@ class Configuration(Model):
     endpoint: str
     model: str
     options: Options
-    prompt_version: str = "review-vnext-7"
+    prompt_version: str = "review-vnext-8"
 
 
 class Snapshot(Model):
@@ -116,12 +116,21 @@ class Plan(Model):
     relations: list[tuple[int, str, str]] = Field(default_factory=list)
 
 
-class CandidateInput(Model):
+class FailureDescription(Model):
     claim: str = Field(min_length=1, max_length=1500)
     trigger: str = Field(min_length=1, max_length=2000)
     impact: str = Field(min_length=1, max_length=2000)
+
+
+class CandidateInput(FailureDescription):
     source_refs: list[str] = Field(min_length=1, max_length=32)
     location: Location | None = None
+
+
+class VerificationQuestion(Model):
+    observation: str = Field(min_length=1, max_length=1500)
+    missing_premise: str = Field(min_length=1, max_length=1500)
+    question: str = Field(min_length=1, max_length=1500)
 
 
 class VerificationOutput(Model):
@@ -131,6 +140,8 @@ class VerificationOutput(Model):
     reason: str = Field(min_length=1, max_length=4000)
     source_refs: list[str] = Field(default_factory=list, max_length=32)
     author_comment: str | None = Field(default=None, max_length=3000)
+    verified_claim: FailureDescription | None = None
+    question: VerificationQuestion | None = None
 
 
 class UnitCompletion(Model):
@@ -169,6 +180,7 @@ class Candidate(Model):
     verification: VerificationOutput | None = None
     verification_sources: list[SourceRef] = Field(default_factory=list)
     admission_reason: str | None = None
+    question_digest: str | None = None
     finding: Finding | None = None
     previous_candidate_id: str | None = None
 

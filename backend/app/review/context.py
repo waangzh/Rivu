@@ -54,6 +54,7 @@ class AgentContext:
     tool_calls: int = 0
     model_calls: int = 0
     structured_output_retry: bool = False
+    verification_correction_limit: int | None = None
     source_counter: int = 0
     tool_repetitions: dict[str, tuple[str, int]] = field(default_factory=dict)
     round_calls: list[str] = field(default_factory=list)

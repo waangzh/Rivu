@@ -68,12 +68,6 @@ class ReviewService:
     def list_tasks(self, **kwargs):
         return self.store.list_runs(**kwargs)
 
-    def finding_dispositions(self, run_id):
-        return self.store.dispositions(run_id)
-
-    def save_finding_disposition(self, run_id, finding_id, value):
-        return self.store.save_disposition(run_id, finding_id, value)
-
     def active_workspace_paths(self):
         return tuple(self._repo_paths.values())
 

@@ -1,7 +1,7 @@
 """Publisher-only validation for normalized, persisted Run findings."""
 
 from app.review.evidence import EvidenceArchive
-from app.review.findings import aggregate, finding_digest, verification_problem
+from app.review.findings import aggregate, finding_digest, verification_problem, verified_description
 from app.services.review.artifact_store import LocalArtifactStore
 
 
@@ -31,8 +31,9 @@ def _valid_finding(run, candidate, finding, archive):
         return "finding_not_publishable"
     if candidate.finding is None or candidate.finding.model_dump() != finding.model_dump():
         return "candidate_finding_mismatch"
-    if (finding.candidate_id != candidate.id or finding.claim != candidate.proposal.claim
-            or finding.trigger != candidate.proposal.trigger or finding.impact != candidate.proposal.impact
+    description = verified_description(candidate)
+    if (finding.candidate_id != candidate.id or finding.claim != description.claim
+            or finding.trigger != description.trigger or finding.impact != description.impact
             or finding.severity != verification.severity or finding.attribution != verification.attribution
             or finding.author_comment != verification.author_comment
             or finding.location != candidate.proposal.location
@@ -49,15 +50,75 @@ def _valid_finding(run, candidate, finding, archive):
     return None
 
 
+def _snapshot_matches(run):
+    snapshot = run.snapshot
+    return (snapshot.review_id == run.id and snapshot.repository == f"{run.pr.owner}/{run.pr.repo}"
+        and snapshot.repository_id > 0 and snapshot.pr_number == run.pr.number
+        and snapshot.declared_base_sha == run.pr.base.sha and snapshot.head_sha == run.pr.head.sha)
+
+
+def validated_questions(run, artifacts=None):
+    """Questions need an independent sourced observation, never a raw proposal or failed admission."""
+    report = run.report
+    if (report is None or run.status not in {"completed", "partial"}
+            or report.status not in {"completed", "partial"} or not _snapshot_matches(run)):
+        return []
+    if len({item.id for item in report.candidates}) != len(report.candidates):
+        return []
+    archive = EvidenceArchive(snapshot=run.snapshot, artifacts=artifacts or LocalArtifactStore())
+    changed_paths = {path for item in run.changed_files for path in (item.file_path, item.old_file_path) if path}
+    selected = []
+    for candidate in report.candidates:
+        output = candidate.verification
+        if (candidate.admission_reason or candidate.finding is not None or output is None
+                or output.verdict != "insufficient" or output.question is None
+                or output.attribution == "pre_existing"
+                or candidate.question_digest != finding_digest(candidate, run.snapshot)):
+            continue
+        refs = candidate.verification_sources
+        location = candidate.proposal.location
+        if (not any(ref.path in changed_paths for ref in refs)
+                or (location and not all(any(
+                    ref.path == location.path and ref.side == location.side
+                    and ref.start_line <= location.line <= ref.end_line
+                    for ref in sources) for sources in (candidate.sources, refs)))):
+            continue
+        try:
+            if _valid_sources(archive, candidate.sources) and _valid_sources(archive, refs):
+                selected.append(candidate)
+        except (OSError, ValueError, TypeError):
+            continue
+    return sorted(selected, key=lambda item: item.id)
+
+
+def validated_refutations(run, artifacts=None):
+    """A refutation can resolve a candidate only while its counterevidence remains valid."""
+    if run.report is None or not _snapshot_matches(run):
+        return set()
+    archive = EvidenceArchive(snapshot=run.snapshot, artifacts=artifacts or LocalArtifactStore())
+    valid = set()
+    for candidate in run.report.candidates:
+        output = candidate.verification
+        if (output is None or output.verdict != "refuted" or candidate.admission_reason
+                or candidate.finding is not None
+                or verification_problem(output, candidate.verification_sources, run.changed_files)):
+            continue
+        try:
+            if (_valid_sources(archive, candidate.sources)
+                    and _valid_sources(archive, candidate.verification_sources)):
+                valid.add(candidate.id)
+        except (OSError, ValueError, TypeError):
+            continue
+    return valid
+
+
 def validated_findings(run, artifacts=None):
     """Return only fully reconstructed publication facts; never replay old graphs."""
     report = run.report
     if report is None:
         return [], []
     snapshot = run.snapshot
-    if (snapshot.review_id != run.id or snapshot.repository != f"{run.pr.owner}/{run.pr.repo}"
-            or snapshot.repository_id <= 0 or snapshot.pr_number != run.pr.number
-            or snapshot.declared_base_sha != run.pr.base.sha or snapshot.head_sha != run.pr.head.sha):
+    if not _snapshot_matches(run):
         return [], [(finding.candidate_id, "snapshot_mismatch") for finding in report.findings]
     archive = EvidenceArchive(snapshot=snapshot, artifacts=artifacts or LocalArtifactStore())
     candidates = {candidate.id: candidate for candidate in report.candidates}

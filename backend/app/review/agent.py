@@ -115,6 +115,9 @@ class RequestGate(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         context = request.runtime.context
         await context.check_active()
+        if (context.verification_correction_limit is not None
+                and context.model_calls >= context.verification_correction_limit):
+            raise MissingStructuredResult
         repeated = context.begin_round()
         if context.loop_closing_calls >= 2:
             raise RepeatedToolLoop("agent_tool_loop")
@@ -311,6 +314,48 @@ class AgentRunner:
     def __init__(self, model):
         self.model = model
 
+    async def _correct_verification(self, agent, result, output, candidate, context):
+        if (candidate.admission_reason not in {"invalid_source_refs", "missing_decision_sources"}
+                or context.structured_output_retry
+                or context.model_calls >= context.provider.run.configuration.options.limits.model_calls):
+            return output, candidate
+        problem = candidate.admission_reason
+        context.structured_output_retry = True
+        context.verification_correction_limit = context.model_calls + 1
+        event("agent.verification_correction", reason=problem)
+        logger.warning(
+            "复核引用未通过校验，将在原预算内纠正一次 review_id=%.8s work_id=%.8s reason=%s",
+            context.provider.run.id, context.work.id, problem)
+        message = HumanMessage(content=(
+            f"Runtime correction (trusted host): VerificationOutput was rejected: {problem}. "
+            "Return VerificationOutput once more using only actual S source_ref handles from "
+            "source bodies already received. R receipt_ref handles identify retrieval results "
+            "and MUST NOT appear in source_refs. Do not treat search results as decision evidence. "
+            "No more investigation is available. Reassess the existing source: confirm/refute "
+            "only when it supports that decision; otherwise return insufficient with the specific "
+            "missing premise. Do not simply preserve your previous verdict. "
+            f"Authorized source handles include: {', '.join(list(context.visible)[:64])}."
+        ))
+        try:
+            corrected = await agent.ainvoke(
+                {"messages": [*result["messages"], message], "structured_response": None},
+                context=context, config={"recursion_limit": 12})
+            revised = corrected.get("structured_response")
+            if not isinstance(revised, VerificationOutput):
+                raise MissingStructuredResult
+            await context.budget.active()
+            candidate = admit_verification(candidate, revised, context)
+            return revised, candidate
+        except (LeaseLost, ReviewStopped, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            # Keep the rejected result if correction cannot finish; never bypass admission.
+            logger.warning(
+                "复核引用纠正未完成 review_id=%.8s work_id=%.8s error_type=%s detail=%s",
+                context.provider.run.id, context.work.id, type(exc).__name__, safe_error_detail(exc))
+            event("agent.verification_correction_failed", reason=problem, error_type=type(exc).__name__)
+            return output, candidate
+
     async def run(self, work, provider, budget):
         with review_trace(provider.run, provider.lease):
             with stage("agent.attempt", work_id=work.id, unit_id=work.unit_id,
@@ -365,6 +410,8 @@ class AgentRunner:
             await budget.active()
             if candidate:
                 candidate = admit_verification(candidate, output, context)
+                output, candidate = await self._correct_verification(
+                    agent, result, output, candidate, context)
             # ainvoke only returns after all tool tasks and their DB receipts finish.
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
                 "completed", output.model_dump(), None, provider.lease,

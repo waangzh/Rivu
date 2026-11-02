@@ -88,12 +88,7 @@ async def test_direct_create_is_idempotent_and_complete_report_uses_new_api(serv
         assert "event: done" in events.text
         assert len((await client.get(f"/api/reviews/{run_id}/units")).json()) == 2
         assert (await client.post(f"/api/reviews/{run_id}/resume")).status_code == 404
-        finding = result["report"]["findings"][0]["id"]
-        annotated = await client.patch(f"/api/reviews/{run_id}/findings/{finding}/disposition",
-            json={"status": "resolved", "note": "作者确认后续提交修复"})
-        assert annotated.status_code == 200
-        assert annotated.json()["dispositions"][finding]["status"] == "resolved"
-        assert annotated.json()["findings"][0]["publishable"] is True
+        assert result["report"]["findings"][0]["publishable"] is True
 
 
 async def test_overview_retry_only_calls_overview_and_changes_report_version(service_pipeline):

@@ -14,8 +14,3 @@ class ReviewRequest(Model):
     limits: dict[str, int] = Field(default_factory=dict, max_length=10)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     include_pr_discussions: bool | None = None
-
-
-class FindingDisposition(Model):
-    status: str = Field(pattern=r"^(open|resolved|dismissed)$")
-    note: str | None = Field(default=None, max_length=2000)

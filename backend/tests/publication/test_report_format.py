@@ -7,6 +7,166 @@ from app.services.publication.publication_renderer import (
 )
 
 
+def unresolved_candidate(run):
+    from app.review.domain import VerificationQuestion
+
+    candidate = run.report.candidates[0].model_copy(deep=True)
+    candidate.id = "question"
+    candidate.finding = None
+    candidate.proposal.claim = "UNVERIFIED_CLAIM_API_500"
+    candidate.proposal.impact = "UNVERIFIED_IMPACT_DATA_LOSS"
+    candidate.verification = candidate.verification.model_copy(update={
+        "verdict": "insufficient", "severity": None, "verified_claim": None,
+        "author_comment": None, "question": VerificationQuestion(
+            observation="源码返回 `VALUE = 2`。",
+            missing_premise="尚未确定此值是否为接口允许的结果。",
+            question="请确认接口是否要求保持原返回值。"),
+    })
+    candidate.question_digest = finding_digest(candidate, run.snapshot)
+    run.report.candidates.append(candidate)
+    return candidate
+
+
+def test_sourced_question_follows_confirmed_findings_without_publishing_raw_claim(normalized_run):
+    run, artifacts = normalized_run
+    candidate = unresolved_candidate(run)
+    plan = PublicationPlanner(artifacts).build(run)
+    comment = plan.review_comment_markdown
+    assert comment.index("### 已确认问题") < comment.index("### 待核实项") < comment.index("### 限制与待办")
+    assert "源码返回 `VALUE = 2`" in comment
+    assert "尚未确定此值是否为接口允许的结果" in comment
+    assert "请确认接口是否要求保持原返回值" in comment
+    assert "UNVERIFIED_CLAIM" not in comment and "UNVERIFIED_IMPACT" not in comment
+    assert plan.unresolved_questions[0].candidate_id == candidate.id
+    assert plan.unresolved_questions[0].evidence_ids
+    assert plan.outcome.confirmed_count == plan.outcome.publishable_count == 1
+    assert plan.outcome.unresolved_count == 1
+    assert len(plan.inline_drafts) == 1 and plan.summary_findings == []
+    assert "可进入正常合并评估" not in comment
+
+
+@pytest.mark.parametrize("failure", [
+    "admission", "source_missing", "source_tampered", "wrong_snapshot", "duplicate",
+    "location", "no_question", "unverified", "refuted", "pre_existing", "failed", "cancelled",
+    "question_tampered", "digest_missing",
+])
+def test_unvalidated_or_nonpending_questions_cannot_enter_comment(normalized_run, failure):
+    run, artifacts = normalized_run
+    candidate = unresolved_candidate(run)
+    if failure == "admission":
+        candidate.admission_reason = "invalid_source_refs"
+    elif failure == "source_missing":
+        candidate.verification_sources.clear()
+    elif failure == "source_tampered":
+        candidate.verification_sources[1].content_hash = "0" * 64
+    elif failure == "wrong_snapshot":
+        run.snapshot.head_sha = "c" * 40
+    elif failure == "duplicate":
+        run.report.candidates.append(candidate.model_copy(deep=True))
+    elif failure == "location":
+        candidate.proposal.location.line = 99
+    elif failure == "no_question":
+        candidate.verification.question = None
+    elif failure == "unverified":
+        candidate.verification = None
+    elif failure == "refuted":
+        candidate.verification.verdict = "refuted"
+    elif failure == "pre_existing":
+        candidate.verification.attribution = "pre_existing"
+    elif failure == "question_tampered":
+        candidate.verification.question.observation = "UNVERIFIED_UNRELATED_OBSERVATION"
+    elif failure == "digest_missing":
+        candidate.question_digest = None
+    else:
+        run.status = failure
+    plan = PublicationPlanner(artifacts).build(run)
+    assert plan.unresolved_questions == []
+    assert "### 待核实项" not in plan.review_comment_markdown
+    assert "UNVERIFIED_CLAIM" not in plan.review_comment_markdown
+    assert "UNVERIFIED_UNRELATED_OBSERVATION" not in plan.review_comment_markdown
+
+
+def test_question_markdown_is_escaped_and_bound_to_plan_hash(normalized_run):
+    from app.core.fingerprints import stable_hash
+    from app.services.publication.publication_worker import compose_summary
+
+    run, artifacts = normalized_run
+    candidate = unresolved_candidate(run)
+    first = PublicationPlanner(artifacts).build(run)
+    candidate.verification.question.question = "@author <script>x</script> [link](javascript:run)\n- injected"
+    candidate.question_digest = finding_digest(candidate, run.snapshot)
+    second = PublicationPlanner(artifacts).build(run)
+    assert stable_hash(first.model_dump(mode="json")) != stable_hash(second.model_dump(mode="json"))
+    comment = compose_summary(second, {"finding_keys": []}, set(), [], "pending")
+    assert "### 待核实项" in comment
+    assert "@author" not in comment and "<script>" not in comment
+    assert "javascript\\:run" in comment and "\n\\- injected" in comment
+    assert "＠author" in comment
+
+
+def test_large_question_summary_is_bounded_without_losing_local_report_details(large_question_run):
+    run, artifacts = large_question_run
+    plan = PublicationPlanner(artifacts).build(run)
+    assert len(plan.review_comment_markdown.encode("utf-8")) <= 57_000
+    assert "条待核实项因评论长度限制省略" in plan.review_comment_markdown
+    assert "存在 15 个未决问题" in plan.review_comment_markdown
+    assert plan.outcome.unresolved_count == len(plan.unresolved_questions) == 15
+    assert "可进入正常合并评估" not in plan.review_comment_markdown
+    for index in range(15):
+        assert f"QUESTION\\_{index}\\:" in plan.user_report_markdown
+
+
+@pytest.mark.parametrize("observation", ["观察" * 250, "<&@" * 166], ids=["chinese", "escaped"])
+def test_question_budget_accounts_for_other_sections_and_escaped_utf8(large_question_run, observation):
+    run, artifacts = large_question_run
+    plan = PublicationPlanner(artifacts).build(run)
+    plan.overview_markdown = "说明" * 6000
+    for item in plan.unresolved_questions:
+        item.observation = observation
+    before = plan.model_dump()
+    summary = render_summary(plan)
+    shown = summary.count("源码观察：")
+    assert len(summary.encode("utf-8")) <= 57_000
+    assert 0 < shown < len(plan.unresolved_questions)
+    assert f"另有 {15 - shown} 条待核实项因评论长度限制省略" in summary
+    assert summary.count("缺失前提：") == summary.count("请确认：") == shown
+    assert "未形成通过校验" not in summary
+    assert plan.model_dump() == before
+
+
+def test_question_budget_can_omit_all_questions_without_hiding_unresolved_count(large_question_run):
+    run, artifacts = large_question_run
+    plan = PublicationPlanner(artifacts).build(run)
+    plan.overview_markdown = "说明" * 9000
+    summary = render_summary(plan)
+    assert len(summary.encode("utf-8")) <= 57_000
+    assert "另有 15 条待核实项因评论长度限制省略" in summary
+    assert "存在 15 个未决问题" in summary
+    assert "源码观察：" not in summary
+    assert "未形成通过校验" not in summary
+
+
+@pytest.mark.parametrize("failure", ["missing", "tampered", "admission", "missing_finding"])
+def test_invalid_terminal_candidate_cannot_produce_clean_advice(normalized_run, failure):
+    run, artifacts = normalized_run
+    run.report.findings.clear()
+    candidate = run.report.candidates[0]
+    candidate.finding = None
+    candidate.verification.verdict = "refuted"
+    if failure == "missing":
+        candidate.verification_sources.clear()
+    elif failure == "tampered":
+        candidate.verification_sources[1].content_hash = "0" * 64
+    elif failure == "admission":
+        candidate.admission_reason = "invalid_source_refs"
+    else:
+        candidate.verification.verdict = "confirmed"
+    plan = PublicationPlanner(artifacts).build(run)
+    assert plan.outcome.kind == "inconclusive"
+    assert plan.outcome.unresolved_count == 1
+    assert "可进入正常合并评估" not in plan.review_comment_markdown
+
+
 def test_summary_fallback_keeps_the_verifier_comment(normalized_run):
     run, artifacts = normalized_run
     plan = PublicationPlanner(artifacts).build(run)

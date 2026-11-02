@@ -79,6 +79,28 @@ def normalized_run(tmp_path):
 
 
 @pytest.fixture
+def large_question_run(normalized_run):
+    from app.review.domain import VerificationQuestion
+
+    run, artifacts = normalized_run
+    original = run.report.candidates[0]
+    for index in range(15):
+        candidate = original.model_copy(deep=True)
+        candidate.id = f"question-{index}"
+        candidate.finding = None
+        candidate.verification = candidate.verification.model_copy(update={
+            "verdict": "insufficient", "severity": None, "author_comment": None,
+            "question": VerificationQuestion(
+                observation=("\u6e90\u7801\u5728\u56fa\u5b9a\u7248\u672c\u4e2d\u8fd4\u56de\u53d8\u66f4\u540e\u7684\u503c\u3002" * 40)[:500],
+                missing_premise=("\u5f53\u524d\u672a\u786e\u5b9a\u8c03\u7528\u7ea6\u5b9a\u662f\u5426\u5141\u8bb8\u8fd4\u56de\u8be5\u503c\u3002" * 40)[:500],
+                question=f"QUESTION_{index}: " + ("\u8bf7\u786e\u8ba4\u5141\u8bb8\u7684\u8f93\u5165\u4ee5\u53ca\u8fd4\u56de\u503c\u7ea6\u5b9a\u3002" * 40)[:480]),
+        })
+        candidate.question_digest = finding_digest(candidate, run.snapshot)
+        run.report.candidates.append(candidate)
+    return run, artifacts
+
+
+@pytest.fixture
 def publication_pipeline(normalized_run, tmp_path):
     from sqlalchemy import create_engine, update
     from sqlalchemy.orm import sessionmaker

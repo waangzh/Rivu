@@ -74,7 +74,9 @@ class PublicationPreflight:
                    "publisher_identity": f"user:{user['id']}", "publisher_id": user["id"], "base_sha": snapshot.declared_base_sha,
                    "order": (task.completed_at or task.updated_at).astimezone(timezone.utc).isoformat() + ":" + task.id,
                    "report_version": plan.report_version}
-        partial = plan.outcome.kind == "inconclusive" or plan.outcome.coverage != "complete" or bool(fallback) or bool(plan.withheld_findings) or len(keys) != len(available)
+        partial = (plan.outcome.kind == "inconclusive" or plan.outcome.coverage != "complete"
+                   or plan.outcome.unresolved_count > 0 or bool(fallback)
+                   or bool(plan.withheld_findings) or len(keys) != len(available))
         return {"ready": True, "review_id": task.id, "report_version": plan.report_version,
                 "plan_hash": stable_hash(plan.model_dump(mode="json")),
             "head_sha": plan.snapshot.head_sha, "head_sha_matches": True, "pr_open": True, "permissions_ok": True,

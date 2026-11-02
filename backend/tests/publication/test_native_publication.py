@@ -53,3 +53,23 @@ async def test_preflight_rejects_stale_head_and_permission(normalized_run):
     github.head, github.permission = run.snapshot.head_sha, False
     with pytest.raises(GitHubPublishError, match="github_permission_denied"):
         await PublicationPreflight(github, Config(), artifacts).check(run)
+
+
+async def test_unresolved_with_confirmed_findings_still_requires_partial_acknowledgement(normalized_run):
+    from app.review.domain import VerificationQuestion
+    from app.review.findings import finding_digest
+
+    run, artifacts = normalized_run
+    candidate = run.report.candidates[0].model_copy(deep=True)
+    candidate.id = "pending"
+    candidate.finding = None
+    candidate.verification.verdict = "insufficient"
+    candidate.verification.question = VerificationQuestion(
+        observation="源码返回不同的值。", missing_premise="接口允许值未知。", question="请确认允许值。")
+    candidate.question_digest = finding_digest(candidate, run.snapshot)
+    run.report.candidates.append(candidate)
+    checked = await PublicationPreflight(GitHub(run), Config(), artifacts).check(run)
+    assert checked["plan"].outcome.kind == "findings"
+    assert checked["plan"].outcome.coverage == "complete"
+    assert checked["requires_partial_acknowledgement"]
+    assert "### 待核实项" in checked["plan"].review_comment_markdown

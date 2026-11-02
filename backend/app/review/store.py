@@ -9,7 +9,7 @@ from sqlalchemy.dialects.sqlite import insert
 from app.core.config import settings
 from app.core.database import sync_session
 from app.models.orm import (
-    FindingDispositionOrm, GitHubSummarySlotOrm, IncrementalWebhookDeliveryOrm,
+    GitHubSummarySlotOrm, IncrementalWebhookDeliveryOrm,
     PublicationAttemptOrm, PublicationItemOrm, ReviewCandidateOrm, ReviewCreateIntentOrm, ReviewRequestOrm,
     ReviewTaskOrm, ReviewWorkItemOrm, WorkerJobOrm,
 )
@@ -708,21 +708,6 @@ class ReviewStore:
                     " ".join((run.id, run.pr.title, run.snapshot.repository, run.pr_url)).casefold()]
         start = (page - 1) * page_size
         return {"items": runs[start:start + page_size], "total": len(runs), "page": page, "page_size": page_size}
-
-    def dispositions(self, run_id):
-        with self.sessions() as session:
-            return {row.finding_id: row.payload for row in session.scalars(
-                select(FindingDispositionOrm).where(FindingDispositionOrm.task_id == run_id))}
-
-    def save_disposition(self, run_id, finding_id, value):
-        with self.sessions.begin() as session:
-            if not lock_live_review(session, run_id):
-                raise KeyError(run_id)
-            run = self._run(session.get(ReviewTaskOrm, run_id))
-            if run.status not in TERMINAL:
-                raise ValueError("review_not_terminal")
-            session.merge(FindingDispositionOrm(task_id=run_id, finding_id=finding_id,
-                                                payload=value, updated_at=utcnow()))
 
     def _publication_pending(self, session, run_id):
         return session.scalar(select(PublicationAttemptOrm.id).where(

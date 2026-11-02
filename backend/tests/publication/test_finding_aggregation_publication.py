@@ -83,3 +83,39 @@ def test_publisher_uses_server_resolved_sources_not_model_context_handles(normal
 
     assert [item.id for item in accepted] == [finding.id]
     assert withheld == []
+
+
+def test_refined_local_failure_is_revalidated_without_overwriting_original_candidate(normalized_run):
+    from app.review.domain import FailureDescription
+
+    run, artifacts = normalized_run
+    candidate = run.report.candidates[0]
+    candidate.verification.verified_claim = FailureDescription(
+        claim="Local return value is wrong", trigger="Call function directly", impact="Wrong return value")
+    finding = candidate.finding
+    finding.claim, finding.trigger, finding.impact = (
+        candidate.verification.verified_claim.claim,
+        candidate.verification.verified_claim.trigger,
+        candidate.verification.verified_claim.impact,
+    )
+    finding.admission_digest = finding_digest(candidate, run.snapshot)
+    accepted, withheld = validated_findings(run, artifacts)
+    assert accepted == [finding] and withheld == []
+    assert candidate.proposal.impact == "Incorrect result"
+    finding.impact = candidate.proposal.impact
+    accepted, withheld = validated_findings(run, artifacts)
+    assert accepted == [] and withheld == [("candidate", "finding_fact_mismatch")]
+
+
+def test_absent_optional_verifier_details_do_not_invalidate_existing_admission_digest(normalized_run):
+    from app.review.planner import identity
+
+    run, _ = normalized_run
+    candidate = run.report.candidates[0]
+    original_verification = candidate.verification.model_dump(exclude={"verified_claim", "question"})
+    original_digest = identity({
+        "snapshot": run.snapshot.model_dump(), "candidate_id": candidate.id,
+        "proposal": candidate.proposal.model_dump(), "verification": original_verification,
+        "sources": [ref.model_dump() for ref in candidate.verification_sources],
+    })
+    assert finding_digest(candidate, run.snapshot) == original_digest

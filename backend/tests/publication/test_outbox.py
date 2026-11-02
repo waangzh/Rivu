@@ -246,3 +246,28 @@ async def test_acknowledged_partial_run_remains_publishable(publication_pipeline
     assert await delivery.worker.run_once()
     assert delivery.repo.get(attempt.id).state == "succeeded"
     assert len(api.comments) == len(api.reviews) == len(api.inline) == 1
+
+
+@pytest.mark.parametrize("keys", [None, []])
+async def test_large_question_report_can_preflight_and_publish(large_question_run, publication_pipeline, keys):
+    from app.models.orm import ReviewTaskOrm
+
+    task, api, delivery, repository = await setup(publication_pipeline)
+    with repository.sessions.begin() as session:
+        session.get(ReviewTaskOrm, task.id).task_snapshot = task.model_dump(mode="json")
+    checked = await delivery.preflight(task.id, keys)
+    assert checked.requires_partial_acknowledgement
+    assert len(checked.summary_markdown.encode("utf-8")) <= 59_000
+    assert "\u6761\u5f85\u6838\u5b9e\u9879\u56e0\u8bc4\u8bba\u957f\u5ea6\u9650\u5236\u7701\u7565" in checked.summary_markdown
+    assert api.writes == []
+    selection = PublicationSelection(
+        expected_plan_hash=checked.plan_hash, expected_report_version=checked.report_version,
+        expected_head_sha=checked.head_sha, finding_keys=checked.finding_keys,
+        acknowledge_partial_review=True)
+    attempt = await delivery.create(task.id, selection, "large-question-request")
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    comment = next(iter(api.comments.values()))["body"]
+    assert len(comment.encode("utf-8")) <= 60_000
+    assert "\u5b58\u5728 15 \u4e2a\u672a\u51b3\u95ee\u9898" in comment
+    assert "\u6761\u5f85\u6838\u5b9e\u9879\u56e0\u8bc4\u8bba\u957f\u5ea6\u9650\u5236\u7701\u7565" in comment

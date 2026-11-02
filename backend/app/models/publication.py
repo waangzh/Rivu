@@ -42,6 +42,15 @@ class WithheldFinding(BaseModel):
     reason_code: str
 
 
+class PublicationQuestion(BaseModel):
+    candidate_id: str
+    anchor: PublicationAnchor
+    observation: str
+    missing_premise: str
+    question: str
+    evidence_ids: list[str]
+
+
 class ReviewOutcome(BaseModel):
     kind: Literal["clean", "findings", "inconclusive", "failed", "cancelled"]
     coverage: Literal["complete", "partial", "unknown"]
@@ -70,6 +79,7 @@ class PublicationPlan(BaseModel):
     review_comment_markdown: str = ""
     inline_drafts: list[PublicationFinding] = Field(default_factory=list)
     summary_findings: list[PublicationFinding] = Field(default_factory=list)
+    unresolved_questions: list[PublicationQuestion] = Field(default_factory=list)
     withheld_findings: list[WithheldFinding] = Field(default_factory=list)
     content_eligible: bool = False
     blocking_reasons: list[str] = Field(default_factory=list)

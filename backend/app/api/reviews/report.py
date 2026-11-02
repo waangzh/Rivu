@@ -28,9 +28,8 @@ async def _build_plan(task_id: str) -> PublicationPlan:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.status not in TERMINAL:
         raise HTTPException(status_code=409, detail="Review is not finished")
-    dispositions = await _report_dispositions(service, task_id)
     return await asyncio.to_thread(PublicationPlanner(service._artifacts).build,
-                                   task.model_copy(deep=True), dispositions=dispositions)
+                                   task.model_copy(deep=True))
 
 
 @router.get("/{task_id}/publication-summary", response_model=ReviewSummary, responses={
@@ -48,10 +47,6 @@ async def get_publication_summary(task_id: str) -> ReviewSummary:
 async def get_publication_plan(task_id: str) -> PublicationPlan:
     """从保存的终态快照生成草稿，不调用模型或 GitHub，不持久化发布状态。"""
     return await _build_plan(task_id)
-
-
-async def _report_dispositions(service, task_id):
-    return await asyncio.to_thread(service.finding_dispositions, task_id)
 
 
 def _comment_content(plan, options):

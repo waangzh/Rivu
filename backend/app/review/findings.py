@@ -24,19 +24,23 @@ def admit_candidate(proposal, context, tool_call_id):
 
 def finding_digest(candidate, snapshot):
     return identity({"snapshot": snapshot.model_dump(), "candidate_id": candidate.id,
-        "proposal": candidate.proposal.model_dump(), "verification": candidate.verification.model_dump(),
+        "proposal": candidate.proposal.model_dump(),
+        "verification": candidate.verification.model_dump(exclude_none=True),
         "sources": [ref.model_dump() for ref in candidate.verification_sources]})
+
+
+def verified_description(candidate):
+    return candidate.verification.verified_claim or candidate.proposal
 
 
 def verification_problem(output, refs, changed_files):
     """Return the admission failure code for a verifier output, if any."""
-    problem = None
     if output.verdict in {"confirmed", "refuted"} and not refs:
-        problem = "missing_decision_sources"
+        return "missing_decision_sources"
     if output.verdict == "confirmed":
         if (output.severity is None or not output.reason.strip()
                 or not output.author_comment or not output.author_comment.strip()):
-            problem = "missing_confirmed_fields"
+            return "missing_confirmed_fields"
         if output.attribution in {"introduced", "exposed"}:
             changes = {item.file_path: item for item in changed_files}
             causal = [ref for ref in refs if ref.path in changes
@@ -44,8 +48,8 @@ def verification_problem(output, refs, changed_files):
             added = any(changes.get(ref.path) and changes[ref.path].change_type == "added"
                         and ref.side == "head" for ref in causal)
             if not added and not {"base", "head"} <= {ref.side for ref in causal}:
-                problem = "missing_change_attribution_sources"
-    return problem
+                return "missing_change_attribution_sources"
+    return None
 
 
 def admit_verification(candidate, output, context):
@@ -63,11 +67,14 @@ def admit_verification(candidate, output, context):
         "reason": f"{problem}: {output.reason}"} if problem else {})
     candidate.verification_sources = refs
     candidate.admission_reason = problem
+    candidate.question_digest = (finding_digest(candidate, run.snapshot)
+        if not problem and output.verdict == "insufficient" and output.question else None)
     candidate.finding = None
     if candidate.verification.verdict == "confirmed":
+        description = verified_description(candidate)
         candidate.finding = Finding(id=f"finding-{candidate.id}", candidate_id=candidate.id,
-            claim=candidate.proposal.claim, trigger=candidate.proposal.trigger,
-            impact=candidate.proposal.impact, severity=output.severity,
+            claim=description.claim, trigger=description.trigger,
+            impact=description.impact, severity=output.severity,
             attribution=output.attribution, author_comment=output.author_comment,
             location=candidate.proposal.location, sources=refs,
             publishable=output.attribution in {"introduced", "exposed"},

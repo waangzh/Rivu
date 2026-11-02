@@ -149,3 +149,37 @@ test('行内代码组件不把围栏、跨行反引号、HTML 和链接当作可
     assert.doesNotMatch(html, /<script>|<a /);
   } finally { await server.close(); }
 });
+
+test('疑似问题区分引用校验失败和业务前提不足，安全展示核实问题', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewFindingsPage.vue');
+    const candidate = {
+      id: 'invalid', proposal: { claim: '字典被原地修改', location: { path: 'stats.py', line: 27, side: 'head' } },
+      sources: [{}], verification_sources: [], admission_reason: 'invalid_source_refs',
+      verification: { verdict: 'insufficient', reason: '引用混入 R1', question: null },
+    };
+    const question = {
+      ...candidate, id: 'question', admission_reason: null, verification_sources: [{}],
+      verification: { verdict: 'insufficient', reason: '输入约定未确定', question: {
+        observation: '源码含有 <script>untrusted</script>',
+        missing_premise: '空列表是否是有效输入',
+        question: '请确认是否允许 files=[]',
+      } },
+    };
+    const html = await renderToString(createSSRApp(Component, {
+      task: task('completed'), findings: [], candidates: [candidate, question],
+    }));
+    assert.match(html, /复核结果校验失败/);
+    assert.match(html, /invalid_source_refs/);
+    assert.match(html, /这不表示源码一定缺失/);
+    assert.match(html, /缺失前提：空列表是否是有效输入/);
+    assert.match(html, /请确认：请确认是否允许 files=\[\]/);
+    assert.match(html, /&lt;script&gt;untrusted&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>|低风险/);
+  } finally { await server.close(); }
+});

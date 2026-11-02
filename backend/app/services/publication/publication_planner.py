@@ -3,13 +3,15 @@
 from app.core.fingerprints import stable_hash
 from app.review.evidence import EvidenceArchive
 from app.models.publication import (
-    PublicationAnchor, PublicationFinding, PublicationPlan, PublicationSnapshot,
+    PublicationAnchor, PublicationFinding, PublicationPlan, PublicationQuestion, PublicationSnapshot,
     ReviewDigest, ReviewOutcome, ReviewSummary, WithheldFinding,
 )
 from app.services.publication.publication_renderer import (
     markdown_text, overview_markdown, render_review_comment, render_summary, render_user_report,
 )
-from app.services.publication.review_publication import validated_findings
+from app.services.publication.review_publication import (
+    validated_findings, validated_questions, validated_refutations,
+)
 from app.services.review.artifact_store import LocalArtifactStore
 
 
@@ -38,7 +40,7 @@ class PublicationPlanner:
     def __init__(self, artifacts=None):
         self.artifacts = artifacts or LocalArtifactStore()
 
-    def build(self, run, *, dispositions=None, include_markdown=True):
+    def build(self, run, *, include_markdown=True):
         report = run.report
         report_version = report.version if report else stable_hash({"missing": run.id})
         selected, withheld = validated_findings(run, self.artifacts)
@@ -52,8 +54,13 @@ class PublicationPlanner:
         if blockers:
             withheld.extend((finding.candidate_id, "review_content_blocked") for finding in selected)
             selected = []
-        unresolved = sum(candidate.verification is None or candidate.verification.verdict == "insufficient"
-                         for candidate in (report.candidates if report else []))
+        refuted = validated_refutations(run, self.artifacts)
+        unresolved = sum(
+            candidate.verification is None or candidate.admission_reason is not None
+            or candidate.verification.verdict == "insufficient"
+            or (candidate.verification.verdict == "refuted" and candidate.id not in refuted)
+            or (candidate.verification.verdict == "confirmed" and candidate.finding is None)
+            for candidate in (report.candidates if report else []))
         complete = bool(report and run.status == report.status == "completed")
         reasons = [*blockers, *(report.reasons if report else [])]
         history_unchecked = bool(report and any(
@@ -87,6 +94,14 @@ class PublicationPlanner:
                 "url": (item.get("receipt") or {}).get("url")} for item in run.plan.history],
             withheld_findings=[WithheldFinding(candidate_id=identity, reason_code=reason)
                                for identity, reason in sorted(set(withheld))])
+        if not blockers:
+            for candidate in validated_questions(run, self.artifacts):
+                question = candidate.verification.question
+                plan.unresolved_questions.append(PublicationQuestion(
+                    candidate_id=candidate.id, anchor=_anchor(run, candidate.proposal),
+                    observation=question.observation, missing_premise=question.missing_premise,
+                    question=question.question,
+                    evidence_ids=[source.id for source in candidate.verification_sources]))
         for finding in selected:
             anchor = _anchor(run, finding)
             draft = PublicationFinding(finding_key=finding.id, candidate_id=finding.candidate_id,

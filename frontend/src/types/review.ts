@@ -86,6 +86,12 @@ export interface VerificationOutput {
   reason: string;
   source_refs: string[];
   author_comment: string | null;
+  verified_claim: Pick<CandidateInput, 'claim' | 'trigger' | 'impact'> | null;
+  question: {
+    observation: string;
+    missing_premise: string;
+    question: string;
+  } | null;
 }
 
 export interface Finding {
@@ -113,16 +119,10 @@ export interface Candidate {
   verification: VerificationOutput | null;
   verification_sources: SourceRef[];
   admission_reason: string | null;
+  question_digest: string | null;
   finding: Finding | null;
   previous_candidate_id: string | null;
 }
-
-export interface FindingDisposition {
-  status: 'open' | 'resolved' | 'dismissed';
-  note: string | null;
-}
-
-export type FindingDispositions = Record<string, FindingDisposition>;
 
 export interface WorkItem {
   id: string;

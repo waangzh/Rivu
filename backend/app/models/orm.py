@@ -122,14 +122,6 @@ class PreparedWorkspaceOrm(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class FindingDispositionOrm(Base):
-    __tablename__ = "finding_dispositions"
-    task_id: Mapped[str] = mapped_column(ForeignKey("review_tasks.id", ondelete="CASCADE"), primary_key=True)
-    finding_id: Mapped[str] = mapped_column(String(160), primary_key=True)
-    payload: Mapped[dict] = mapped_column(JSON)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class ReviewTaskOrm(Base):
     __tablename__ = "review_tasks"
     __table_args__ = (

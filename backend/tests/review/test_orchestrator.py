@@ -58,6 +58,45 @@ class ReviewModel(BaseChatModel):
             tool_calls=[{"name": name, "args": payload, "id": f"tool-{len(tools)}"}]))])
 
 
+class ReferenceCorrectionModel(ReviewModel):
+    corrected_verdict: str = "confirmed"
+    correction_failure: bool = False
+    correction_reads: bool = False
+    correction_count: int = 0
+    missing_sources: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if not str(messages[0].content).startswith("Independently"):
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        correcting = any(str(message.content).startswith("Runtime correction") for message in messages)
+        if correcting:
+            self.correction_count += 1
+            assert self.correction_count == 1
+            if self.correction_failure:
+                raise ValueError("PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE")
+        result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        call = result.generations[0].message.tool_calls[0]
+        if not correcting:
+            if self.missing_sources:
+                call["args"]["source_refs"] = []
+            else:
+                call["args"]["source_refs"].append("R1")
+        elif self.correction_reads:
+            call.update(name="read_file", args={"path": "a.py", "revision": "head", "start": 1, "end": 2})
+        else:
+            call["args"]["verdict"] = self.corrected_verdict
+            call["args"]["verified_claim"] = {
+                "claim": "零输入导致函数除零", "trigger": "直接传入 x=0", "impact": "函数抛出除零异常",
+            } if self.corrected_verdict == "confirmed" else None
+            if self.corrected_verdict == "insufficient":
+                call["args"]["question"] = {
+                    "observation": "函数直接以 x 为除数。",
+                    "missing_premise": "尚未确定接口是否允许零输入。",
+                    "question": "请确认 x=0 是否为允许输入。",
+                }
+        return result
+
+
 async def test_actual_agent_loop_candidate_verifier_and_default_overview(tmp_path):
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     report = await ReviewOrchestrator(store, AgentRunner(ReviewModel())).run(run.id, provider, lease)
@@ -82,6 +121,141 @@ async def test_invalid_verification_sources_are_admission_failure_not_execution_
     assert candidate.admission_reason == "invalid_source_refs"
     assert candidate.verification_sources == []
     assert candidate.finding is None
+    assert report.usage["model_calls"] == 5
+
+
+@pytest.mark.parametrize("verdict", ["confirmed", "refuted", "insufficient"])
+@pytest.mark.parametrize("missing_sources", [False, True])
+async def test_invalid_or_missing_sources_get_one_budgeted_correction(tmp_path, verdict, missing_sources):
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    model = ReferenceCorrectionModel(corrected_verdict=verdict, missing_sources=missing_sources)
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    candidate = report.candidates[0]
+    assert model.correction_count == 1
+    assert report.usage["model_calls"] == 5
+    assert report.usage["unknown_calls"] == 0
+    assert candidate.verification.verdict == verdict
+    assert candidate.admission_reason is None
+    assert candidate.verification_sources
+    work = next(item for item in report.units if item.kind == "verification")
+    assert work.status == "completed" and work.attempt == 1
+    assert len(report.findings) == (1 if verdict == "confirmed" else 0)
+    if verdict == "confirmed":
+        assert candidate.proposal.impact == "请求失败"
+        assert report.findings[0].impact == "函数抛出除零异常"
+    elif verdict == "insufficient":
+        assert candidate.verification.question.missing_premise == "尚未确定接口是否允许零输入。"
+        from app.review.findings import finding_digest
+        assert candidate.question_digest == finding_digest(candidate, run.snapshot)
+
+
+async def test_reference_correction_cannot_take_over_protected_overview_budget(tmp_path):
+    from app.models.orm import ReviewTaskOrm
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.limits.total_model_calls = 4
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = ReferenceCorrectionModel()
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert model.correction_count == 0
+    assert report.usage["model_calls"] == 4
+    assert report.overview.status == "ready"
+    assert report.candidates[0].admission_reason == "invalid_source_refs"
+    assert report.candidates[0].verification.verdict == "insufficient"
+    assert report.findings == []
+
+
+async def test_reference_correction_respects_agent_call_fuse(tmp_path):
+    from app.models.orm import ReviewTaskOrm
+
+    class CombinedModel(ReferenceCorrectionModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            message = result.generations[0].message
+            if message.tool_calls[0]["name"] == "submit_candidate":
+                message.tool_calls.append({"name": "UnitCompletion", "args": {}, "id": "completion"})
+            return result
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.limits.model_calls = 1
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = CombinedModel()
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert model.correction_count == 0
+    assert report.usage["model_calls"] == 3
+    assert report.candidates[0].admission_reason == "invalid_source_refs"
+    assert report.findings == []
+
+
+@pytest.mark.parametrize("mode", ["failure", "reads"])
+async def test_failed_correction_keeps_rejected_result_and_never_reinvestigates(tmp_path, caplog, mode):
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    model = ReferenceCorrectionModel(correction_failure=mode == "failure", correction_reads=mode == "reads")
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert model.correction_count == 1
+    assert report.usage["model_calls"] == 5
+    assert report.usage["unknown_calls"] == (1 if mode == "failure" else 0)
+    candidate = report.candidates[0]
+    assert candidate.verification.verdict == "insufficient"
+    assert candidate.admission_reason == "invalid_source_refs"
+    assert candidate.finding is None
+    work = next(item for item in report.units if item.kind == "verification")
+    assert work.result["verdict"] == "confirmed"
+    assert work.result["source_refs"][-1] == "R1"
+    assert "PRIVATE_PROVIDER_BODY_TOKEN_AND_SOURCE" not in caplog.text
+
+
+@pytest.mark.parametrize("stop", ["cancelled", "lease_lost"])
+async def test_reference_correction_propagates_cancellation_and_lease_loss(tmp_path, stop):
+    from app.models.orm import ReviewTaskOrm, WorkerJobOrm
+    from app.review.store import LeaseLost, ReviewStopped
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+
+    class StopDuringCorrectionModel(ReferenceCorrectionModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if any(str(message.content).startswith("Runtime correction") for message in messages):
+                with sessions.begin() as session:
+                    if interruption == "cancelled":
+                        session.get(ReviewTaskOrm, run.id).status = "cancelled"
+                    else:
+                        session.get(WorkerJobOrm, lease["job_id"]).lease_owner = "replacement-worker"
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    interruption = stop
+    with pytest.raises(ReviewStopped if stop == "cancelled" else LeaseLost):
+        await ReviewOrchestrator(store, AgentRunner(StopDuringCorrectionModel())).run(run.id, provider, lease)
+    assert store.candidates(run.id)[0].verification is None
+    assert all(item.status != "completed" for item in store.work_items(run.id)
+               if item.kind == "verification")
+
+
+async def test_reference_correction_returning_after_deadline_cannot_save_a_finding(tmp_path):
+    from datetime import timedelta
+    from app.models.orm import ReviewTaskOrm
+    from app.review.domain import utcnow
+
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+
+    class LateCorrectionModel(ReferenceCorrectionModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if any(str(message.content).startswith("Runtime correction") for message in messages):
+                provider.run.hard_deadline = utcnow() - timedelta(seconds=1)
+                with sessions.begin() as session:
+                    row = session.get(ReviewTaskOrm, run.id)
+                    row.task_snapshot = {**row.task_snapshot,
+                        "hard_deadline": provider.run.hard_deadline.isoformat()}
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    report = await ReviewOrchestrator(store, AgentRunner(LateCorrectionModel())).run(run.id, provider, lease)
+    assert report.findings == []
+    assert report.candidates[0].verification is None
+    work = next(item for item in report.units if item.kind == "verification")
+    assert work.status == "interrupted" and work.error_code == "hard_deadline"
+    assert report.overview.status == "skipped_deadline"
+    assert report.usage["model_calls"] == 4
 
 
 def test_safe_error_detail_only_exposes_stable_codes():

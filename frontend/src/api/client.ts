@@ -2,8 +2,6 @@ import type {
   Candidate,
   FileContext,
   Finding,
-  FindingDisposition,
-  FindingDispositions,
   Report,
   Run,
   ReviewCreateRequest,
@@ -187,23 +185,7 @@ export const getFindings = (id: string, signal?: AbortSignal) =>
     findings: Finding[];
     candidates: Candidate[];
     report_version: string | null;
-    dispositions: FindingDispositions;
   }>(reviewPath(id, '/findings'), { signal });
-export const updateFindingDisposition = (
-  reviewId: string,
-  findingId: string,
-  value: FindingDisposition,
-  signal?: AbortSignal,
-) => request<{
-  findings: Finding[];
-  candidates: Candidate[];
-  report_version: string | null;
-  dispositions: FindingDispositions;
-}>(reviewPath(reviewId, '/findings/' + encodeURIComponent(findingId) + '/disposition'), {
-  method: 'PATCH',
-  body: JSON.stringify(value),
-  signal,
-});
 export const getReport = (id: string, signal?: AbortSignal) =>
   request<{ report: Report | null; markdown: string }>(reviewPath(id, '/report'), { signal });
 export const getFileContext = (id: string, file: number, signal?: AbortSignal) =>

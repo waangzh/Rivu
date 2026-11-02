@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { updateFindingDisposition } from '../../api/client';
-import type { Candidate, Finding, FindingDisposition, FindingDispositions, Run } from '../../types/review';
-import { terminal } from '../../utils/nativeReview';
+import { computed, ref, watch } from 'vue';
+import type { Candidate, Finding, Run } from '../../types/review';
 import AppIcon from '../common/AppIcon.vue';
 import EmptyState from '../common/EmptyState.vue';
 import StatusBadge from '../common/StatusBadge.vue';
@@ -11,25 +9,19 @@ const props = defineProps<{
   task: Run;
   findings: Finding[];
   candidates: Candidate[];
-  dispositions: FindingDispositions;
   loading?: boolean;
 }>();
-const emit = defineEmits<{ 'update:dispositions': [value: FindingDispositions] }>();
 
 const query = ref('');
 const selected = ref('');
-const status = ref<FindingDisposition['status']>('open');
-const note = ref('');
-const saving = ref(false);
-const error = ref('');
-let generation = 0;
 
 const visible = computed(() => props.findings.filter(item => (
   item.claim + ' ' + (item.location?.path || '')
 ).toLowerCase().includes(query.value.toLowerCase())));
+const unresolvedCandidates = computed(() => props.candidates.filter(
+  item => item.admission_reason || !item.verification || item.verification.verdict === 'insufficient',
+));
 const current = computed(() => visible.value.find(item => item.id === selected.value) || visible.value[0]);
-const currentDisposition = computed(() => current.value ? props.dispositions[current.value.id] : undefined);
-const canSave = computed(() => Boolean(current.value) && terminal(props.task.status) && !saving.value);
 
 const attribution = {
   introduced: '本次 PR 引入',
@@ -38,45 +30,7 @@ const attribution = {
   uncertain: '归因尚未确定',
 };
 
-function resetDispositionForm() {
-  const disposition = currentDisposition.value;
-  status.value = disposition?.status ?? 'open';
-  note.value = disposition?.note ?? '';
-  error.value = '';
-}
-
-watch(() => props.task.id, () => {
-  generation += 1;
-  selected.value = '';
-  saving.value = false;
-  resetDispositionForm();
-});
-watch(() => current.value?.id, resetDispositionForm);
-onBeforeUnmount(() => { generation += 1; });
-
-async function saveDisposition() {
-  const finding = current.value;
-  if (!finding || !canSave.value) return;
-
-  const owner = generation;
-  saving.value = true;
-  error.value = '';
-  try {
-    const result = await updateFindingDisposition(props.task.id, finding.id, {
-      status: status.value,
-      note: note.value.trim() || null,
-    });
-    if (owner === generation && current.value?.id === finding.id) {
-      emit('update:dispositions', result.dispositions);
-    }
-  } catch (cause) {
-    if (owner === generation && current.value?.id === finding.id) {
-      error.value = cause instanceof Error ? cause.message : '保存人工注记失败';
-    }
-  } finally {
-    if (owner === generation) saving.value = false;
-  }
-}
+watch(() => props.task.id, () => { selected.value = ''; });
 </script>
 
 <template>
@@ -93,12 +47,51 @@ async function saveDisposition() {
     <span class="muted small">疑似问题记录 {{ candidates.length }} 条</span>
   </div>
 
+  <section v-if="unresolvedCandidates.length" class="card card-pad space-top">
+    <div class="card-header">
+      <h2>待确认疑似问题</h2>
+      <span class="badge neutral">{{ unresolvedCandidates.length }} 条</span>
+    </div>
+    <p class="muted small">以下记录未计入已确认问题；复核结果校验失败与业务前提不足分别标明，均不等于不存在缺陷。展开每条记录可查看核验说明。</p>
+    <ol class="rg-candidate-list">
+      <li v-for="item in unresolvedCandidates" :key="item.id">
+        <details class="rg-candidate">
+          <summary>
+            <span class="rg-candidate__body">
+              <strong>{{ item.proposal.claim }}</strong>
+              <span class="rg-candidate__meta">
+                <code v-if="item.proposal.location">{{ item.proposal.location.path }}:{{ item.proposal.location.line }} · {{ item.proposal.location.side === 'base' ? 'BASE' : 'HEAD' }}</code>
+                <span>来源证据 {{ item.sources.length }} 条</span>
+                <span v-if="item.verification_sources.length">核验引用 {{ item.verification_sources.length }} 条</span>
+              </span>
+            </span>
+            <span class="rg-candidate__aside">
+              <StatusBadge :status="item.verification ? 'insufficient' : 'unverified'" :label="item.admission_reason ? '复核结果校验失败' : undefined" />
+              <AppIcon name="chevron-down" :size="16" />
+            </span>
+          </summary>
+          <p v-if="item.admission_reason" class="rg-candidate__reason">
+            复核结果未通过系统校验（{{ item.admission_reason }}），不能作为已确认问题；请检查引用或复核交付。这不表示源码一定缺失。
+          </p>
+          <p v-else-if="item.verification?.question" class="rg-candidate__reason">
+            源码观察：{{ item.verification.question.observation }}<br />
+            缺失前提：{{ item.verification.question.missing_premise }}<br />
+            请确认：{{ item.verification.question.question }}
+          </p>
+          <p class="rg-candidate__reason">
+            {{ item.verification ? '核验说明：' + item.verification.reason : '本轮结束时尚未取得核验结果。' }}
+          </p>
+        </details>
+      </li>
+    </ol>
+  </section>
+
   <p v-if="loading" class="muted space-top" role="status">正在读取问题记录…</p>
   <section v-else-if="!visible.length" class="card card-pad space-top">
     <EmptyState
       icon="shield"
       title="没有匹配的已确认问题"
-      :description="candidates.length ? '请同时查看疑似问题的核验记录，当前列表不能证明不存在缺陷。' : '未发现问题不能证明审查单元覆盖完整。'"
+      :description="candidates.length ? '请同时查看以上待确认疑似问题的核验记录，当前列表不能证明不存在缺陷。' : '未发现问题不能证明审查单元覆盖完整。'"
     />
   </section>
 
@@ -132,35 +125,6 @@ async function saveDisposition() {
           <code v-for="source in current.sources" :key="source.id" class="rg-evidence-id">{{ source.side.toUpperCase() }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.id }}</code>
         </details>
         <p v-if="!current.publishable" class="notice small">该 Finding 不具备发布资格，发布面板会按服务端计划进一步校验。</p>
-      </section>
-
-      <section class="card card-pad">
-        <div class="card-header">
-          <h3>人工注记</h3>
-          <AppIcon name="shield" />
-        </div>
-        <p class="muted small">人工状态与机器 Finding、证据判定及发布准入分离保存，不会隐藏或改写机器结论。</p>
-        <p v-if="currentDisposition" class="notice small">
-          当前状态：{{ { open: '打开', resolved: '已处理', dismissed: '已忽略' }[currentDisposition.status] }}
-          <template v-if="currentDisposition.note"> · {{ currentDisposition.note }}</template>
-        </p>
-        <form class="section-stack" @submit.prevent="saveDisposition">
-          <label class="field-label">
-            人工状态
-            <select v-model="status" class="select" :disabled="!terminal(task.status) || saving">
-              <option value="open">打开</option>
-              <option value="resolved">已处理</option>
-              <option value="dismissed">已忽略</option>
-            </select>
-          </label>
-          <label class="field-label">
-            处理注记
-            <textarea v-model="note" class="textarea" rows="3" maxlength="2000" :disabled="!terminal(task.status) || saving" />
-          </label>
-          <p v-if="!terminal(task.status)" class="muted small">仅终态审查允许保存人工注记。</p>
-          <p v-if="error" class="input-error" role="alert">{{ error }}</p>
-          <div><button class="btn primary" :disabled="!canSave">{{ saving ? '保存中…' : '保存人工注记' }}</button></div>
-        </form>
       </section>
     </article>
   </div>
