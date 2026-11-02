@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { getFindings, getProgress, getPublicationPlan, getReport } from '../../api/client';
 import type { Candidate, Finding, Report, ReviewProgress, Run } from '../../types/review';
 import type { PublicationPlan } from '../../types/publication';
@@ -26,6 +26,27 @@ const tab = computed({
     emit('navigate', value);
   },
 });
+const publishOpen = ref(false);
+async function inspectPublication() {
+  tab.value = 'publish';
+  publishOpen.value = true;
+  // 计划与发布面板可能仍在加载，等交付记录出现后再定位；能力读取失败时退回面板本身。
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await nextTick();
+    const record = document.querySelector<HTMLDetailsElement>('.gp-record');
+    if (record) {
+      record.open = true;
+      record.scrollIntoView({ block: 'start', behavior: 'instant' });
+      return;
+    }
+    const panel = document.querySelector('.github-publication');
+    if (panel && attempt >= 10) {
+      panel.scrollIntoView({ block: 'start', behavior: 'instant' });
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
 const plan = ref<PublicationPlan | null>(null);
 const findings = ref<Finding[]>([]);
 const candidates = ref<Candidate[]>([]);
@@ -161,7 +182,7 @@ function exportReport() {
     </div>
   </header>
 
-  <AutomaticPublicationStatus :review-id="task.id" @inspect="tab = 'publish'" />
+  <AutomaticPublicationStatus :review-id="task.id" @inspect="inspectPublication" />
 
   <nav class="subnav" aria-label="审查结果导航">
     <button v-for="item in reviewPrimarySections" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" @click="tab = item.id">
@@ -181,7 +202,7 @@ function exportReport() {
   <ReviewFilesPage v-else-if="tab === 'changes'" :task="task" :findings="findings" @finding="tab = 'findings'" />
   <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :loading="loading" />
   <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="progress?.units ?? []" :usage="progress?.usage" :report="report" :candidates="candidates" :findings-count="findings.length" :findings-loaded="findingsLoaded" :loaded="!!progress" :synced-at="syncedAt" :sync-error="connectionError || progressError" @navigate="tab = $event" @refresh="refreshData" />
-  <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" @export="exportReport" />
+  <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" :publish-open="publishOpen" @update:publish-open="publishOpen = $event" @export="exportReport" />
 
   <footer v-if="tab !== 'publish'" class="app-footer">
     <span>只读静态审查 · 未执行目标代码、测试或构建 · 结论仅适用于本次快照</span>

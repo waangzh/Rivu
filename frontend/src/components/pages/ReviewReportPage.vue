@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'; import { getPublicationCapability } from '../../api/client'; import type { Run } from '../../types/review'; import type { PublicationPlan } from '../../types/publication'; import type { PublicationCapability } from '../../types/operations'; import { terminal } from '../../utils/nativeReview'; import AppIcon from '../common/AppIcon.vue'; import ReportMarkdown from '../report/ReportMarkdown.vue'; import GitHubPublicationPanel from '../review/publication/GitHubPublicationPanel.vue';
-const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; loading: boolean }>(); defineEmits<{ export: [] }>();
-const showPublish = ref(false), capability = ref<PublicationCapability | null>(null), capabilityError = ref(false);
+const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; loading: boolean; publishOpen?: boolean }>(); const emit = defineEmits<{ export: []; 'update:publishOpen': [value: boolean] }>();
+const showPublish = computed({ get: () => props.publishOpen ?? false, set: value => emit('update:publishOpen', value) }), capability = ref<PublicationCapability | null>(null), capabilityError = ref(false);
 const shortHead = computed(() => props.task.snapshot.head_sha.slice(0,8));
 // 页面工具栏已显示标题，正文去掉重复的一级标题；导出文件仍保留。
 const displayReport = computed(() => props.report.replace(/^#\s+Rivu 审查评论\s*(?:\r?\n)+/, ''));

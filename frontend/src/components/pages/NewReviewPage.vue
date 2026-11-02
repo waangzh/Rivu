@@ -4,12 +4,18 @@ import { listReviews } from '../../api/client';
 import type { Run } from '../../types/review';
 import type { ReviewCapabilities, ReviewPlanOptions } from '../../types/reviewPlan';
 import AppIcon from '../common/AppIcon.vue';
+import AppSelect from '../common/AppSelect.vue';
 import StatusBadge from '../common/StatusBadge.vue';
 import ReviewPlanControls from '../review/ReviewPlanControls.vue';
 import AutomaticPublicationOptions from '../review/publication/AutomaticPublicationOptions.vue';
 const props = defineProps<{ prUrl: string; model: string; models: string[]; options: ReviewPlanOptions; capabilities: ReviewCapabilities | null; busy: boolean; autoPublish?: boolean; publicationToken?: string }>();
 defineEmits<{ 'update:prUrl': [value: string]; 'update:model': [value: string]; 'update:options': [value: ReviewPlanOptions]; 'update:autoPublish': [value: boolean]; 'update:publicationToken': [value: string]; create: []; open: [id: string]; history: [] }>();
 const valid = computed(() => /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*\/?$/.test(props.prUrl));
+const modelOptions = computed(() => [
+  { value: '', label: '使用服务端默认模型' },
+  ...(props.model && !props.models.includes(props.model) ? [{ value: props.model, label: props.model }] : []),
+  ...props.models.map(id => ({ value: id, label: id })),
+]);
 const recent = ref<Run[]>([]), error = ref(''), loading = ref(true);
 const controller = new AbortController();
 onBeforeUnmount(() => controller.abort()); onMounted(async () => { try { const result = await listReviews('', 1, controller.signal);
@@ -47,11 +53,11 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <summary class="link">调整深度、重点与范围 · {{ {quick:'快速初筛',standard:'标准审查',deep:'深度核验'}[options.depth] }}</summary>
 <ReviewPlanControls :model-value="options" :capabilities="capabilities" :disabled="busy" @update:model-value="$emit('update:options', $event)" />
 </details>
-<label class="field-label space-top">执行模型<input class="input" :value="model" list="review-models" placeholder="使用服务端默认模型" :disabled="busy" @input="$emit('update:model', ($event.target as HTMLInputElement).value)" />
-<datalist id="review-models">
-<option v-for="id in models" :key="id" :value="id" />
-</datalist>
-</label>
+<div class="field-label space-top model-field">
+<span>执行模型</span>
+<AppSelect :model-value="model" :options="modelOptions" :disabled="busy" aria-label="执行模型"
+  @update:model-value="$emit('update:model', $event)" />
+</div>
 <AutomaticPublicationOptions :model-value="autoPublish ?? false" :token="publicationToken ?? ''" :disabled="busy"
   @update:model-value="$emit('update:autoPublish', $event)" @update:token="$emit('update:publicationToken', $event)" />
 </section>
@@ -73,3 +79,7 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 </section>
 </div>
 </template>
+
+<style scoped>
+.model-field { max-width: 380px; }
+</style>
