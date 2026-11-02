@@ -45,7 +45,8 @@ export function readPendingCreation(): PendingReviewCreation | null {
       || !(input.paths === null || (Array.isArray(input.paths) && input.paths.every((item: unknown) => typeof item === 'string')))
       || !input.limits || typeof input.limits !== 'object' || Array.isArray(input.limits)
       || (input.model !== undefined && typeof input.model !== 'string')
-      || (input.include_pr_discussions !== undefined && typeof input.include_pr_discussions !== 'boolean')) return null;
+      || (input.include_pr_discussions !== undefined && typeof input.include_pr_discussions !== 'boolean')
+      || (input.auto_publish !== undefined && typeof input.auto_publish !== 'boolean')) return null;
     return value;
   } catch { return null; }
 }

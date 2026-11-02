@@ -184,6 +184,14 @@ class PublicationDelivery:
             if task.snapshot.head_sha != attempt.head_sha:
                 raise GitHubPublishError("publication_stale")
             checked = await self.preflight.check(task, selection["finding_keys"])
+            if "automatic_authorization" in context:
+                from app.services.publication.automatic_publication import validate_automatic_authorization
+                grant = validate_automatic_authorization(
+                    context["automatic_authorization"], checked["context"], attempt.head_sha)
+                if (grant.review_id != task.id or checked["requires_partial_acknowledgement"]
+                        or task.status != "completed" or len(checked["plan"].inline_drafts) > grant.max_inline):
+                    raise GitHubPublishError("automatic_publication_requires_confirmation")
+                checked["context"]["automatic_authorization"] = context["automatic_authorization"]
             if (checked["plan_hash"] != attempt.plan_hash or checked["context"] != context
                     or selection.get("expected_report_version") != checked["report_version"]):
                 raise GitHubPublishError("publication_plan_changed")
@@ -229,5 +237,11 @@ class PublicationDelivery:
 
 
 class PublicationWorker(ReviewWorker):
-    def __init__(self, queue, delivery, **kwargs):
-        super().__init__(queue, delivery.execute, kinds=("github_publication",), **kwargs)
+    def __init__(self, queue, delivery, automatic_handler=None, **kwargs):
+        async def execute(job):
+            if job.kind == "automatic_publication":
+                await automatic_handler(job)
+            else:
+                await delivery.execute(job)
+        kinds = ("github_publication", "automatic_publication") if automatic_handler else ("github_publication",)
+        super().__init__(queue, execute, kinds=kinds, **kwargs)

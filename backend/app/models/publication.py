@@ -139,6 +139,28 @@ class PublicationAccepted(BaseModel):
     status_url: str
 
 
+class AutomaticPublicationAuthorization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy: Literal["complete_only_v1"] = "complete_only_v1"
+    authorized_by: Literal["local_operator"] = "local_operator"
+    review_id: str
+    repository_id: int = Field(gt=0)
+    pr_number: int = Field(gt=0)
+    base_sha: str = Field(pattern=r"^[a-f0-9]{40,64}$")
+    head_sha: str = Field(pattern=r"^[a-f0-9]{40,64}$")
+    publisher_identity: str = Field(pattern=r"^user:[1-9][0-9]*$")
+    max_inline: int = Field(ge=1, le=100)
+    authorized_at: datetime
+    expires_at: datetime
+
+
+class AutomaticPublicationStatus(BaseModel):
+    state: Literal["waiting_review", "queued", "preparing", "publishing", "succeeded",
+                   "partial", "failed", "uncertain", "stale", "manual_required", "blocked", "paused"]
+    publication_id: str | None = None
+    last_error_code: str | None = None
+
+
 class PublicationSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")

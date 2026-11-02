@@ -2,25 +2,40 @@
 
 import asyncio
 
-from fastapi import APIRouter, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 
 from app.api import reviews as _reviews
 from app.review.contracts import ReviewRequest
 from app.review.domain import Run
+from app.core.config import settings
+from app.models.publication import AutomaticPublicationStatus
+from app.services.publication.automatic_publication import (
+    AutomaticPublicationPolicy, automatic_publication_status,
+)
 from app.tools.git_tool import GitToolError
+from app.tools.github.github_publisher import GitHubPublishError
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
 
 @router.post("", response_model=Run, status_code=202)
-async def create_review(request: ReviewRequest,
-                        idempotency_key: str = Header(min_length=1, max_length=200)):
+async def create_review(request: ReviewRequest, http_request: Request,
+                        idempotency_key: str = Header(min_length=1, max_length=200),
+                        authorization: str | None = Header(default=None)):
     try:
-        return await _reviews.get_review_service().create(request, idempotency_key)
+        policy = None
+        if request.auto_publish:
+            from app.api.publications import require_operator
+            require_operator(http_request, authorization)
+            policy = AutomaticPublicationPolicy.from_config(settings)
+        return await _reviews.get_review_service().create(
+            request, idempotency_key, automatic_policy=policy)
     except _reviews.GitHubToolError as exc:
         raise HTTPException(exc.api_status, exc.public_detail()) from None
     except GitToolError as exc:
         raise HTTPException(exc.api_status, exc.public_detail()) from None
+    except GitHubPublishError as exc:
+        raise HTTPException(403, {"code": exc.code}) from None
     except ValueError as exc:
         code = str(exc) if str(exc) in {"idempotency_key_conflict", "review_deleted"} else "review_request_invalid"
         raise HTTPException(410 if code == "review_deleted" else 409, {"code": code}) from None
@@ -41,6 +56,14 @@ async def get_review(task_id: str):
     if run is None:
         raise HTTPException(404, "Review not found")
     return run
+
+
+@router.get("/{task_id}/automatic-publication", response_model=AutomaticPublicationStatus | None)
+async def get_automatic_publication(task_id: str):
+    await get_review(task_id)
+    return await asyncio.to_thread(automatic_publication_status,
+        _reviews.get_review_service().store.sessions, task_id,
+        enabled=settings.rivu_github_publish_enabled)
 
 
 @router.get("/{task_id}/units")

@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.database import sync_session
 from app.models.orm import (
     GitHubSummarySlotOrm, IncrementalWebhookDeliveryOrm,
-    PublicationAttemptOrm, PublicationItemOrm, ReviewCandidateOrm, ReviewCreateIntentOrm, ReviewRequestOrm,
+    PublicationAttemptOrm, PublicationBatchOrm, PublicationItemOrm, ReviewCandidateOrm, ReviewCreateIntentOrm, ReviewRequestOrm,
     ReviewTaskOrm, ReviewWorkItemOrm, WorkerJobOrm,
 )
 from app.review.domain import Candidate, Run, TERMINAL, WorkItem, utcnow
@@ -97,7 +97,7 @@ class ReviewStore:
                 raise ValueError("idempotency_key_conflict")
             return row.run_id if row else None
 
-    def create(self, run, caller_id, key, request_hash):
+    def create(self, run, caller_id, key, request_hash, *, automatic_authorization=None):
         with self.sessions.begin() as session:
             # The first write serializes same-key creation, before reading the intent.
             inserted = session.execute(insert(ReviewTaskOrm).values(
@@ -148,6 +148,11 @@ class ReviewStore:
             session.flush()
             from app.services.review.task_queue import DatabaseTaskQueue
             DatabaseTaskQueue(self.sessions).enqueue(task_id=run.id, session=session)
+            if automatic_authorization is not None:
+                DatabaseTaskQueue(self.sessions).enqueue(task_id=run.id, kind="automatic_publication",
+                    idempotency_key=f"automatic_publication:{run.id}", session=session,
+                    payload={"authorization": automatic_authorization.model_dump(mode="json"),
+                             "state": "waiting_review"})
             return run.id
 
     def get(self, run_id):
@@ -715,6 +720,44 @@ class ReviewStore:
             or_(PublicationAttemptOrm.state.in_(["queued", "preparing", "publishing", "uncertain"]),
                 PublicationAttemptOrm.id.in_(select(GitHubSummarySlotOrm.pending_publication_id)))))
 
+    def _retire_unsent_automatic_publication(self, session, run_id):
+        """Explicit retry/deletion may revoke an automatic grant before any send intent."""
+        # Callers hold lock_live_review's SQLite write lock through the final commit.
+        job = session.scalar(select(WorkerJobOrm).where(
+            WorkerJobOrm.task_id == run_id, WorkerJobOrm.kind == "automatic_publication"))
+        if job is None:
+            return
+        now = utcnow()
+
+        def active(row):
+            return (row is not None and row.status == "leased"
+                    and row.lease_until is not None and as_utc(row.lease_until) > now)
+
+        if active(job):
+            return
+        publication_id = job.payload.get("publication_id")
+        if publication_id:
+            attempt = session.get(PublicationAttemptOrm, publication_id)
+            delivery = session.scalar(select(WorkerJobOrm).where(
+                WorkerJobOrm.idempotency_key == f"github_publication:{publication_id}"))
+            if (attempt is None or attempt.state != "queued" or delivery is None or active(delivery)
+                    or session.scalar(select(PublicationItemOrm.id).where(
+                        PublicationItemOrm.publication_id == publication_id, PublicationItemOrm.state != "pending"))
+                    or session.scalar(select(PublicationBatchOrm.id).where(
+                        PublicationBatchOrm.publication_id == publication_id))
+                    or session.scalar(select(GitHubSummarySlotOrm.id).where(
+                        GitHubSummarySlotOrm.pending_publication_id == publication_id))):
+                return
+            attempt.state, attempt.last_error_code = "failed", "automatic_publication_cancelled"
+            attempt.completed_at = now
+            delivery.status, delivery.last_error = "cancelled", "automatic_publication_cancelled"
+            delivery.lease_owner, delivery.lease_until, delivery.completed_at = None, None, now
+        elif job.status not in {"queued", "retry", "leased"}:
+            return
+        job.status, job.lease_owner, job.lease_until, job.completed_at = "completed", None, None, now
+        job.payload = {**job.payload, "state": "blocked", "last_error_code": "automatic_publication_cancelled"}
+        session.flush()
+
     def retry(self, run_id, *, overview=False):
         with self.sessions.begin() as session:
             if not lock_live_review(session, run_id):
@@ -724,6 +767,7 @@ class ReviewStore:
             allowed = {"completed", "partial", "failed"} if overview else {"partial", "failed"}
             if run.status not in allowed or utcnow() >= run.hard_deadline:
                 raise ValueError("review_retry_unavailable")
+            self._retire_unsent_automatic_publication(session, run_id)
             if session.scalar(select(WorkerJobOrm.id).where(WorkerJobOrm.task_id == run_id,
                 WorkerJobOrm.status.in_(["queued", "retry", "leased"]))):
                 raise ValueError("review_job_active")
@@ -776,6 +820,7 @@ class ReviewStore:
                 raise ValueError("review_not_terminal")
             if require_retention and as_utc(row.retention_until) > utcnow():
                 return False
+            self._retire_unsent_automatic_publication(session, run_id)
             if self._publication_pending(session, run_id):
                 if require_retention:
                     return False

@@ -6,8 +6,9 @@ import type { ReviewCapabilities, ReviewPlanOptions } from '../../types/reviewPl
 import AppIcon from '../common/AppIcon.vue';
 import StatusBadge from '../common/StatusBadge.vue';
 import ReviewPlanControls from '../review/ReviewPlanControls.vue';
-const props = defineProps<{ prUrl: string; model: string; models: string[]; options: ReviewPlanOptions; capabilities: ReviewCapabilities | null; busy: boolean }>();
-defineEmits<{ 'update:prUrl': [value: string]; 'update:model': [value: string]; 'update:options': [value: ReviewPlanOptions]; create: []; open: [id: string]; history: [] }>();
+import AutomaticPublicationOptions from '../review/publication/AutomaticPublicationOptions.vue';
+const props = defineProps<{ prUrl: string; model: string; models: string[]; options: ReviewPlanOptions; capabilities: ReviewCapabilities | null; busy: boolean; autoPublish?: boolean; publicationToken?: string }>();
+defineEmits<{ 'update:prUrl': [value: string]; 'update:model': [value: string]; 'update:options': [value: ReviewPlanOptions]; 'update:autoPublish': [value: boolean]; 'update:publicationToken': [value: string]; create: []; open: [id: string]; history: [] }>();
 const valid = computed(() => /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*\/?$/.test(props.prUrl));
 const recent = ref<Run[]>([]), error = ref(''), loading = ref(true);
 const controller = new AbortController();
@@ -51,6 +52,8 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <option v-for="id in models" :key="id" :value="id" />
 </datalist>
 </label>
+<AutomaticPublicationOptions :model-value="autoPublish ?? false" :token="publicationToken ?? ''" :disabled="busy"
+  @update:model-value="$emit('update:autoPublish', $event)" @update:token="$emit('update:publicationToken', $event)" />
 </section>
 <section class="card card-pad">
 <div class="card-header">

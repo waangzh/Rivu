@@ -3,6 +3,7 @@ import type {
   PublicationInlinePreview,
   PublicationItem,
   PublicationState,
+  AutomaticPublicationStatus,
 } from '../types/publication';
 
 export const publicationStateLabel: Record<PublicationState, string> = {
@@ -14,6 +15,14 @@ export const publicationStateLabel: Record<PublicationState, string> = {
   failed: '发布未完成',
   uncertain: '无法确认 GitHub 是否已收到评论',
   stale: 'PR 已更新，请重新审查后发布',
+};
+
+export const automaticPublicationStateLabel: Record<AutomaticPublicationStatus['state'], string> = {
+  ...publicationStateLabel,
+  waiting_review: '审查完成后自动发布',
+  manual_required: '自动发布已转为人工确认',
+  blocked: '自动发布已停止',
+  paused: '自动发布已暂停',
 };
 
 export const publicationItemStateLabel: Record<PublicationItem['state'], string> = {
@@ -37,6 +46,15 @@ export function publicationItemKindLabel(kind: PublicationItem['kind']) {
 }
 
 const errorLabels: Record<string, string> = {
+  automatic_authorization_expired: '本次自动发布授权已过期，请在发布页重新预检并确认。',
+  automatic_authorization_mismatch: '本次自动发布授权与任务或发布身份不一致，已停止发布。',
+  automatic_publication_not_authorized: '本次审查尚未取得自动发布授权。',
+  automatic_publication_requires_confirmation: '当前结果不满足自动发布条件，请在发布页人工确认。',
+  automatic_publication_check_failed: '自动发布条件检查未完成，请在发布页重新检查。',
+  automatic_publication_cancelled: '本次任务的未发送自动发布已因重试或删除而撤销；后续发布需重新确认。',
+  review_partial: '审查结果不完整，需要在发布页查看并明确确认。',
+  review_failed: '审查失败，未自动发布评论。',
+  review_cancelled: '审查已取消，未自动发布评论。',
   publication_disabled: '服务端尚未启用 GitHub 发布；当前只能复制评论后手动粘贴。',
   publication_operator_unauthorized: '发布操作口令无效，或当前连接不符合本地单用户访问限制。',
   publication_stale: 'PR 已更新，请重新审查后再发布。',
@@ -84,9 +102,9 @@ const errorLabels: Record<string, string> = {
   github_pagination_incomplete: 'GitHub 分页结果不完整，暂时无法安全核对。',
 };
 
-export function publicationErrorText(code: string | null | undefined) {
+export function publicationErrorText(code: string | null | undefined, fallback?: string) {
   if (!code) return '';
-  return errorLabels[code] || '发布请求失败（' + code + '）';
+  return errorLabels[code] || fallback || '发布请求失败（' + code + '）';
 }
 
 export function publicationWarningText(reason: string) {

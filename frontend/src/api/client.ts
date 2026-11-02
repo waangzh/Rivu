@@ -21,6 +21,7 @@ import type {
   PublicationPlan,
   PublicationPreflightResult,
   PublicationSelection,
+  AutomaticPublicationStatus,
 } from '../types/publication';
 import { publicationErrorText } from '../utils/publicationPresentation';
 
@@ -91,8 +92,10 @@ export const updateSystemSettings = (value: {
   method: 'PATCH',
   body: JSON.stringify(value),
 });
-export const getPublicationCapability = () =>
-  request<import('../types/operations').PublicationCapability>('/api/system/publication-capability');
+export const getPublicationCapability = (signal?: AbortSignal) =>
+  request<import('../types/operations').PublicationCapability>('/api/system/publication-capability', { signal });
+export const getAutomaticPublication = (id: string, signal?: AbortSignal) =>
+  request<AutomaticPublicationStatus | null>(reviewPath(id, '/automatic-publication'), { signal });
 export const getReview = (id: string, signal?: AbortSignal) =>
   // Report.usage includes provider cache details; absent details remain unknown.
   request<Run>(reviewPath(id), { signal });
@@ -129,6 +132,7 @@ function reviewBody(input: ReviewCreateRequest) {
     ...(input.include_pr_discussions === undefined
       ? {}
       : { include_pr_discussions: input.include_pr_discussions }),
+    ...(input.auto_publish === undefined ? {} : { auto_publish: input.auto_publish }),
   };
 }
 
@@ -145,6 +149,7 @@ export async function createReview(
   input: ReviewCreateRequest,
   signal?: AbortSignal,
   key: string = crypto.randomUUID(),
+  operatorToken?: string,
 ): Promise<Run> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -152,7 +157,8 @@ export async function createReview(
   else signal?.addEventListener('abort', cancel, { once: true });
   const init: RequestInit = {
     method: 'POST',
-    headers: { 'Idempotency-Key': key },
+    headers: { 'Idempotency-Key': key,
+      ...(input.auto_publish && operatorToken ? { Authorization: 'Bearer ' + operatorToken } : {}) },
     body: JSON.stringify(reviewBody(input)),
     signal: controller.signal,
   };

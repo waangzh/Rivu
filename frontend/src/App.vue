@@ -8,6 +8,7 @@ import { reviewPrimarySections, type ReviewSection } from './types/workspace';
 import { defaultPlan, phaseLabel, terminal } from './utils/nativeReview';
 import { initialReviewSection, reviewRecordMissing } from './utils/reviewProgress';
 import { creationWasRejected, readPendingCreation, saveAcceptedReview, savePendingCreation, type PendingReviewCreation } from './utils/reviewCreation';
+import { publicationErrorText } from './utils/publicationPresentation';
 import AppSidebar from './components/layout/AppSidebar.vue';
 import AppHeader from './components/layout/AppHeader.vue';
 import NewReviewPage from './components/pages/NewReviewPage.vue';
@@ -18,6 +19,7 @@ import ReviewWorkspace from './components/review/ReviewWorkspace.vue';
 
 const page = ref<AppPage>('dashboard'), section = ref<ReviewSection>('overview'), mobileOpen = ref(false);
 const prUrl = ref(''), model = ref(''), models = ref<string[]>([]);
+const autoPublish = ref(false), publicationToken = ref('');
 const capabilities = ref<ReviewCapabilities | null>(null);
 const options = ref<ReviewPlanOptions>(defaultPlan());
 const task = ref<Run | null>(null), trackedId = ref<string | null>(null);
@@ -53,6 +55,8 @@ function forgetTask() {
   busy.value = false;
   restoring.value = false;
   connectionError.value = '';
+  autoPublish.value = false;
+  publicationToken.value = '';
   try { localStorage.removeItem('rg-review-task'); } catch {}
 }
 function newReview() {
@@ -152,6 +156,7 @@ async function openReview(id: string) {
 
 async function submitCreation() {
   if (!creation.value || busy.value) return;
+  if (creation.value.input.auto_publish && !publicationToken.value) return;
   const pending = toRaw(creation.value), owner = generation;
   const abort = new AbortController();
   creationController = abort;
@@ -159,15 +164,17 @@ async function submitCreation() {
   creationError.value = '';
   creationRejected.value = false;
   try {
-    const result = await createReview(pending.input, abort.signal, pending.key);
+    const result = await createReview(pending.input, abort.signal, pending.key, publicationToken.value);
     if (disposed || owner !== generation) return;
     saveAcceptedReview(result.id);
     creation.value = null;
+    publicationToken.value = '';
     await follow(result.id, result, page.value === 'dashboard');
   } catch (cause) {
     if (disposed || owner !== generation || abort.signal.aborted) return;
     creationRejected.value = creationWasRejected(cause);
-    creationError.value = cause instanceof ApiError ? cause.message
+    creationError.value = cause instanceof ApiError
+      ? (pending.input.auto_publish ? publicationErrorText(cause.message, cause.message) : cause.message)
       : '未收到确定的创建结果。继续确认会沿用原请求标识，避免重复创建审查。';
     if (creationRejected.value) savePendingCreation(null);
   } finally {
@@ -176,6 +183,7 @@ async function submitCreation() {
 }
 function start() {
   if (busy.value || creation.value) return;
+  if (autoPublish.value && !publicationToken.value) { error.value = '请先输入发布操作口令。'; return; }
   const input = structuredClone(toRaw(options.value));
   input.paths = input.paths?.map(path => path.trim()).filter(Boolean) || null;
   if (!input.focus.length) { error.value = '请至少选择一个审查重点。'; return; }
@@ -185,7 +193,8 @@ function start() {
   mobileOpen.value = false;
   creation.value = {
     key: crypto.randomUUID(), startedAt: new Date().toISOString(),
-    input: { pr_url: prUrl.value, ...input, ...(model.value ? { model: model.value } : {}) },
+    input: { pr_url: prUrl.value, ...input, ...(model.value ? { model: model.value } : {}),
+      ...(autoPublish.value ? { auto_publish: true } : {}) },
   };
   creationRecoverable.value = savePendingCreation(toRaw(creation.value));
   void submitCreation();
@@ -242,6 +251,7 @@ onMounted(async () => {
       creationRecoverable.value = true;
       prUrl.value = pending.input.pr_url;
       model.value = pending.input.model || '';
+      autoPublish.value = pending.input.auto_publish ?? false;
       options.value = {
         depth: pending.input.depth, paths: pending.input.paths, focus: pending.input.focus,
         include_pr_discussions: pending.input.include_pr_discussions ?? false,
@@ -278,14 +288,14 @@ onBeforeUnmount(() => {
         <ReviewHistoryPage v-if="page === 'history'" :busy="busy || opening || !!creation" @open="openReview" @create="newReview" @deleted="task?.id === $event && forgetTask()" />
         <SettingsPage v-else-if="page === 'settings'" @saved="loadModels" />
         <template v-else>
-          <ReviewSubmissionPage v-if="creation" :creation="creation" :submitting="busy" :rejected="creationRejected" :error="creationError" :recoverable="creationRecoverable" @retry="submitCreation" @edit="editCreation" @history="page = 'history'" />
+          <ReviewSubmissionPage v-if="creation" v-model:publication-token="publicationToken" :creation="creation" :submitting="busy" :rejected="creationRejected" :error="creationError" :recoverable="creationRecoverable" @retry="submitCreation" @edit="editCreation" @history="page = 'history'" />
           <ReviewWorkspace v-else-if="task" :key="task.id" :task="task" :section="section" :busy="busy || opening" :connection-error="connectionError" @navigate="navigate" @cancel="stop" @retry="retry" @overview-retry="retrySummary" @rereview="rereview" />
           <section v-else-if="restoring || opening || trackedId" class="card card-pad workspace-loading" role="status">
             <h1 tabindex="-1">正在打开审查记录…</h1>
             <p class="muted space-top">正在恢复任务状态，请稍候。</p>
             <button v-if="trackedId && !opening" class="btn secondary space-top" @click="follow(trackedId)">重试打开任务</button>
           </section>
-          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:model="model" v-model:options="options" :models="models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
+          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:model="model" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
         </template>
       </main>
     </div>

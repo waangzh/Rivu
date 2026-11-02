@@ -14,3 +14,12 @@ class ReviewRequest(Model):
     limits: dict[str, int] = Field(default_factory=dict, max_length=10)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     include_pr_discussions: bool | None = None
+    auto_publish: bool = False
+
+    def identity_payload(self):
+        value = self.model_dump(mode="json")
+        if value["paths"] is not None:
+            value["paths"] = sorted(set(value["paths"]))
+        if not self.auto_publish:
+            value.pop("auto_publish")
+        return value

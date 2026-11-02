@@ -15,7 +15,8 @@ class PublicationService:
         self.repo, self.config, self.task_loader = repository, config, task_loader
         self.preflight_checker = PublicationPreflight(github, config, artifacts)
         self.delivery = PublicationDelivery(repository, github, self.preflight_checker, task_loader)
-        self.worker = PublicationWorker(queue or DatabaseTaskQueue(), self.delivery)
+        self.worker = PublicationWorker(queue or DatabaseTaskQueue(), self.delivery,
+                                        automatic_handler=self.dispatch_automatic)
         self.worker_task = None
 
     def start(self):
@@ -26,6 +27,10 @@ class PublicationService:
         self.worker.stop()
         if self.worker_task:
             await self.worker_task
+
+    async def dispatch_automatic(self, job):
+        from app.services.publication.automatic_publication import dispatch_automatic_publication
+        await dispatch_automatic_publication(self, job)
 
     async def checked(self, review_id, keys=None):
         task = await asyncio.to_thread(self.task_loader, review_id)

@@ -13,6 +13,7 @@ import ReviewFilesPage from '../pages/ReviewFilesPage.vue';
 import ReviewFindingsPage from '../pages/ReviewFindingsPage.vue';
 import ReviewOverviewPage from '../pages/ReviewOverviewPage.vue';
 import ReviewReportPage from '../pages/ReviewReportPage.vue';
+import AutomaticPublicationStatus from './publication/AutomaticPublicationStatus.vue';
 
 const props = defineProps<{ task: Run; section?: ReviewSection; busy?: boolean; connectionError?: string }>();
 const emit = defineEmits<{ navigate: [value: ReviewSection]; cancel: []; retry: []; overviewRetry: []; rereview: [] }>();
@@ -159,6 +160,8 @@ function exportReport() {
       <button v-if="terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('rereview')">重新审查此 PR</button>
     </div>
   </header>
+
+  <AutomaticPublicationStatus :review-id="task.id" @inspect="tab = 'publish'" />
 
   <nav class="subnav" aria-label="审查结果导航">
     <button v-for="item in reviewPrimarySections" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" @click="tab = item.id">

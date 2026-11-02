@@ -115,7 +115,7 @@ class IncrementalWebhookService:
                 return IncrementalWebhookReceipt(delivery_id=delivery_id, status=status,
                                                  reason=existing.get("reason"), task_id=existing.get("task_id"))
         import asyncio
-        request_hash = identity(ReviewRequest(pr_url=parsed["pr_url"]).model_dump(mode="json"))
+        request_hash = identity(ReviewRequest(pr_url=parsed["pr_url"]).identity_payload())
         previous_id = await asyncio.to_thread(self.repository.find_intent,
             "github-webhook", review_event_key(parsed), request_hash)
         count = await asyncio.to_thread(self.repository.webhook_count, parsed["repository"], parsed["pr_number"])

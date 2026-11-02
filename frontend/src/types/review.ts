@@ -285,6 +285,7 @@ export interface ReviewCreateRequest {
   limits: Partial<ReviewLimits>;
   model?: string;
   include_pr_discussions?: boolean;
+  auto_publish?: boolean;
 }
 
 export interface ReviewPreviewResponse {

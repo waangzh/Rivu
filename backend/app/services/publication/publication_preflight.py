@@ -87,6 +87,9 @@ class PublicationPreflight:
             "context": context, "plan": plan}
 
     async def validate_current(self, context, head_sha):
+        if "automatic_authorization" in context:
+            from app.services.publication.automatic_publication import validate_automatic_authorization
+            validate_automatic_authorization(context["automatic_authorization"], context, head_sha)
         path = self.github.repo_path(context["owner"], context["repo"])
         pr = await self.github.get(f"{path}/pulls/{context['pr_number']}")
         if pr.get("head", {}).get("sha") != head_sha or pr.get("base", {}).get("sha") != context["base_sha"]:

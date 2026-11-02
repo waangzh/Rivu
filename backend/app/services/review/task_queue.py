@@ -13,13 +13,14 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import exists, or_, select, update
 
 from app.core.config import settings
 from app.core.database import sync_session
 from app.models.orm import ReviewTaskOrm, WorkerJobOrm, utcnow
 from app.services.review.review_task_access import lock_live_review
 from app.review.store import ReviewStore, as_utc
+from app.review.domain import TERMINAL
 
 logger = logging.getLogger("Rivu.Review.Worker")
 
@@ -110,19 +111,28 @@ class DatabaseTaskQueue:
                         last_error="worker_attempts_exhausted", updated_at=now)
                     .returning(WorkerJobOrm.task_id)).scalars().all()
                 ReviewStore(self._session_factory).reap_exhausted(session, expired)
+                session.execute(update(WorkerJobOrm).where(
+                    WorkerJobOrm.status == "leased", WorkerJobOrm.lease_until <= now,
+                    WorkerJobOrm.attempts >= WorkerJobOrm.max_attempts,
+                    WorkerJobOrm.kind == "automatic_publication").values(
+                        status="dead_letter", lease_owner=None, lease_until=None,
+                        last_error="automatic_publication_check_failed", updated_at=now))
                 eligibility = or_(
                     WorkerJobOrm.status.in_(["queued", "retry"]),
                     (WorkerJobOrm.status == "leased") & (WorkerJobOrm.lease_until < now),
                 )
+                review_eligibility = exists(select(ReviewTaskOrm.id).where(
+                    ReviewTaskOrm.id == WorkerJobOrm.task_id,
+                    ReviewTaskOrm.deleted_at.is_(None),
+                    or_(ReviewTaskOrm.status != "cancelled", WorkerJobOrm.kind == "automatic_publication"),
+                    or_(WorkerJobOrm.kind != "automatic_publication", ReviewTaskOrm.status.in_(TERMINAL))))
                 query = (
                     select(WorkerJobOrm.id)
-                    .join(ReviewTaskOrm, ReviewTaskOrm.id == WorkerJobOrm.task_id)
                     .where(
                         eligibility,
+                        review_eligibility,
                         WorkerJobOrm.available_at <= now,
                         WorkerJobOrm.attempts < WorkerJobOrm.max_attempts,
-                        ReviewTaskOrm.status != "cancelled",
-                        ReviewTaskOrm.deleted_at.is_(None),
                     )
                     .order_by(WorkerJobOrm.priority.desc(), WorkerJobOrm.created_at)
                     .limit(1)
@@ -134,7 +144,8 @@ class DatabaseTaskQueue:
                     return None
                 claimed = session.execute(
                     update(WorkerJobOrm)
-                    .where(WorkerJobOrm.id == candidate, eligibility)
+                    .where(WorkerJobOrm.id == candidate, eligibility, review_eligibility,
+                           WorkerJobOrm.available_at <= now, WorkerJobOrm.attempts < WorkerJobOrm.max_attempts)
                     .values(
                         status="leased",
                         lease_owner=worker_id,

@@ -43,14 +43,38 @@ class PublicationRepository:
     def __init__(self, session_factory=sync_session):
         self.sessions = session_factory
 
-    def create(self, plan, selection, context, key):
+    def create(self, plan, selection, context, key, *, automatic_job=None):
         selected = selection.model_dump(mode="json")
         selected["finding_keys"] = sorted(set(selected["finding_keys"]))
         plan_hash, selection_hash = stable_hash(plan.model_dump(mode="json")), stable_hash(selected)
-        logical = stable_hash([plan.review_id, plan.report_version, context["publisher_identity"], plan_hash, selection_hash])
+        logical_parts = [plan.review_id, plan.report_version, context["publisher_identity"], plan_hash, selection_hash]
+        if "automatic_authorization" in context:
+            logical_parts.append(context["automatic_authorization"])
+        logical = stable_hash(logical_parts)
         request_key = stable_hash([context["publisher_identity"], key])
         identity = uuid4().hex
         with self.sessions.begin() as session:
+            automatic_row = None
+            if automatic_job is not None:
+                from app.services.publication.automatic_publication import (
+                    guard_automatic_job, validate_automatic_authorization,
+                )
+                automatic_row = guard_automatic_job(session, automatic_job)
+                if automatic_row.payload.get("publication_id"):
+                    return self.get(automatic_row.payload["publication_id"])
+                raw = automatic_row.payload["authorization"]
+                grant = validate_automatic_authorization(raw, context, plan.snapshot.head_sha)
+                if (raw != context.get("automatic_authorization") or grant.review_id != plan.review_id
+                        or automatic_job.task_id != plan.review_id
+                        or plan.snapshot.declared_base_sha != grant.base_sha
+                        or plan.snapshot.repository_id != grant.repository_id
+                        or plan.outcome.coverage != "complete" or plan.outcome.unresolved_count
+                        or plan.outcome.kind not in {"clean", "findings"} or plan.withheld_findings
+                        or len(plan.inline_drafts) > grant.max_inline
+                        or selection.acknowledge_partial_review):
+                    raise PublicationConflict("automatic_authorization_mismatch")
+            elif "automatic_authorization" in context:
+                raise PublicationConflict("automatic_publication_not_authorized")
             if not lock_live_review(session, plan.review_id):
                 raise PublicationConflict("review_unavailable")
             review = session.get(ReviewTaskOrm, plan.review_id)
@@ -78,6 +102,8 @@ class PublicationRepository:
                             fingerprint=finding_fingerprint(finding), payload_hash=stable_hash(payload), payload=payload))
                 session.add(WorkerJobOrm(id=uuid4().hex, task_id=plan.review_id, kind="github_publication", status="queued",
                     idempotency_key="github_publication:" + identity, payload={"publication_id": identity}, max_attempts=5))
+            if automatic_row is not None:
+                automatic_row.payload = {**automatic_row.payload, "state": "queued", "publication_id": row.id}
         return self.get(row.id)
 
     def get(self, identity):

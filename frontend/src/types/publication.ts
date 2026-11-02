@@ -207,3 +207,9 @@ export interface PublicationAccepted {
   state: PublicationState;
   status_url: string;
 }
+
+export interface AutomaticPublicationStatus {
+  state: PublicationState | 'waiting_review' | 'manual_required' | 'blocked' | 'paused';
+  publication_id: string | null;
+  last_error_code: string | null;
+}

@@ -165,11 +165,11 @@ class ReviewService:
         run = await self._inputs(request, execute=False)
         return {"snapshot": run.snapshot, "plan": run.plan, "changed_files": run.changed_files}
 
-    async def create(self, request, key, *, caller_id="installation", expected_snapshot=None):
-        normalized = request.model_dump(mode="json")
-        if normalized["paths"] is not None:
-            normalized["paths"] = sorted(set(normalized["paths"]))
-        request_hash = identity(normalized)
+    async def create(self, request, key, *, caller_id="installation", expected_snapshot=None,
+                     automatic_policy=None):
+        if request.auto_publish and automatic_policy is None:
+            raise ValueError("automatic_publication_not_authorized")
+        request_hash = identity(request.identity_payload())
         scope = (caller_id, key)
         fingerprint = (request_hash, expected_snapshot)
         pending = self._creations.get(scope)
@@ -179,7 +179,7 @@ class ReviewService:
             task = pending[1]
         else:
             task = asyncio.create_task(self._create(request, key, caller_id, request_hash,
-                                                     expected_snapshot))
+                                                     expected_snapshot, automatic_policy))
             self._creations[scope] = (fingerprint, task)
             task.add_done_callback(lambda done: self._creation_finished(scope, done))
         # A disconnected HTTP waiter must not cancel preparation shared by another request.
@@ -191,7 +191,7 @@ class ReviewService:
         if not task.cancelled():
             task.exception()
 
-    async def _create(self, request, key, caller_id, request_hash, expected_snapshot):
+    async def _create(self, request, key, caller_id, request_hash, expected_snapshot, automatic_policy):
         existing = await asyncio.to_thread(self.store.find_intent, caller_id, key, request_hash)
         if existing:
             saved = await asyncio.to_thread(self.get_task, existing)
@@ -202,7 +202,9 @@ class ReviewService:
         run = await self._inputs(request, execute=True)
         if expected_snapshot and expected_snapshot != (run.snapshot.declared_base_sha, run.snapshot.head_sha):
             raise ValueError("webhook_snapshot_changed")
-        result_id = await asyncio.to_thread(self.store.create, run, caller_id, key, request_hash)
+        grant = automatic_policy.authorize(run) if request.auto_publish else None
+        result_id = await asyncio.to_thread(self.store.create, run, caller_id, key, request_hash,
+                                           automatic_authorization=grant)
         logger.info("审查已入队 review_id=%.8s", result_id)
         self.start_worker()
         return await asyncio.to_thread(self.get_task, result_id)
