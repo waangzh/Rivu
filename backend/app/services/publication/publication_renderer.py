@@ -108,6 +108,7 @@ def render_summary(plan, *, discussion_urls=None, all_questions=False):
             "skipped_deadline": "已到截止时间，未生成变更总览。",
             "skipped_cancelled": "审查已停止，未生成变更总览。",
             "skipped_empty": "没有可审查范围，未生成变更总览。",
+            "skipped_disabled": "本次审查已设置跳过总览。",
         }.get(plan.overview_status, "变更总览未能生成，已有审查事实仍保留。")
         lines += [status, ""]
     if any(plan.overview_omitted.values()):

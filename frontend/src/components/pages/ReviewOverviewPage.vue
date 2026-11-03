@@ -39,6 +39,7 @@ const overviewLabel = computed(() => ({
   skipped_deadline: '已达到总期限，未生成变更总览',
   skipped_cancelled: '审查已取消，未生成变更总览',
   skipped_empty: '没有可审查单元，未调用模型生成总览',
+  skipped_disabled: '本次审查已设置跳过总览',
 }[props.report?.overview.status ?? 'pending']));
 const excluded = computed(() => Object.entries(props.report?.excluded || {}));
 const additions = computed(() => props.task.changed_files.reduce((sum, file) => sum + file.additions, 0));

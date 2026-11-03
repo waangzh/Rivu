@@ -49,7 +49,7 @@ _LABELS = {
     "pressure_reason": {"capacity", "latency", "investigation"},
     "kind": {"review", "verification", "overview"},
     "status": {"completed", "partial", "failed", "interrupted", "cancelled", "ready",
-               "skipped_empty", "skipped_deadline", "model", "fallback", "unverified"},
+               "skipped_empty", "skipped_deadline", "skipped_disabled", "model", "fallback", "unverified"},
     "verdict": {"confirmed", "refuted", "insufficient"},
     "model_verdict": {"confirmed", "refuted", "insufficient"},
     "tool": {"read_file", "read_diff", "search_code", "find_files", "read_symbol", "find_relations",

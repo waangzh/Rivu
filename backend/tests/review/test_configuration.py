@@ -31,6 +31,19 @@ def test_explicit_call_fuse_is_honored_within_server_policy(monkeypatch):
         freeze_configuration(request, provider)
 
 
+def test_overview_defaults_on_and_explicit_skip_is_frozen():
+    provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
+    request = ReviewRequest(pr_url="https://github.com/o/r/pull/1")
+    assert freeze_configuration(request, provider).options.generate_overview is True
+    assert "generate_overview" not in request.identity_payload()
+    request.generate_overview = False
+    frozen = freeze_configuration(request, provider)
+    assert frozen.options.generate_overview is False
+    assert request.identity_payload()["generate_overview"] is False
+    request.generate_overview = True
+    assert frozen.options.generate_overview is False
+
+
 def test_cumulative_token_and_total_call_limits_are_optional(monkeypatch):
     monkeypatch.setattr(settings, "rivu_review_max_model_calls", None)
     monkeypatch.setattr(settings, "rivu_review_max_input_tokens", None)

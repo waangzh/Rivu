@@ -69,7 +69,8 @@ def prepare_repository(entry, directory, git):
                 raise
 
 
-async def review_sample(service, entry, repository, *, model=None, depth="standard", timeout=None):
+async def review_sample(service, entry, repository, *, model=None, depth="standard", timeout=None,
+                        skip_overview=False):
     from app.core.config import settings
     from app.review.contracts import ReviewRequest
     from app.review.domain import TERMINAL, utcnow
@@ -81,7 +82,7 @@ async def review_sample(service, entry, repository, *, model=None, depth="standa
         "kind": "local_git", "repository_key": repository_key,
         "base_ref": entry["base"], "head_ref": entry["head"],
         "title": (entry.get("title") or key)[:200], "body": (entry.get("body") or "")[:4000],
-    }, model=model, depth=depth, include_pr_discussions=False,
+    }, model=model, depth=depth, include_pr_discussions=False, generate_overview=not skip_overview,
         limits={"timeout_seconds": timeout} if timeout is not None else {})
     started = perf_counter()
     run = await service.create(request, "reviewbench-" + uuid4().hex)
@@ -99,6 +100,11 @@ async def review_sample(service, entry, repository, *, model=None, depth="standa
             or candidate.verification.verdict == "insufficient" for candidate in run.report.candidates)
         detail["reasons"] = run.report.reasons
         detail["usage"] = run.report.usage
+        detail["overview"] = {
+            "status": run.report.overview.status,
+            "error_code": run.report.overview.error_code,
+            "diagnostics": [item.model_dump() for item in run.report.overview.diagnostics],
+        }
         if not detail["error"] and run.status == "failed":
             detail["error"] = next((item.error_code for item in run.report.units
                                     if item.error_code), "review_failed")
@@ -139,7 +145,7 @@ async def run_reviews(args, entries, directory):
     settings.rivu_local_repositories = {}
     summary = {
         "selected": len(entries), "model": args.model or settings.rivu_model,
-        "depth": args.depth, "samples": [],
+        "depth": args.depth, "skip_overview": args.skip_overview, "samples": [],
     }
     print(f"Reviewer: {summary['model']}; selected: {len(entries)}", flush=True)
     try:
@@ -150,7 +156,8 @@ async def run_reviews(args, entries, directory):
                 repository = await asyncio.to_thread(prepare_repository, entry,
                     directory / "repos" / key, service._git_tool)
                 output, detail = await review_sample(service, entry, repository,
-                    model=args.model, depth=args.depth, timeout=args.timeout)
+                    model=args.model, depth=args.depth, timeout=args.timeout,
+                    skip_overview=args.skip_overview)
                 if output is not None:
                     write_json(directory / "findings" / f"{key}.json", output)
             except Exception as exc:
@@ -197,6 +204,7 @@ def main():
     parser.add_argument("--depth", choices=("quick", "standard", "deep"), default="standard")
     parser.add_argument("--timeout", type=int, help="每 PR 审查秒数，受现有服务上限约束")
     parser.add_argument("--no-judge", action="store_true", help="仅生成 findings")
+    parser.add_argument("--skip-overview", action="store_true", help="不生成总览，专注发现质量与调查成本")
     parser.add_argument("--judge-only", action="store_true", help="仅为已有运行执行 judge")
     parser.add_argument("--judge-provider", help="官方 judge 的 provider 名称")
     parser.add_argument("--judge-model", help="官方 judge 的模型 ID")
@@ -208,8 +216,8 @@ def main():
         parser.error("--limit 至少为 1，--pr 从 0 开始")
     args.benchmark_dir = args.benchmark_dir.resolve()
     if args.judge_only:
-        if args.run_dir is None or args.no_judge:
-            parser.error("--judge-only 需要 --run-dir，且不能与 --no-judge 同用")
+        if args.run_dir is None or args.no_judge or args.skip_overview:
+            parser.error("--judge-only 需要 --run-dir，且不能与 --no-judge 或 --skip-overview 同用")
         return judge(args, args.run_dir.resolve())
     manifest = args.benchmark_dir / ("corpus/test/test.json" if args.set == "test"
                                      else "corpus/manifest.json")

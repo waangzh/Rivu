@@ -6,9 +6,10 @@ import logging
 from pathlib import Path
 from time import perf_counter
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from pydantic import ValidationError
 
-from app.review.domain import Overview, OverviewOutput, Report, utcnow
+from app.review.domain import Overview, OverviewDiagnostic, OverviewOutput, Report, SourceRef, utcnow
 from app.review.findings import aggregate
 from app.review.overview_materials import overview_material
 from app.review.planner import identity, tokens
@@ -16,6 +17,57 @@ from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewSt
 from app.review.observability import message_content, stage
 
 logger = logging.getLogger("Rivu.Review.Overview")
+
+
+def validate_overview(raw, refs, finding_ids, attempt):
+    finish_reason = raw.response_metadata.get("finish_reason")
+    if finish_reason is not None and (not isinstance(finish_reason, str) or finish_reason not in {
+            "stop", "length", "tool_calls", "content_filter", "function_call"}):
+        finish_reason = "other"
+    diagnostic = OverviewDiagnostic(
+        attempt=attempt, finish_reason=finish_reason, tool_calls=len(raw.tool_calls),
+        invalid_tool_calls=len(raw.invalid_tool_calls), content_present=bool(raw.content),
+        reasoning_present=bool(raw.additional_kwargs.get("reasoning_content")))
+    output = None
+    if (raw.invalid_tool_calls or len(raw.tool_calls) != 1
+            or raw.tool_calls[0]["name"] != "OverviewOutput"):
+        diagnostic.error_code = "overview_schema"
+    else:
+        try:
+            output = OverviewOutput.model_validate(raw.tool_calls[0]["args"])
+        except ValidationError as exc:
+            diagnostic.error_code = "overview_schema"
+            diagnostic.validation_errors = exc.error_count()
+        else:
+            diagnostic.unknown_source_refs = sum(
+                handle not in refs for paragraph in output.change_overview for handle in paragraph.source_refs)
+            diagnostic.unknown_finding_ids = sum(key not in finding_ids for key in output.finding_order)
+            if diagnostic.unknown_source_refs:
+                diagnostic.error_code = "overview_unknown_source"
+            elif diagnostic.unknown_finding_ids:
+                diagnostic.error_code = "overview_unknown_finding"
+    return (None if diagnostic.error_code else output), diagnostic
+
+
+def overview_correction(raw, code):
+    calls = [*raw.tool_calls, *raw.invalid_tool_calls]
+    identifiers = [call.get("id") for call in calls]
+    if (any(not isinstance(key, str) or not key for key in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        return None
+    instruction = (
+        "Runtime correction (trusted host): The previous overview was rejected with "
+        f"{code}. Submit exactly one OverviewOutput tool call using the supplied schema. "
+        "Use only source_refs from the original source_materials and finding_order IDs "
+        "from the supplied final findings; use an empty finding_order if no ordering is needed. "
+        "Do not copy demo references, return ordinary prose or call other tools. "
+        "Correct the response using the original frozen materials; no further investigation "
+        "or extra correction is available."
+    )
+    return [raw, *[
+        ToolMessage(content=json.dumps({"ok": False, "error": code}),
+                    tool_call_id=key, status="error") for key in identifiers
+    ], HumanMessage(content=instruction)]
 
 
 def build_report(run, work_items, candidates, usage):
@@ -61,6 +113,9 @@ async def _generate_overview(report, provider, budget, model):
     started = perf_counter()
     run_id = provider.run.id
     previous = provider.run.report
+    if not provider.run.configuration.options.generate_overview:
+        logger.info("总览跳过 review_id=%.8s reason=disabled", run_id)
+        return Overview(status="skipped_disabled")
     if not provider.run.plan.units:
         logger.info("总览跳过 review_id=%.8s reason=scope_empty", run_id)
         return Overview(status="skipped_empty")
@@ -83,7 +138,7 @@ async def _generate_overview(report, provider, budget, model):
     except (ValueError, OSError):
         logger.warning("总览材料不可用 review_id=%.8s", run_id)
         return Overview(status="failed", error_code="overview_material_unavailable")
-    input_hash = identity({"prompt": prompt, "schema": schema, "materials": packet,
+    input_hash = identity({"correction_limit": 1, "prompt": prompt, "schema": schema, "materials": packet,
                           "omissions": [item.model_dump() for item in omissions]})
     if (previous and previous.overview.input_hash == input_hash
             and previous.overview.status in {"ready", "failed"}):
@@ -99,34 +154,57 @@ async def _generate_overview(report, provider, budget, model):
     ticket = None
     try:
         messages = [SystemMessage(content=prompt), HumanMessage(content=json.dumps(packet, ensure_ascii=False))]
-        estimate = tokens([prompt, packet, schema]) + request_overhead
-        ticket = await budget.reserve(None, estimate, overview=True)
-        logger.info("总览模型请求开始 review_id=%.8s ticket=%.8s estimated_input_tokens=%d",
-                    run_id, ticket, estimate)
         structured = model.bind_tools([OverviewOutput], tool_choice="OverviewOutput")
-        seconds = max(0, (provider.run.hard_deadline - utcnow()).total_seconds())
-        with stage("model.request", run_type="llm", ticket=ticket) as observation:
-            observation.content(inputs={"messages": message_content(messages)})
-            async with asyncio.timeout(seconds):
-                raw = await structured.ainvoke(messages)
-            observation.usage(getattr(raw, "usage_metadata", None))
-            observation.content(outputs={"messages": message_content([raw])})
-        usage = getattr(raw, "usage_metadata", None)
-        await budget.settle(ticket, usage)
-        logger.info("总览模型请求返回 review_id=%.8s ticket=%.8s input_tokens=%s output_tokens=%s elapsed_ms=%.0f",
-                    run_id, ticket, usage["input_tokens"] if usage is not None else "unknown",
-                    usage["output_tokens"] if usage is not None else "unknown",
-                    (perf_counter() - started) * 1000)
-        if len(raw.tool_calls) != 1 or raw.tool_calls[0]["name"] != "OverviewOutput":
-            raise ValueError("overview_schema")
-        output = OverviewOutput.model_validate(raw.tool_calls[0]["args"])
-        if any(handle not in refs for paragraph in output.change_overview for handle in paragraph.source_refs):
-            raise ValueError("overview_unknown_source")
-        if any(key not in {finding.id for finding in report.findings} for key in output.finding_order):
-            raise ValueError("overview_unknown_finding")
-        overview.status, overview.output = "ready", output
-        from app.review.domain import SourceRef
-        overview.sources = [SourceRef.model_validate(ref) for ref in refs.values()]
+        for attempt in (1, 2):
+            await budget.active()
+            estimate = tokens({
+                "messages": [message.model_dump(mode="json") for message in messages],
+                "schema": schema,
+            }) + request_overhead
+            ticket = await budget.reserve(None, estimate, overview=True)
+            logger.info("总览模型请求开始 review_id=%.8s ticket=%.8s attempt=%d estimated_input_tokens=%d",
+                        run_id, ticket, attempt, estimate)
+            seconds = max(0, (provider.run.hard_deadline - utcnow()).total_seconds())
+            with stage("model.request", run_type="llm", ticket=ticket, attempt=attempt) as observation:
+                observation.content(inputs={"messages": message_content(messages)})
+                async with asyncio.timeout(seconds):
+                    raw = await structured.ainvoke(messages)
+                observation.usage(getattr(raw, "usage_metadata", None))
+                observation.content(outputs={"messages": message_content([raw])})
+            usage = getattr(raw, "usage_metadata", None)
+            await budget.settle(ticket, usage)
+            logger.info(
+                "总览模型请求返回 review_id=%.8s ticket=%.8s input_tokens=%s output_tokens=%s elapsed_ms=%.0f",
+                run_id, ticket, usage["input_tokens"] if usage is not None else "unknown",
+                usage["output_tokens"] if usage is not None else "unknown",
+                (perf_counter() - started) * 1000)
+            ticket = None
+            output, diagnostic = validate_overview(raw, refs, {finding.id for finding in report.findings}, attempt)
+            overview.diagnostics.append(diagnostic)
+            logger.info(
+                "总览响应形状 review_id=%.8s attempt=%d code=%s finish_reason=%s tool_calls=%d "
+                "invalid_calls=%d content_present=%s reasoning_present=%s validation_errors=%d "
+                "unknown_sources=%d unknown_findings=%d",
+                run_id, diagnostic.attempt, diagnostic.error_code or "-", diagnostic.finish_reason or "-",
+                diagnostic.tool_calls, diagnostic.invalid_tool_calls, diagnostic.content_present,
+                diagnostic.reasoning_present, diagnostic.validation_errors,
+                diagnostic.unknown_source_refs, diagnostic.unknown_finding_ids)
+            await budget.active()
+            if output is not None:
+                overview.status, overview.output = "ready", output
+                overview.sources = [SourceRef.model_validate(ref) for ref in refs.values()]
+                logger.info("总览生成完成 review_id=%.8s paragraphs=%d omitted_sources=%d",
+                            run_id, len(output.change_overview), overview.omitted.get("sources", 0))
+                break
+            overview.error_code = diagnostic.error_code
+            correction = overview_correction(raw, diagnostic.error_code) if attempt == 1 else None
+            if correction is None:
+                overview.status = "failed"
+                break
+            report.overview = overview
+            await asyncio.to_thread(provider.store.save_report, run_id, report, provider.lease)
+            messages.extend(correction)
+            logger.warning("总览将在原预算内纠正一次 review_id=%.8s code=%s", run_id, diagnostic.error_code)
     except (LeaseLost, ReviewStopped, asyncio.CancelledError) as exc:
         logger.info("总览停止 review_id=%.8s reason=%s", run_id, type(exc).__name__)
         raise
@@ -134,11 +212,12 @@ async def _generate_overview(report, provider, budget, model):
         if ticket:
             await budget.settle(ticket, None)
         overview.status = "skipped_deadline" if utcnow() >= provider.run.hard_deadline else "failed"
-        overview.error_code = str(exc) if isinstance(exc, BudgetExceeded) else "overview_unavailable"
+        overview.error_code = ("hard_deadline" if overview.status == "skipped_deadline" else
+                               str(exc) if isinstance(exc, BudgetExceeded) else
+                               "overview_timeout" if isinstance(exc, TimeoutError) else "overview_unavailable")
         logger.warning("总览未完成 review_id=%.8s status=%s code=%s error_type=%s elapsed_ms=%.0f",
                        run_id, overview.status, overview.error_code, type(exc).__name__,
                        (perf_counter() - started) * 1000)
-    else:
-        logger.info("总览生成完成 review_id=%.8s paragraphs=%d omitted_sources=%d",
-                    run_id, len(overview.output.change_overview), overview.omitted.get("sources", 0))
+    if overview.status == "ready":
+        overview.error_code = None
     return overview

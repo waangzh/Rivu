@@ -115,6 +115,7 @@ export function defaultPlan(
     paths: null,
     focus: ['correctness', 'security', 'performance', 'compatibility'],
     include_pr_discussions: discussions,
+    generate_overview: true,
     limits: {
       model_calls: null,
       tool_calls: null,

@@ -363,7 +363,7 @@ async def test_saved_overview_keeps_paragraphs_and_code_through_publication(tmp_
     assert plan.overview_markdown in plan.user_report_markdown
 
 
-async def test_demo_source_is_rejected_without_extra_model_calls(tmp_path):
+async def test_demo_source_stays_rejected_after_one_budgeted_correction(tmp_path):
     from langchain_core.messages import AIMessage
     class DemoModel:
         def bind_tools(self, *args, **kwargs):
@@ -377,7 +377,9 @@ async def test_demo_source_is_rejected_without_extra_model_calls(tmp_path):
     overview = await generate_overview(report, provider, BudgetGate(store, run, lease), DemoModel())
     assert overview.status == "failed"
     assert overview.output is None
-    assert store.usage(run.id)["model_calls"] == 1
+    assert overview.error_code == "overview_unknown_source"
+    assert len(overview.diagnostics) == 2
+    assert store.usage(run.id)["model_calls"] == 2
 
 
 async def test_empty_plan_does_not_read_or_invoke_model(tmp_path):

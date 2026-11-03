@@ -27,6 +27,7 @@ class ReviewRequest(Model):
     limits: dict[str, int] = Field(default_factory=dict, max_length=10)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     include_pr_discussions: bool | None = None
+    generate_overview: bool = True
     auto_publish: bool = False
 
     @model_validator(mode="after")
@@ -45,4 +46,6 @@ class ReviewRequest(Model):
             value["paths"] = sorted(set(value["paths"]))
         if not self.auto_publish:
             value.pop("auto_publish")
+        if self.generate_overview:
+            value.pop("generate_overview")
         return value

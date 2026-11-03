@@ -30,12 +30,12 @@ def cached_input_tokens(usage):
     return value if type(value) is int and 0 <= value <= usage["input_tokens"] else None
 
 
-def verification_input_limit(limits, committed_input_tokens=0):
+def verification_input_limit(limits, committed_input_tokens=0, *, overview=True):
     if limits.total_input_tokens is None:
         return max(1, limits.context_tokens - limits.output_tokens - 1024)
     available = [VERIFICATION_INPUT, limits.context_tokens - limits.output_tokens]
     if limits.total_input_tokens is not None:
-        available.append(limits.total_input_tokens - committed_input_tokens - OVERVIEW_INPUT)
+        available.append(limits.total_input_tokens - committed_input_tokens - (OVERVIEW_INPUT if overview else 0))
     return max(1, min(available))
 
 
@@ -375,7 +375,8 @@ class ReviewStore:
         if kind == "overview":
             return 0, 0
         limits = run.configuration.options.limits
-        protected_calls, protected_tokens = 1, OVERVIEW_INPUT
+        protected_calls, protected_tokens = (
+            (1, OVERVIEW_INPUT) if run.configuration.options.generate_overview else (0, 0))
         items = [WorkItem.model_validate(row.payload) for row in session.scalars(
             select(ReviewWorkItemOrm).where(ReviewWorkItemOrm.run_id == run.id, or_(
                 ReviewWorkItemOrm.kind == "verification",
@@ -385,7 +386,7 @@ class ReviewStore:
                    and (work is None or item.id != work.id)
                    and (item.status == "queued" or (
                        item.status == "running" and (item.id, item.attempt_id) not in requested))]
-        verifier_input = verification_input_limit(limits)
+        verifier_input = verification_input_limit(limits, overview=run.configuration.options.generate_overview)
         if limits.total_model_calls is not None:
             submitted = set(session.scalars(select(ReviewCandidateOrm.attempt_id).where(
                 ReviewCandidateOrm.run_id == run.id)))
@@ -421,7 +422,8 @@ class ReviewStore:
                 capacity = min(capacity, limits.total_model_calls - len(calls) - protected_calls - 1)
             if limits.total_input_tokens is not None:
                 available = limits.total_input_tokens - usage["committed_input_tokens"] - protected_tokens
-                own_input = verification_input_limit(limits, usage["committed_input_tokens"])
+                own_input = verification_input_limit(
+                    limits, usage["committed_input_tokens"], overview=run.configuration.options.generate_overview)
                 capacity = min(capacity, (available - own_input) // verifier_input)
             if limits.total_output_tokens is not None:
                 available = limits.total_output_tokens - usage["committed_output_tokens"]
@@ -436,11 +438,14 @@ class ReviewStore:
         if now >= run.hard_deadline:
             raise BudgetExceeded("hard_deadline")
         kind = kind_override or ("overview" if overview else work.kind)
+        if kind == "overview" and not run.configuration.options.generate_overview:
+            raise BudgetExceeded("overview_disabled")
         if kind in {"review", "grouping"} and now >= run.review_cutoff:
             raise BudgetExceeded("review_cutoff")
         calls, usage = self._usage(session, run.id)
         if estimate is None:
-            estimate = verification_input_limit(limits, usage["committed_input_tokens"])
+            estimate = verification_input_limit(
+                limits, usage["committed_input_tokens"], overview=run.configuration.options.generate_overview)
         protected_calls, protected_tokens = self._request_protection(
             session, run, work, calls, usage, kind, estimate)
         agent_calls = sum(call.work_item_id == work.id and call.attempt_id == work.attempt_id
@@ -780,6 +785,8 @@ class ReviewStore:
             allowed = {"completed", "partial", "failed"} if overview else {"partial", "failed"}
             if run.status not in allowed or utcnow() >= run.hard_deadline:
                 raise ValueError("review_retry_unavailable")
+            if overview and not run.configuration.options.generate_overview:
+                raise ValueError("overview_disabled")
             self._retire_unsent_automatic_publication(session, run_id)
             if session.scalar(select(WorkerJobOrm.id).where(WorkerJobOrm.task_id == run_id,
                 WorkerJobOrm.status.in_(["queued", "retry", "leased"]))):
@@ -787,9 +794,10 @@ class ReviewStore:
             if self._publication_pending(session, run_id):
                 raise ValueError("review_publication_pending")
             limits, usage = run.configuration.options.limits, self._usage(session, run_id)[1]
+            overview_input = OVERVIEW_INPUT if run.configuration.options.generate_overview else 0
             if ((limits.total_model_calls is not None and usage["model_calls"] >= limits.total_model_calls)
                     or (limits.total_input_tokens is not None
-                        and usage["committed_input_tokens"] + OVERVIEW_INPUT > limits.total_input_tokens)):
+                        and usage["committed_input_tokens"] + overview_input > limits.total_input_tokens)):
                 raise ValueError("review_budget_exhausted")
             if overview:
                 if run.report is None or not run.plan.units:

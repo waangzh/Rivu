@@ -31,6 +31,7 @@ def freeze_configuration(request, provider):
         raise ValueError("review_limit_exceeds_server_policy")
     limits = Limits.model_validate({**maximum, **request.limits})
     options = Options(depth=request.depth, paths=request.paths, focus=request.focus, limits=limits,
+        generate_overview=request.generate_overview,
         include_pr_discussions=(False if request.source else settings.rivu_pr_discussions_enabled
             if request.include_pr_discussions is None else request.include_pr_discussions))
     thinking = getattr(provider, "_thinking", False)

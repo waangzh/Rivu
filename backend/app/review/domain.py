@@ -40,6 +40,7 @@ class Options(Model):
         default_factory=lambda: ["correctness", "security", "performance", "compatibility"],
         min_length=1, max_length=4)
     include_pr_discussions: bool = False
+    generate_overview: bool = True
     limits: Limits = Field(default_factory=Limits)
 
     @field_validator("paths")
@@ -241,15 +242,29 @@ class OverviewOmission(Model):
     reason: Literal["material_capacity", "source_unavailable", "diff_source_mismatch"]
 
 
+class OverviewDiagnostic(Model):
+    attempt: int = Field(ge=1, le=2)
+    error_code: Literal["overview_schema", "overview_unknown_source", "overview_unknown_finding"] | None = None
+    finish_reason: Literal["stop", "length", "tool_calls", "content_filter", "function_call", "other"] | None = None
+    tool_calls: int = Field(ge=0)
+    invalid_tool_calls: int = Field(ge=0)
+    content_present: bool
+    reasoning_present: bool
+    validation_errors: int = Field(default=0, ge=0)
+    unknown_source_refs: int = Field(default=0, ge=0)
+    unknown_finding_ids: int = Field(default=0, ge=0)
+
+
 class Overview(Model):
     status: Literal["pending", "running", "ready", "failed", "skipped_deadline",
-                    "skipped_cancelled", "skipped_empty"] = "pending"
+                    "skipped_cancelled", "skipped_empty", "skipped_disabled"] = "pending"
     input_hash: str | None = None
     output: OverviewOutput | None = None
     sources: list[SourceRef] = Field(default_factory=list)
     error_code: str | None = None
     omitted: dict[str, int] = Field(default_factory=dict)
     omitted_materials: list[OverviewOmission] = Field(default_factory=list)
+    diagnostics: list[OverviewDiagnostic] = Field(default_factory=list, max_length=2)
 
 
 class Report(Model):

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.models.orm import ReviewRequestOrm, ReviewTaskOrm, ReviewWorkItemOrm
 from app.review.domain import Overview, WorkItem
 from app.review.orchestrator import ReviewOrchestrator
-from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded
+from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded, verification_input_limit
 from tests.review.vnext_helpers import setup_run, submit_candidate
 
 
@@ -126,6 +126,28 @@ def test_reviewer_preserves_full_200k_overview_reservation(tmp_path):
     usage = type(store)(sessions).usage(run.id)
     assert usage["committed_input_tokens"] == 200_000
     assert usage["unknown_calls"] == 1
+
+
+@pytest.mark.parametrize("unknown_usage", [False, True])
+def test_disabled_overview_releases_protection_but_preserves_verification(tmp_path, unknown_usage):
+    store, run, lease, sessions = setup_run(tmp_path, calls=3, input_tokens=40_000)
+    options = run.configuration.options
+    options.generate_overview = False
+    options.limits.total_output_tokens = 2 * options.limits.output_tokens
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    assert verification_input_limit(options.limits, overview=False) == VERIFICATION_INPUT
+    work = store.claim(run.id, store.work_items(run.id)[0].id, lease, check_budget=True)
+    ticket = store.reserve(run.id, work, 1000, lease)
+    store.settle(run.id, ticket, None if unknown_usage else {
+        "input_tokens": 1000, "output_tokens": options.limits.output_tokens}, lease)
+    complete_reviewer(store, run, lease, work)
+    check = next(work for work in store.work_items(run.id) if work.kind == "verification")
+    check = store.claim(run.id, check.id, lease, check_budget=True)
+    store.reserve(run.id, check, VERIFICATION_INPUT, lease)
+    with pytest.raises(BudgetExceeded, match="output_token_limit"):
+        store.reserve(run.id, check, 1000, lease)
+    assert store.usage(run.id)["model_calls"] == 2
 
 
 def test_parallel_reviewers_keep_both_late_candidate_first_requests(tmp_path):

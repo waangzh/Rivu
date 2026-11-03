@@ -464,7 +464,8 @@ class AgentRunner:
             if role == "verifier":
                 usage = await asyncio.to_thread(provider.store.usage, provider.run.id)
                 request_budget = min(context.window.initial_ceiling(limits),
-                    verification_input_limit(limits, usage["committed_input_tokens"]))
+                    verification_input_limit(limits, usage["committed_input_tokens"],
+                                             overview=provider.run.configuration.options.generate_overview))
             if limits.total_input_tokens is not None:
                 headroom = await budget.headroom(work)
                 request_budget = min(request_budget, max(1, headroom["input_tokens"] - 1024))

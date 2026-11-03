@@ -18,6 +18,7 @@ export interface ReviewOptions {
   paths: string[] | null;
   focus: ('correctness' | 'security' | 'performance' | 'compatibility')[];
   include_pr_discussions: boolean;
+  generate_overview: boolean;
   limits: ReviewLimits;
 }
 
@@ -175,7 +176,7 @@ export interface OverviewOmission {
 }
 
 export interface Overview {
-  status: 'pending' | 'running' | 'ready' | 'failed' | 'skipped_deadline' | 'skipped_cancelled' | 'skipped_empty';
+  status: 'pending' | 'running' | 'ready' | 'failed' | 'skipped_deadline' | 'skipped_cancelled' | 'skipped_empty' | 'skipped_disabled';
   input_hash: string | null;
   output: {
     change_overview: OverviewParagraph[];
@@ -185,6 +186,18 @@ export interface Overview {
   omitted: Record<'changes' | 'findings' | 'decision_boundaries' | 'sources', number>;
   omitted_materials: OverviewOmission[];
   error_code: string | null;
+  diagnostics: {
+    attempt: number;
+    error_code: 'overview_schema' | 'overview_unknown_source' | 'overview_unknown_finding' | null;
+    finish_reason: 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call' | 'other' | null;
+    tool_calls: number;
+    invalid_tool_calls: number;
+    content_present: boolean;
+    reasoning_present: boolean;
+    validation_errors: number;
+    unknown_source_refs: number;
+    unknown_finding_ids: number;
+  }[];
 }
 
 export interface ReviewUsage {
@@ -322,6 +335,7 @@ export interface ReviewCreateRequest {
   limits: Partial<ReviewLimits>;
   model?: string;
   include_pr_discussions?: boolean;
+  generate_overview?: boolean;
   auto_publish?: boolean;
 }
 

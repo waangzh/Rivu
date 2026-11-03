@@ -133,6 +133,7 @@ function reviewBody(input: ReviewCreateRequest) {
     ...(input.include_pr_discussions === undefined
       ? {}
       : { include_pr_discussions: input.include_pr_discussions }),
+    ...(input.generate_overview === undefined ? {} : { generate_overview: input.generate_overview }),
     ...(input.auto_publish === undefined ? {} : { auto_publish: input.auto_publish }),
   };
 }

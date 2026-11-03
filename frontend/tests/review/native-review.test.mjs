@@ -170,6 +170,26 @@ test('总览经 JSON 读取后保留自然段和行内代码，只把其他标�
   } finally { await server.close(); }
 });
 
+test('主动跳过总览有独立说明且不显示失败重试', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewOverviewPage.vue');
+    const report = {
+      candidates: [], excluded: {}, findings: [], reasons: [], units: [], usage: {},
+      overview: { status: 'skipped_disabled', output: null, omitted: {}, omitted_materials: [] },
+    };
+    const html = await renderToString(createSSRApp(Component, {
+      task: task('completed'), report, findings: [], loading: false,
+    }));
+    assert.match(html, /本次审查已设置跳过总览/);
+    assert.doesNotMatch(html, /使用剩余额度重试总览|变更总览未能生成/);
+  } finally { await server.close(); }
+});
+
 test('增量概览说明范围复用但不展示历史意见', async () => {
   const server = await createServer({
     server: { middlewareMode: true, hmr: false },
