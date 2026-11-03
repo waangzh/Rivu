@@ -52,8 +52,15 @@ def _valid_finding(run, candidate, finding, archive):
 
 def _snapshot_matches(run):
     snapshot = run.snapshot
+    if run.source:
+        return (snapshot.review_id == run.id
+            and snapshot.repository == f"local:{run.source.repository_key}"
+            and snapshot.repository_id is None and snapshot.pr_number is None and run.pr is None)
+    if run.pr is None:
+        return False
     return (snapshot.review_id == run.id and snapshot.repository == f"{run.pr.owner}/{run.pr.repo}"
-        and snapshot.repository_id > 0 and snapshot.pr_number == run.pr.number
+        and snapshot.repository_id is not None and snapshot.repository_id > 0
+        and snapshot.pr_number == run.pr.number
         and snapshot.declared_base_sha == run.pr.base.sha and snapshot.head_sha == run.pr.head.sha)
 
 

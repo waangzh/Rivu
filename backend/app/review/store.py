@@ -9,7 +9,7 @@ from sqlalchemy.dialects.sqlite import insert
 from app.core.config import settings
 from app.core.database import sync_session
 from app.models.orm import (
-    GitHubSummarySlotOrm, IncrementalWebhookDeliveryOrm,
+    GitHubSummarySlotOrm, IncrementalWebhookDeliveryOrm, LocalReviewInputOrm,
     PublicationAttemptOrm, PublicationBatchOrm, PublicationItemOrm, ReviewCandidateOrm, ReviewCreateIntentOrm, ReviewRequestOrm,
     ReviewTaskOrm, ReviewWorkItemOrm, WorkerJobOrm,
 )
@@ -101,14 +101,23 @@ class ReviewStore:
         with self.sessions.begin() as session:
             # The first write serializes same-key creation, before reading the intent.
             inserted = session.execute(insert(ReviewTaskOrm).values(
-                id=run.id, repository=run.snapshot.repository, repo_url=run.pr.clone_url,
-                pr_url=run.pr_url, pr_number=run.pr.number, base_sha=run.snapshot.declared_base_sha,
+                id=run.id, repository=run.snapshot.repository, repo_url=run.pr.clone_url if run.pr else None,
+                pr_url=run.pr_url or "", pr_number=run.pr.number if run.pr else None,
+                input_id=run.source.input_id if run.source else None, base_sha=run.snapshot.declared_base_sha,
                 head_sha=run.snapshot.head_sha, status="queued", current_phase="prepare",
                 model=run.configuration.model, provider=run.configuration.provider,
                 task_snapshot=run.model_dump(mode="json"),
                 created_at=run.created_at, updated_at=run.updated_at,
                 retention_until=utcnow() + timedelta(days=settings.rivu_retention_days)
             ).on_conflict_do_nothing(index_elements=["id"]))
+            if run.source:
+                frozen = session.get(LocalReviewInputOrm, run.source.input_id)
+                if frozen is None:
+                    raise ValueError("local_input_expired")
+                if as_utc(frozen.expires_at) <= utcnow() and not session.scalar(
+                    select(ReviewTaskOrm.id).where(ReviewTaskOrm.input_id == run.source.input_id,
+                        ReviewTaskOrm.id != run.id, ReviewTaskOrm.deleted_at.is_(None)).limit(1)):
+                    raise ValueError("local_input_expired")
             existing = session.scalar(select(ReviewCreateIntentOrm).where(
                 ReviewCreateIntentOrm.caller_id == caller_id, ReviewCreateIntentOrm.key == key))
             if existing:
@@ -143,8 +152,9 @@ class ReviewStore:
                     work.reused_from, work.result = unit.reused_from, before.result
                 session.add(ReviewWorkItemOrm(id=work.id, run_id=run.id, kind="review",
                                              subject=unit.id, payload=work.model_dump(mode="json")))
-            self._supersede(session, run.snapshot.repository, run.snapshot.repository_id,
-                            run.pr.number, run.snapshot.head_sha, run.created_at)
+            if run.pr:
+                self._supersede(session, run.snapshot.repository, run.snapshot.repository_id,
+                                run.pr.number, run.snapshot.head_sha, run.created_at)
             session.flush()
             from app.services.review.task_queue import DatabaseTaskQueue
             DatabaseTaskQueue(self.sessions).enqueue(task_id=run.id, session=session)
@@ -585,6 +595,8 @@ class ReviewStore:
             return True
 
     def previous(self, snapshot):
+        if snapshot.pr_number is None:
+            return None
         with self.sessions() as session:
             rows = session.scalars(select(ReviewTaskOrm).where(
                 ReviewTaskOrm.repository == snapshot.repository, ReviewTaskOrm.pr_number == snapshot.pr_number,
@@ -711,7 +723,8 @@ class ReviewStore:
                     .order_by(ReviewTaskOrm.created_at.desc()))]
         if q:
             runs = [run for run in runs if q.casefold() in
-                    " ".join((run.id, run.pr.title, run.snapshot.repository, run.pr_url)).casefold()]
+                    " ".join((run.id, run.pr.title if run.pr else run.source.title,
+                              run.snapshot.repository, run.pr_url or "")).casefold()]
         start = (page - 1) * page_size
         return {"items": runs[start:start + page_size], "total": len(runs), "page": page, "page_size": page_size}
 

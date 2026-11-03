@@ -75,7 +75,7 @@ async def check_review_comment(task_id: str, options: ReviewCommentOptions | Non
     included, omitted, retained, comment = _comment_content(plan, options)
     latest = None
     state = "unknown"
-    if plan.snapshot.head_sha and re.fullmatch(r"[a-f0-9]{40,64}", plan.snapshot.head_sha):
+    if plan.digest.pr_url and plan.snapshot.head_sha and re.fullmatch(r"[a-f0-9]{40,64}", plan.snapshot.head_sha):
         try:
             live = await _reviews.GitHubTool(token=settings.github_token).fetch_pr(plan.digest.pr_url or "")
             if re.fullmatch(r"[a-f0-9]{40,64}", live.head.sha):

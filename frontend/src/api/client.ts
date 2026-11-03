@@ -122,6 +122,7 @@ export const retryOverview = (id: string) =>
 function reviewBody(input: ReviewCreateRequest) {
   return {
     pr_url: input.pr_url,
+    ...(input.source ? { source: input.source } : {}),
     depth: input.depth,
     paths: input.paths,
     focus: input.focus,

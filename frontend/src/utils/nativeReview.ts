@@ -3,6 +3,8 @@ import type { FileContext, Report, Run, ReviewOptions } from '../types/review';
 export const terminal = (status: string) =>
   ['completed', 'partial', 'failed', 'cancelled'].includes(status);
 
+export const reviewTitle = (run: Run) => run.pr?.title || run.source?.title || run.snapshot.repository;
+
 export const phaseLabel = (phase: string) =>
   ({
     queued: '等待执行',

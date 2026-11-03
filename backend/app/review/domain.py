@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.paths import validate_repo_relative_path
 from app.models.review.diff import ChangedFile, PullRequestInfo
@@ -59,8 +59,8 @@ class Configuration(Model):
 class Snapshot(Model):
     review_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     repository: str
-    repository_id: int = Field(gt=0)
-    pr_number: int = Field(ge=1)
+    repository_id: int | None = Field(default=None, gt=0)
+    pr_number: int | None = Field(default=None, ge=1)
     declared_base_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
     base_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
     head_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -249,12 +249,21 @@ class Report(Model):
     reasons: list[str] = Field(default_factory=list)
 
 
+class LocalGitSource(Model):
+    kind: Literal["local_git"] = "local_git"
+    repository_key: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    input_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    title: str = Field(max_length=200)
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class Run(Model):
     id: str
     status: RunStatus = "queued"
     phase: str = "prepare"
-    pr_url: str
-    pr: PullRequestInfo
+    pr_url: str | None = None
+    pr: PullRequestInfo | None = None
+    source: LocalGitSource | None = None
     snapshot: Snapshot
     configuration: Configuration
     changed_files: list[ChangedFile]
@@ -268,3 +277,15 @@ class Run(Model):
     completed_at: datetime | None = None
     error_code: str | None = None
     discussion_uri: str | None = None
+
+    @model_validator(mode="after")
+    def valid_source_identity(self):
+        if self.source:
+            if (self.pr is not None or self.pr_url is not None
+                    or self.snapshot.repository_id is not None or self.snapshot.pr_number is not None
+                    or self.snapshot.repository != f"local:{self.source.repository_key}"):
+                raise ValueError("local_source_identity_mismatch")
+        elif (self.pr is None or self.pr_url is None or self.snapshot.repository_id is None
+              or self.snapshot.pr_number is None):
+            raise ValueError("github_source_requires_pr")
+        return self

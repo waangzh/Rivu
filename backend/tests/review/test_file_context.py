@@ -10,7 +10,7 @@ from app.services.review.evidence.file_context import FileContextError, load_fil
 
 
 def task(path="src/new.py", old="src/old.py", change="renamed"):
-    return SimpleNamespace(snapshot=Snapshot(review_id="review", repository="base/repo",
+    return SimpleNamespace(source=None, snapshot=Snapshot(review_id="review", repository="base/repo",
         repository_id=1, pr_number=1, head_sha="a" * 40, base_sha="b" * 40,
         declared_base_sha="c" * 40), pr=SimpleNamespace(
         base=SimpleNamespace(repo_clone_url="https://github.com/base/repo.git"),

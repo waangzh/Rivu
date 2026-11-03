@@ -4,6 +4,7 @@ export type { ReviewLimits };
 export type ReviewPlanOptions = ReviewOptions;
 
 export interface ReviewCapabilities {
+  local_repositories?: { key: string; label: string }[];
   depth_presets: {
     id: ReviewPlanOptions['depth'];
     label: string;

@@ -31,7 +31,7 @@ def freeze_configuration(request, provider):
         raise ValueError("review_limit_exceeds_server_policy")
     limits = Limits.model_validate({**maximum, **request.limits})
     options = Options(depth=request.depth, paths=request.paths, focus=request.focus, limits=limits,
-        include_pr_discussions=(settings.rivu_pr_discussions_enabled
+        include_pr_discussions=(False if request.source else settings.rivu_pr_discussions_enabled
             if request.include_pr_discussions is None else request.include_pr_discussions))
     return Configuration(provider=provider._provider_name, endpoint=provider._base_url,
                          model=request.model or provider._default_model, options=options)
@@ -47,4 +47,6 @@ def capabilities():
         "limits": {"defaults": maxima(), "maxima": maxima()},
         "pr_discussions_available": settings.rivu_pr_discussions_enabled,
         "pr_discussions_default": settings.rivu_pr_discussions_enabled,
+        "local_repositories": [{"key": key, "label": key}
+                               for key in sorted(settings.rivu_local_repositories)],
     }

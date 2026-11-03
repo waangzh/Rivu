@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
 import { ApiError, cancelReview, createReview, getAvailableModels, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
 import type { AppPage } from './types/operations';
-import type { Run } from './types/review';
+import type { LocalGitRequest, Run } from './types/review';
 import type { ReviewCapabilities, ReviewPlanOptions } from './types/reviewPlan';
 import { reviewPrimarySections, type ReviewSection } from './types/workspace';
 import { defaultPlan, phaseLabel, terminal } from './utils/nativeReview';
@@ -19,6 +19,7 @@ import ReviewWorkspace from './components/review/ReviewWorkspace.vue';
 
 const page = ref<AppPage>('dashboard'), section = ref<ReviewSection>('overview'), mobileOpen = ref(false);
 const prUrl = ref(''), model = ref(''), models = ref<string[]>([]);
+const localSource = ref<LocalGitRequest | null>(null);
 const autoPublish = ref(false), publicationToken = ref('');
 const capabilities = ref<ReviewCapabilities | null>(null);
 const options = ref<ReviewPlanOptions>(defaultPlan());
@@ -36,7 +37,8 @@ let disposed = false;
 
 const taskActive = computed(() => !!creation.value || (!!task.value && !terminal(task.value.status)));
 const pageTitle = computed(() => page.value === 'history' ? '审查历史' : page.value === 'settings' ? '系统设置'
-  : creation.value ? '审查进度' : task.value ? reviewPrimarySections.find(item => item.id === section.value)?.label || '当前审查'
+  : creation.value ? '审查进度' : task.value ? (task.value.source && section.value === 'publish' ? '报告'
+    : reviewPrimarySections.find(item => item.id === section.value)?.label || '当前审查')
     : trackedId.value ? '审查进度' : '新建审查');
 const statusText = computed(() => creation.value ? (busy.value ? '正在创建审查' : '等待处理创建结果')
   : task.value ? phaseLabel(task.value.phase) : '只读静态审查');
@@ -67,6 +69,7 @@ function newReview() {
   section.value = 'overview';
   mobileOpen.value = false;
   prUrl.value = '';
+  localSource.value = null;
 }
 function navigate(value: ReviewSection) {
   page.value = 'dashboard';
@@ -75,9 +78,12 @@ function navigate(value: ReviewSection) {
 }
 function rereview() {
   if (!task.value || !terminal(task.value.status)) return;
-  const url = task.value.pr_url, saved = task.value.configuration.options;
+  const previous = task.value, url = previous.pr_url, saved = previous.configuration.options;
   newReview();
-  prUrl.value = url;
+  prUrl.value = url || '';
+  if (previous.source) localSource.value = { kind: 'local_git',
+    repository_key: previous.source.repository_key, base_ref: previous.snapshot.declared_base_sha,
+    head_ref: previous.snapshot.head_sha, input_id: previous.source.input_id };
   options.value = structuredClone(toRaw(saved));
 }
 async function loadModels() {
@@ -186,6 +192,7 @@ function start() {
   if (autoPublish.value && !publicationToken.value) { error.value = '请先输入发布操作口令。'; return; }
   const input = structuredClone(toRaw(options.value));
   input.paths = input.paths?.map(path => path.trim()).filter(Boolean) || null;
+  if (localSource.value) input.include_pr_discussions = false;
   if (!input.focus.length) { error.value = '请至少选择一个审查重点。'; return; }
   error.value = '';
   page.value = 'dashboard';
@@ -193,8 +200,9 @@ function start() {
   mobileOpen.value = false;
   creation.value = {
     key: crypto.randomUUID(), startedAt: new Date().toISOString(),
-    input: { pr_url: prUrl.value, ...input, ...(model.value ? { model: model.value } : {}),
-      ...(autoPublish.value ? { auto_publish: true } : {}) },
+    input: { ...(localSource.value ? { source: structuredClone(toRaw(localSource.value)) } : { pr_url: prUrl.value }),
+      ...input, ...(model.value ? { model: model.value } : {}),
+      ...(autoPublish.value && !localSource.value ? { auto_publish: true } : {}) },
   };
   creationRecoverable.value = savePendingCreation(toRaw(creation.value));
   void submitCreation();
@@ -249,7 +257,8 @@ onMounted(async () => {
     if (pending) {
       creation.value = pending;
       creationRecoverable.value = true;
-      prUrl.value = pending.input.pr_url;
+      prUrl.value = pending.input.pr_url || '';
+      localSource.value = pending.input.source || null;
       model.value = pending.input.model || '';
       autoPublish.value = pending.input.auto_publish ?? false;
       options.value = {
@@ -280,7 +289,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="app rg-app" @keydown.esc="mobileOpen = false">
     <button v-if="mobileOpen" class="rg-nav-backdrop" aria-label="关闭导航遮罩" @click="mobileOpen = false" />
-    <AppSidebar v-model="page" :section="section" :has-review="!!task" :has-pending="!!creation || !!trackedId || restoring" :task-active="taskActive" :mobile-open="mobileOpen" :busy="busy || opening" @section="navigate" @create="newReview" @close="mobileOpen = false" />
+    <AppSidebar v-model="page" :section="section" :has-review="!!task" :has-pending="!!creation || !!trackedId || restoring" :local-review="!!task?.source" :task-active="taskActive" :mobile-open="mobileOpen" :busy="busy || opening" @section="navigate" @create="newReview" @close="mobileOpen = false" />
     <div class="main">
       <AppHeader :title="pageTitle" :status-text="statusText" :menu-open="mobileOpen" @menu="mobileOpen = !mobileOpen" />
       <main id="workspace-content" class="page">
@@ -295,7 +304,7 @@ onBeforeUnmount(() => {
             <p class="muted space-top">正在恢复任务状态，请稍候。</p>
             <button v-if="trackedId && !opening" class="btn secondary space-top" @click="follow(trackedId)">重试打开任务</button>
           </section>
-          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:model="model" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
+          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:local-source="localSource" v-model:model="model" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
         </template>
       </main>
     </div>

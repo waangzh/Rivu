@@ -7,6 +7,8 @@ from app.core.config import settings
 from app.services.workspaces.prepared_workspaces import PreparedWorkspaces
 from app.tools.workspace_cleanup import reap_orphaned_workspaces
 from app.services.review.artifact_store import LocalArtifactStore
+from app.services.workspaces.local_inputs import LocalInputs
+from app.tools.git_tool import GitTool
 
 logger = logging.getLogger("Rivu.Maintenance")
 workspace_cleanup_lock = asyncio.Lock()
@@ -29,6 +31,7 @@ class MaintenanceService:
             for run_id in await asyncio.to_thread(self.store.deleted_ids):
                 await asyncio.to_thread(LocalArtifactStore().remove_owner, run_id)
             await asyncio.to_thread(PreparedWorkspaces(self.store).maintain)
+            await asyncio.to_thread(LocalInputs(self.store, LocalArtifactStore(), GitTool()).maintain)
             async with workspace_cleanup_lock:
                 await asyncio.to_thread(reap_orphaned_workspaces,
                     workdir=settings.rivu_workdir, older_than_seconds=workspace_ttl_seconds(),

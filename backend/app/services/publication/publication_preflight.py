@@ -16,6 +16,8 @@ class PublicationPreflight:
         self.artifacts = artifacts
 
     async def check(self, task, finding_keys=None):
+        if task.source or task.pr is None:
+            raise GitHubPublishError("review_source_not_publishable")
         config = self.config
         if not config.rivu_github_publish_enabled:
             raise GitHubPublishError("publication_disabled")

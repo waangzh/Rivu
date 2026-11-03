@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AppPage } from '../../types/operations'; import { reviewPrimarySections, type ReviewSection } from '../../types/workspace'; import AppIcon from '../common/AppIcon.vue'; import brandSymbol from '../../assets/rivu-symbol-color.svg'; import brandSymbolWhite from '../../assets/rivu-symbol-white.svg'; import { usePreferences } from '../../composables/usePreferences';
-const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: ReviewSection; hasReview: boolean; hasPending?: boolean; taskActive: boolean; mobileOpen: boolean; busy: boolean }>(); defineEmits<{ 'update:modelValue': [page: AppPage]; section: [value: ReviewSection]; create: []; close: [] }>();
+const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: ReviewSection; hasReview: boolean; hasPending?: boolean; localReview?: boolean; taskActive: boolean; mobileOpen: boolean; busy: boolean }>(); defineEmits<{ 'update:modelValue': [page: AppPage]; section: [value: ReviewSection]; create: []; close: [] }>();
 </script>
 <template>
 <aside id="workspace-sidebar" class="sidebar" :class="{ 'mobile-open': mobileOpen }" @keydown.esc="$emit('close')">
@@ -27,10 +27,10 @@ const { theme } = usePreferences(); defineProps<{ modelValue: AppPage; section: 
 <span class="nav-text">{{ item[2] }}</span>
 </button>
 <div class="nav-divider" />
-<div class="nav-heading">当前 PR 审查</div>
+<div class="nav-heading">当前审查</div>
 <button v-for="item in reviewPrimarySections" :key="item.id" class="side-link" :class="{ active: modelValue === 'dashboard' && (hasReview ? section === item.id : hasPending && item.id === 'activity') }" :disabled="!hasReview && !(hasPending && item.id === 'activity')" @click="$emit('section', item.id)">
 <AppIcon :name="item.icon" />
-<span class="nav-text">{{ item.label }}</span>
+<span class="nav-text">{{ localReview && item.id === 'publish' ? '报告' : item.label }}</span>
 </button>
 </nav>
 </aside>

@@ -24,7 +24,7 @@ const title = computed(() => props.submitting ? '正在创建审查' : props.rej
     <div class="progress-eyebrow"><span v-if="submitting" class="rg-live-dot" /><AppIcon v-else name="alert" />审查进度</div>
     <h1 id="submission-title" tabindex="-1">{{ title }}</h1>
     <p class="progress-lead" role="status">{{ submitting ? '正在提交请求并等待服务端返回审查记录。' : rejected ? '服务端未接受这次请求，请检查原因后修改。' : '连接中断或服务暂不可用，任务可能已经创建。请继续确认这次请求。' }}</p>
-    <p class="submission-pr"><AppIcon name="branch" /><span>{{ creation.input.pr_url }}</span></p>
+    <p class="submission-pr"><AppIcon name="branch" /><span>{{ creation.input.source ? creation.input.source.repository_key + ': ' + creation.input.source.base_ref + ' → ' + creation.input.source.head_ref : creation.input.pr_url }}</span></p>
     <div class="progress-facts"><span><AppIcon name="clock" />等待 {{ elapsed }}</span><span>尚未取得任务 ID</span></div>
     <p v-if="error" class="notice warn space-top" role="alert">{{ error }}</p>
     <p v-if="submitting" class="muted space-top">创建请求包含获取 PR、固定源码版本和准备审查范围，大型仓库可能需要更长时间。取得任务 ID 后会自动显示执行进度。</p>

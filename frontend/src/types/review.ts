@@ -24,8 +24,8 @@ export interface ReviewOptions {
 export interface Snapshot {
   review_id: string;
   repository: string;
-  repository_id: number;
-  pr_number: number;
+  repository_id: number | null;
+  pr_number: number | null;
   declared_base_sha: string;
   base_sha: string;
   head_sha: string;
@@ -242,12 +242,29 @@ export interface ChangedFile {
   hunks: DiffHunk[];
 }
 
+export interface LocalGitRequest {
+  kind: 'local_git';
+  repository_key: string;
+  base_ref: string;
+  head_ref: string;
+  input_id?: string;
+}
+
+export interface LocalGitSource {
+  kind: 'local_git';
+  repository_key: string;
+  input_id: string;
+  input_digest: string;
+  title: string;
+}
+
 export interface Run {
   id: string;
   status: RunStatus;
   phase: string;
-  pr_url: string;
-  pr: PullRequestInfo;
+  pr_url: string | null;
+  pr: PullRequestInfo | null;
+  source?: LocalGitSource | null;
   snapshot: Snapshot;
   configuration: {
     provider: string;
@@ -278,7 +295,8 @@ export interface FileContext {
 }
 
 export interface ReviewCreateRequest {
-  pr_url: string;
+  pr_url?: string;
+  source?: LocalGitRequest;
   depth: ReviewOptions['depth'];
   paths: string[] | null;
   focus: ReviewOptions['focus'];
@@ -289,6 +307,7 @@ export interface ReviewCreateRequest {
 }
 
 export interface ReviewPreviewResponse {
+  source?: LocalGitSource | null;
   snapshot: Snapshot;
   plan: Plan;
   changed_files: ChangedFile[];

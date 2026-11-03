@@ -30,6 +30,7 @@ from app.services.workspaces.prepared_workspaces import (
     PreparedWorkspaces, prepare_repository, prepared_workspace_key,
 )
 from app.tools.workspace_cleanup import cleanup_workspace
+from app.services.workspaces.local_inputs import LocalInputs
 
 logger = logging.getLogger("Rivu.Review.Service")
 
@@ -39,6 +40,7 @@ class ReviewService:
         self._github_tool, self._git_tool = github_tool, git_tool
         self._diff_parser, self._provider, self.store = diff_parser, provider, store
         self._artifacts = artifacts or LocalArtifactStore()
+        self.local_inputs = LocalInputs(store, self._artifacts, git_tool)
         self._task_queue = DatabaseTaskQueue(store.sessions)
         self._worker = ReviewWorker(self._task_queue, self._handle_job, kinds=("review", "overview"))
         self._worker_task = None
@@ -117,8 +119,16 @@ class ReviewService:
         run_id, repo = uuid4().hex, None
         logger.info("审查准备开始 review_id=%.8s depth=%s", run_id, config.options.depth)
         try:
-            pr = await self._github_tool.fetch_pr(str(request.pr_url))
-            repo, changed, snapshot = await self._prepare(pr, run_id, cancel)
+            source, pr = None, None
+            if request.source:
+                manifest, input_id = await asyncio.to_thread(self.local_inputs.freeze, request.source, cancel)
+                repo, diff, snapshot, source = await asyncio.to_thread(
+                    self.local_inputs.prepare, manifest, input_id, run_id, cancel)
+                self._repo_paths[run_id] = repo
+                changed = await asyncio.to_thread(self._diff_parser.parse, diff)
+            else:
+                pr = await self._github_tool.fetch_pr(str(request.pr_url))
+                repo, changed, snapshot = await self._prepare(pr, run_id, cancel)
             try:
                 relations = await asyncio.to_thread(
                     change_relations, repo, changed, config.options, cancel_event=cancel)
@@ -129,7 +139,8 @@ class ReviewService:
             plan = await asyncio.to_thread(plan_review, changed, snapshot, config.options, relations)
             now = utcnow()
             seconds = config.options.limits.timeout_seconds
-            run = Run(id=run_id, pr_url=str(request.pr_url), pr=pr, snapshot=snapshot,
+            run = Run(id=run_id, pr_url=str(request.pr_url) if pr else None, pr=pr,
+                source=source, snapshot=snapshot,
                 configuration=config, changed_files=changed, plan=plan,
                 created_at=observed_at,
                 review_cutoff=now + timedelta(seconds=seconds * 0.8),
@@ -145,9 +156,10 @@ class ReviewService:
                         run_id, len(run.plan.units), len(run.plan.excluded),
                         sum(unit.reused_from is not None for unit in run.plan.units), len(run.plan.history))
             # Publish only the disposable prepared repository, never target changes.
-            await asyncio.to_thread(PreparedWorkspaces(self.store, self._git_tool._workdir).publish,
-                prepared_workspace_key(pr), repo, pr, {"effective_base_sha": snapshot.base_sha},
-                cancel_event=cancel)
+            if pr:
+                await asyncio.to_thread(PreparedWorkspaces(self.store, self._git_tool._workdir).publish,
+                    prepared_workspace_key(pr), repo, pr, {"effective_base_sha": snapshot.base_sha},
+                    cancel_event=cancel)
             return run
         except asyncio.CancelledError:
             cancel.set()
@@ -163,7 +175,8 @@ class ReviewService:
 
     async def preview(self, request):
         run = await self._inputs(request, execute=False)
-        return {"snapshot": run.snapshot, "plan": run.plan, "changed_files": run.changed_files}
+        return {"snapshot": run.snapshot, "plan": run.plan, "changed_files": run.changed_files,
+                "source": run.source}
 
     async def create(self, request, key, *, caller_id="installation", expected_snapshot=None,
                      automatic_policy=None):
@@ -226,7 +239,16 @@ class ReviewService:
                     or run.configuration.endpoint != self._provider._base_url):
                 raise NonRetryableJobError("review_provider_changed")
             with stage("review.prepare"):
-                repo, changed, snapshot = await self._prepare(run.pr, run.id, cancel)
+                if run.source:
+                    manifest, input_id = await asyncio.to_thread(self.local_inputs.load, run.source.input_id)
+                    repo, diff, snapshot, source = await asyncio.to_thread(
+                        self.local_inputs.prepare, manifest, input_id, run.id, cancel)
+                    self._repo_paths[run.id] = repo
+                    if source != run.source:
+                        raise NonRetryableJobError("fixed_snapshot_inputs_changed")
+                    changed = await asyncio.to_thread(self._diff_parser.parse, diff)
+                else:
+                    repo, changed, snapshot = await self._prepare(run.pr, run.id, cancel)
             if snapshot != run.snapshot or changed != run.changed_files:
                 raise NonRetryableJobError("fixed_snapshot_inputs_changed")
             model = self._provider.agent_model(run.configuration.model,

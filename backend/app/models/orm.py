@@ -122,6 +122,15 @@ class PreparedWorkspaceOrm(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class LocalReviewInputOrm(Base):
+    __tablename__ = "local_review_inputs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
 class ReviewTaskOrm(Base):
     __tablename__ = "review_tasks"
     __table_args__ = (
@@ -133,6 +142,7 @@ class ReviewTaskOrm(Base):
     repo_url: Mapped[str | None] = mapped_column(String(1024))
     pr_url: Mapped[str] = mapped_column(String(1024))
     pr_number: Mapped[int | None] = mapped_column(Integer)
+    input_id: Mapped[str | None] = mapped_column(String(32), index=True)
     base_sha: Mapped[str | None] = mapped_column(String(64), index=True)
     head_sha: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

@@ -1,8 +1,8 @@
 # Rivu
 
-> 基于固定源码证据、理解仓库上下文、严格只读的 AI Pull Request 审查 Agent。
+> 基于固定源码证据、理解仓库上下文、严格只读的 AI 代码变更审查 Agent。
 
-输入 GitHub PR URL，选择范围和资源上限，即可启动审查。Reviewer 按需调查并即时保存候选，独立 Verifier 寻找反证、判断归因，最终提供问题、证据、运行范围和默认 LLM 变更总览。
+输入 GitHub PR URL，或选择已注册本地 Git 仓库的 Base/Head 提交，设置范围和资源上限，即可启动审查。Reviewer 按需调查并即时保存候选，独立 Verifier 寻找反证、判断归因，最终提供问题、证据、运行范围和默认 LLM 变更总览。
 
 **Rivu Server 不执行目标仓库代码。** 不安装目标依赖，不运行目标测试、构建或脚本，不触发目标 CI，也不自动修复或写回补丁。
 
@@ -69,6 +69,22 @@ npm run dev
 创建请求必须带客户端生成的 `Idempotency-Key`。当前是本地单用户应用，键作用域为同一安装实例；相同键和规范化请求返回同一 Run，不重复创建收费任务。相同键但不同请求会冲突。主动重审必须使用新键。
 
 执行状态为 `queued / running / completed / partial / failed / cancelled`。`completed` 表示计划所需材料已交付、调查正常结束且已准入候选都取得核验终态，**不表示穷尽所有缺陷**。`insufficient` 仍是未决问题；部分范围、失败、取消和未知用量不会显示成完整成功或零成本。
+
+## 本地 Git 审查
+
+在 `backend/.env` 注册服务器可访问的仓库，然后重启服务：
+
+```dotenv
+RIVU_LOCAL_REPOSITORIES={"project":"/absolute/path/to/project"}
+```
+
+Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。注册键会显示在页面上，绝对路径不会出现在任务或模型材料中。首次启用新版本前，在 `backend/` 执行 `uv run alembic upgrade head`；新增本地输入表和可空的任务引用列，保留已有审查、预算与发布记录。
+
+在新建审查页选择 **本地 Git**、仓库、Base 与 Head。可先点击 **固定并预览快照**，启动时沿用该输入；也可直接开始审查。只纳入已提交内容，工作区中的暂存、未暂存和未跟踪文件不会进入审查。比较基准沿用唯一 merge base，缺失或不唯一时拒绝准备。
+
+本地输入独立保存在 artifact 目录下的 `_local_inputs/`，不借用原仓库对象，也不复制其配置、hooks 或索引。原仓库后续移动、删除或修改不影响已冻结输入；任务执行、恢复和源码展开不请求 GitHub。未关联任务的预览保留 24 小时，已关联输入保留至任务删除或保留期清理后回收。单次导入默认最多读取 1 GiB Git 元数据/对象、100000 个文件与目录，可通过 `RIVU_LOCAL_INPUT_MAX_BYTES`、`RIVU_LOCAL_INPUT_MAX_FILES` 调整。
+
+首版支持使用默认 SHA-1 对象格式、具有普通 `.git/` 目录和完整对象库的 Git 仓库；不支持 linked worktree、bare、shallow、partial clone、外部 alternates，以及未提交改动快照。输入仍会发送给配置的模型 Provider。报告、进度、取消和重试共用现有审查运行时；本地任务独立运行，不进行跨任务增量复用或自动取消其他 Head 的任务，也不支持 PR 讨论和 GitHub 发布。
 
 ## 架构与运行边界
 

@@ -32,6 +32,8 @@ class AutomaticPublicationPolicy:
             if value.strip().isdigit()), config.rivu_github_publish_max_inline)
 
     def authorize(self, run):
+        if run.source or run.pr is None:
+            raise GitHubPublishError("review_source_not_publishable")
         if run.snapshot.repository_id not in self.repositories:
             raise GitHubPublishError("repository_not_authorized")
         return AutomaticPublicationAuthorization(

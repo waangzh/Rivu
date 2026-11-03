@@ -38,6 +38,11 @@ async def get_file_context(task_id: str, file_id: int) -> FileContextResponse:
     task = await asyncio.to_thread(_reviews.get_review_service().get_task, task_id)
     if task is None or file_id < 0 or file_id >= len(task.changed_files):
         raise HTTPException(status_code=404, detail="Task or file not found")
+    if task.source:
+        try:
+            return await asyncio.to_thread(_reviews.get_review_service().local_inputs.context, task, file_id)
+        except (ValueError, OSError):
+            raise HTTPException(409, detail="本地固定快照源码不可用，或此文件不允许展开") from None
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if settings.github_token:
         headers["Authorization"] = f"Bearer {settings.github_token}"

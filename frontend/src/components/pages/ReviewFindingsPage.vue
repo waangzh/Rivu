@@ -24,8 +24,8 @@ const unresolvedCandidates = computed(() => props.candidates.filter(
 const current = computed(() => visible.value.find(item => item.id === selected.value) || visible.value[0]);
 
 const attribution = {
-  introduced: '本次 PR 引入',
-  exposed: '本次 PR 暴露或扩大影响',
+  introduced: '本次变更引入',
+  exposed: '本次变更暴露或扩大影响',
   pre_existing: '既有问题（非本次新增）',
   uncertain: '归因尚未确定',
 };

@@ -24,7 +24,7 @@ def get_review_service() -> ReviewService:
     """获取全局单例 ReviewService（惰性初始化，含所有依赖注入）。"""
     from app.core.database import schema_is_current
     if not schema_is_current():
-        raise RuntimeError("database_schema_outdated: initialize a fresh vNext database with Alembic")
+        raise RuntimeError("database_schema_outdated: run Alembic upgrade head for the selected database")
     return ReviewService(
         github_tool=GitHubTool(settings.github_token),
         git_tool=GitTool(settings.rivu_workdir, settings.rivu_git_bin),

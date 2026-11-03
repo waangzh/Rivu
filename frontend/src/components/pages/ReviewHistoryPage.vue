@@ -42,7 +42,7 @@ if (tasks.value.length === 1 && page.value > 1) page.value--; await load(); } ca
 <AppIcon name="branch" :size="22" />
 </div>
 <div class="rg-history-copy">
-<button class="rg-history-title" :disabled="busy" @click="$emit('open', item.id)">#{{ item.pr.number }} {{ item.pr.title }}</button>
+<button class="rg-history-title" :disabled="busy" @click="$emit('open', item.id)">{{ item.pr ? '#' + item.pr.number + ' ' + item.pr.title : item.source?.title }}</button>
 <p class="muted small">{{ item.snapshot.repository }} {{ new Date(item.created_at).toLocaleString() }}</p>
 <code>{{ item.snapshot.head_sha.slice(0,12) }}</code>
 </div>

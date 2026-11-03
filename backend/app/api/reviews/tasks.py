@@ -14,6 +14,7 @@ from app.services.publication.automatic_publication import (
 )
 from app.tools.git_tool import GitToolError
 from app.tools.github.github_publisher import GitHubPublishError
+from app.services.workspaces.local_inputs import LocalInputError
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -36,6 +37,8 @@ async def create_review(request: ReviewRequest, http_request: Request,
         raise HTTPException(exc.api_status, exc.public_detail()) from None
     except GitHubPublishError as exc:
         raise HTTPException(403, {"code": exc.code}) from None
+    except LocalInputError as exc:
+        raise HTTPException(422, {"code": str(exc), "message": "本地快照准备失败，请检查仓库注册、提交版本、对象完整性与输入大小限制。", "retryable": False}) from None
     except ValueError as exc:
         code = str(exc) if str(exc) in {"idempotency_key_conflict", "review_deleted"} else "review_request_invalid"
         raise HTTPException(410 if code == "review_deleted" else 409, {"code": code}) from None

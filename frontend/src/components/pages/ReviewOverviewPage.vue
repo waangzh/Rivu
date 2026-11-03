@@ -43,7 +43,7 @@ const overviewLabel = computed(() => ({
 const excluded = computed(() => Object.entries(props.report?.excluded || {}));
 const additions = computed(() => props.task.changed_files.reduce((sum, file) => sum + file.additions, 0));
 const deletions = computed(() => props.task.changed_files.reduce((sum, file) => sum + file.deletions, 0));
-const authorText = computed(() => props.task.pr.body?.trim() || props.task.pr.title);
+const authorText = computed(() => props.task.pr?.body?.trim() || props.task.pr?.title || props.task.source?.title || '');
 const authorOpen = ref(false);
 const omitted = computed(() => Object.entries(props.report?.overview.omitted || {}).filter(([, count]) => count > 0));
 const omissionSectionLabel: Record<string, string> = {
@@ -117,7 +117,7 @@ const omissionLabel = {
             </dd>
           </div>
           <div>
-            <dt>作者评论</dt>
+            <dt>{{ task.source ? '输入说明' : '作者评论' }}</dt>
             <dd>
               <div class="ov-author" :class="{ 'is-open': authorOpen }">
                 <div class="ov-author__body"><ReportMarkdown :content="authorText" :allow-images="false" /></div>

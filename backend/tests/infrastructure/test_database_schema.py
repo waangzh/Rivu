@@ -47,3 +47,25 @@ def test_existing_review_database_is_not_destructively_switched(tmp_path):
         assert connection.scalar(text("SELECT COUNT(*) FROM review_tasks WHERE id='old'")) == 1
         assert "github_publication_attempts" in inspect(connection).get_table_names()
     engine.dispose()
+
+
+def test_current_vnext_database_upgrades_without_rebuilding_review_tables(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'current.db'}")
+    with engine.connect() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO alembic_version VALUES ('20261031_0001')"))
+        connection.execute(text("CREATE TABLE review_tasks (id TEXT PRIMARY KEY, task_snapshot JSON)"))
+        connection.execute(text("INSERT INTO review_tasks VALUES ('retained', '{\"status\":\"running\"}')"))
+        connection.execute(text("CREATE TABLE review_requests (id TEXT PRIMARY KEY, state TEXT)"))
+        connection.execute(text("INSERT INTO review_requests VALUES ('ticket', 'unknown')"))
+        connection.execute(text("CREATE TABLE publication_attempts (id TEXT PRIMARY KEY, state TEXT)"))
+        connection.execute(text("INSERT INTO publication_attempts VALUES ('receipt', 'uncertain')"))
+        connection.commit()
+        command.upgrade(config_for(connection), "head")
+        connection.commit()
+        assert connection.scalar(text("SELECT task_snapshot FROM review_tasks WHERE id='retained'")) == '{"status":"running"}'
+        assert connection.scalar(text("SELECT state FROM review_requests")) == "unknown"
+        assert connection.scalar(text("SELECT state FROM publication_attempts")) == "uncertain"
+        assert "input_id" in {column["name"] for column in inspect(connection).get_columns("review_tasks")}
+        assert "local_review_inputs" in inspect(connection).get_table_names()
+    engine.dispose()

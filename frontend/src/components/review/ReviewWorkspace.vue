@@ -4,7 +4,7 @@ import { getFindings, getProgress, getPublicationPlan, getReport } from '../../a
 import type { Candidate, Finding, Report, ReviewProgress, Run } from '../../types/review';
 import type { PublicationPlan } from '../../types/publication';
 import { reviewPrimarySections, type ReviewSection } from '../../types/workspace';
-import { executionErrorLabel, phaseLabel, safeGitHubLink, terminal } from '../../utils/nativeReview';
+import { executionErrorLabel, phaseLabel, reviewTitle, safeGitHubLink, terminal } from '../../utils/nativeReview';
 import { initialReviewSection } from '../../utils/reviewProgress';
 import AppIcon from '../common/AppIcon.vue';
 import StatusBadge from '../common/StatusBadge.vue';
@@ -164,8 +164,8 @@ function exportReport() {
 <template>
   <header class="pr-title">
     <div class="min0">
-      <div class="eyebrow">{{ task.pr.owner }} / {{ task.pr.repo }} / PR #{{ task.pr.number }}</div>
-      <h1 tabindex="-1">{{ task.pr.title }}</h1>
+      <div class="eyebrow">{{ task.snapshot.repository }}{{ task.pr ? ' / PR #' + task.pr.number : ' / 本地固定快照' }}</div>
+      <h1 tabindex="-1">{{ reviewTitle(task) }}</h1>
       <div class="meta">
         <StatusBadge :status="task.status" />
         <span class="muted small">{{ phaseLabel(task.phase) }}</span>
@@ -173,20 +173,20 @@ function exportReport() {
       </div>
     </div>
     <div class="head-actions">
-      <a v-if="safeGitHubLink(task.pr.html_url)" class="btn secondary" :href="safeGitHubLink(task.pr.html_url)" target="_blank" rel="noreferrer">
+      <a v-if="safeGitHubLink(task.pr?.html_url)" class="btn secondary" :href="safeGitHubLink(task.pr?.html_url)" target="_blank" rel="noreferrer">
         GitHub <AppIcon name="external" :size="14" />
       </a>
       <button v-if="!terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('cancel')">停止审查</button>
       <button v-if="task.status === 'failed' || task.status === 'partial'" class="btn secondary" :disabled="busy" @click="$emit('retry')">重试审查</button>
-      <button v-if="terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('rereview')">重新审查此 PR</button>
+      <button v-if="terminal(task.status)" class="btn secondary" :disabled="busy" @click="$emit('rereview')">{{ task.source ? '重新审查此快照' : '重新审查此 PR' }}</button>
     </div>
   </header>
 
-  <AutomaticPublicationStatus :review-id="task.id" @inspect="inspectPublication" />
+  <AutomaticPublicationStatus v-if="!task.source" :review-id="task.id" @inspect="inspectPublication" />
 
   <nav class="subnav" aria-label="审查结果导航">
     <button v-for="item in reviewPrimarySections" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" @click="tab = item.id">
-      {{ item.label }}{{ item.id === 'findings' && findings.length ? ' (' + findings.length + ')' : '' }}
+      {{ task.source && item.id === 'publish' ? '报告' : item.label }}{{ item.id === 'findings' && findings.length ? ' (' + findings.length + ')' : '' }}
     </button>
   </nav>
 
@@ -209,3 +209,7 @@ function exportReport() {
     <code>{{ task.snapshot.head_sha.slice(0, 12) }}</code>
   </footer>
 </template>
+
+<style scoped>
+.pr-title h1 { overflow-wrap: anywhere; }
+</style>

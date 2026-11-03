@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     rivu_workdir: Path = Path(__file__).resolve().parent.parent.parent / ".rivu" / "workspaces"
     rivu_git_bin: str = "git"
     rivu_git_timeout_seconds: int = Field(default=900, ge=30, le=86_400)
+    rivu_local_repositories: dict[str, Path] = Field(default_factory=dict)
+    rivu_local_input_max_bytes: int = Field(default=1024**3, ge=1)
+    rivu_local_input_max_files: int = Field(default=100_000, ge=1)
+
+    @field_validator("rivu_local_repositories")
+    @classmethod
+    def valid_local_repositories(cls, value):
+        if any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", key) or not path.is_absolute()
+               for key, path in value.items()):
+            raise ValueError("local repositories require safe keys and absolute paths")
+        return value
 
     # ---- 产品模式 ----
     # 只读静态审查；不提供动态执行入口。
