@@ -490,7 +490,7 @@ class ContextProvider:
                 "status": "historical_not_current_evidence"} for item in self.run.plan.history[:20]],
             "author_statement_untrusted": {
                 "title": self.run.pr.title if self.run.pr else self.run.source.title,
-                "body": (self.run.pr.body or "")[:4000] if self.run.pr else ""},
+                "body": (self.run.pr.body or "")[:4000] if self.run.pr else self.run.source.body},
             "unit": unit.model_dump(), "materials": material, "missing_material": context.material_failures,
             "already_submitted": [{"id": item.id, "claim": item.proposal.claim}
                                   for item in saved if item.unit_id == unit.id][:100],

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 from tempfile import NamedTemporaryFile
-from urllib.parse import unquote
+from urllib.request import url2pathname
 
 from app.core.config import settings
 
@@ -70,7 +70,7 @@ class LocalArtifactStore:
     def read_text(self, uri: str) -> str:
         if not uri.startswith("file:///"):
             raise ValueError("unsupported artifact URI")
-        path = Path(unquote(uri.removeprefix("file:///"))).resolve()
+        path = Path(url2pathname(uri.removeprefix("file://"))).resolve()
         if self.root != path and self.root not in path.parents:
             raise ValueError("artifact path escapes configured root")
         with path.open(encoding="utf-8", newline="") as handle:

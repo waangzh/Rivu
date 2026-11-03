@@ -269,6 +269,7 @@ class LocalGitSource(Model):
     repository_key: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     input_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     title: str = Field(max_length=200)
+    body: str = Field(default="", max_length=4000)
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

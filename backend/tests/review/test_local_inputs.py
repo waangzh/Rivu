@@ -124,16 +124,42 @@ async def test_local_ignores_dirty_worktree_and_hostile_repository_config(local_
     assert "hostile" not in (repo_path / ".git/config").read_text()
 
 
-async def test_local_rejects_ref_options_and_incomplete_objects(local_pipeline):
+async def test_local_rejects_ref_options(local_pipeline):
     service, github, _ = local_pipeline
     request = local_request(github)
     request.source.head_ref = "--help"
     with pytest.raises(LocalInputError, match="local_ref_invalid"):
         await service.preview(request)
-    request.source.head_ref = github.pr.head.sha
-    (github.source_repo / ".git/objects/info/alternates").write_text("/outside")
-    with pytest.raises(LocalInputError, match="complete_objects"):
-        await service.preview(request)
+
+
+@pytest.mark.parametrize("kind", ["shallow", "partial", "alternates"])
+async def test_local_import_freezes_borrowed_objects(local_pipeline, tmp_path, monkeypatch, kind):
+    service, github, _ = local_pipeline
+    original = github.source_repo
+    imported = tmp_path / "imported"
+    subprocess.run(["git", "-C", str(original), "config", "uploadpack.allowFilter", "true"],
+                   check=True, capture_output=True)
+    options = {"shallow": ["--depth=1"], "partial": ["--filter=blob:none", "--no-checkout"],
+               "alternates": ["--shared"]}[kind]
+    subprocess.run(["git", "clone", *options,
+                    str(original) if kind == "alternates" else original.as_uri(), str(imported)],
+                   check=True, capture_output=True)
+    if kind == "shallow":
+        subprocess.run(["git", "-C", str(imported), "fetch", "--depth=1", "origin", github.pr.base.sha],
+                       check=True, capture_output=True)
+    monkeypatch.setattr(settings, "rivu_local_repositories", {"fixture": imported})
+    preview = await service.preview(local_request(github))
+    frozen = service.local_inputs._path(preview["source"].input_id) / "repo"
+    assert preview["snapshot"].base_sha == github.pr.base.sha
+    assert not (frozen / ".git/objects/info/alternates").exists()
+    assert not list((frozen / ".git/objects/pack").glob("*.promisor"))
+    assert cleanup_workspace(imported, workdir=tmp_path)
+    assert cleanup_workspace(original, workdir=original.parent)
+    request = local_request(github)
+    request.source.input_id = preview["source"].input_id
+    run = await service.create(request, "borrowed-" + kind)
+    assert await service._worker.run_once()
+    assert service.get_task(run.id).status == "completed"
 
 
 async def test_local_rejects_size_limit_and_cancellation(local_pipeline, monkeypatch):
@@ -205,12 +231,18 @@ async def test_local_preparation_cancels_running_import_without_admitting_task(l
 async def test_local_frozen_input_rejects_changed_requested_refs_and_manifest(local_pipeline):
     service, github, _ = local_pipeline
     request = local_request(github)
+    request.source.title = "PR title"
+    request.source.body = "Author statement"
     preview = await service.preview(request)
     request.source.input_id = preview["source"].input_id
     request.source.head_ref = "another-branch"
     with pytest.raises(LocalInputError, match="identity_mismatch"):
         await service.preview(request)
     request.source.head_ref = github.pr.head.sha
+    request.source.body = "Changed author statement"
+    with pytest.raises(LocalInputError, match="identity_mismatch"):
+        await service.preview(request)
+    request.source.body = "Author statement"
     with service.store.sessions.begin() as session:
         row = session.get(LocalReviewInputOrm, request.source.input_id)
         row.manifest = {**row.manifest, "head_sha": "0" * 40}

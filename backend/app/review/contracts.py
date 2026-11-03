@@ -13,6 +13,8 @@ class LocalGitRequest(Model):
     base_ref: str = Field(min_length=1, max_length=200)
     head_ref: str = Field(default="HEAD", min_length=1, max_length=200)
     input_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    title: str | None = Field(default=None, max_length=200)
+    body: str = Field(default="", max_length=4000)
 
 
 class ReviewRequest(Model):

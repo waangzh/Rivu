@@ -86,7 +86,11 @@ Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。注册�
 
 本地输入独立保存在 artifact 目录下的 `_local_inputs/`，不借用原仓库对象，也不复制其配置、hooks 或索引。原仓库后续移动、删除或修改不影响已冻结输入；任务执行、恢复和源码展开不请求 GitHub。未关联任务的预览保留 24 小时，已关联输入保留至任务删除或保留期清理后回收。单次导入默认最多读取 1 GiB Git 元数据/对象、100000 个文件与目录，可通过 `RIVU_LOCAL_INPUT_MAX_BYTES`、`RIVU_LOCAL_INPUT_MAX_FILES` 调整。
 
-首版支持使用默认 SHA-1 对象格式、具有普通 `.git/` 目录和完整对象库的 Git 仓库；不支持 linked worktree、bare、shallow、partial clone、外部 alternates，以及未提交改动快照。输入仍会发送给配置的模型 Provider。报告、进度、取消和重试共用现有审查运行时；本地任务独立运行，不进行跨任务增量复用或自动取消其他 Head 的任务，也不支持 PR 讨论和 GitHub 发布。
+支持使用默认 SHA-1 对象格式、具有普通 `.git/` 目录的 Git 仓库，包括 shallow、partial clone 和借用 alternates 的仓库。准备阶段可从 remote 补取缺失对象；shallow 缺少共同祖先时尝试加深 256 层，仍无法确定唯一 merge base 时报告失败。冻结后保存独立对象，执行和恢复不再依赖原仓库或 remote。不支持 linked worktree、bare 和未提交改动快照。输入仍会发送给配置的模型 Provider。报告、进度、取消和重试共用现有审查运行时；本地任务独立运行，不进行跨任务增量复用或自动取消其他 Head 的任务，也不支持 PR 讨论和 GitHub 发布。
+
+## ReviewBench 评测
+
+提供本地脚本读取官方样本、调用现有审查服务并导出标准 findings，再复用官方 judge 评分。默认只跑 1 个 PR，支持部分结果、失败记录和单独重试评分，不需要容器或榜单注册。准备和命令见 [评测说明](eval/reviewbench/README.md)。
 
 ## 架构与运行边界
 
@@ -153,7 +157,7 @@ Publisher 独立复验规范化 Finding、核验准入、固定快照、来源�
 - 整轮成本主要由 `RIVU_REVIEW_MAX_INPUT_TOKENS`、`RIVU_REVIEW_MAX_OUTPUT_TOKENS` 和总期限控制；模型每次请求会获知扣除核验、总览保护份额后的共享余额，并在余额或时间接近边界时收尾。
 - `RIVU_MODEL_CONTEXT_TOKENS` 限制请求上下文容量；预估包括消息、工具和结构化 Schema。使用分词估算，不能当成所有模型的精确计费上界。
 - Reviewer/Verifier 首轮和单块材料交付不再使用 32K 或分组容量作为输入上限，按模型窗口扣除输出与提示预留，以及剩余整轮预算组织；显式累计预算下仍保留核验与总览保护。200K 和可用空间四分之一仅用于分组容量策略，不限制单元后续输入。源码读取的路径、行数、文件大小与返回字符限制保留；请求放不下时仍明确记录未交付材料，并可通过工具补读。
-- `RIVU_AGENT_MAX_CALLS` 与 `RIVU_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认分别为 48 与 64。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
+- `RIVU_AGENT_MAX_CALLS` 与 `RIVU_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认单 Agent 为 48、整轮不设调用上限。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
 - `RIVU_AGENT_MAX_TOOL_CALLS` 继续限制单次 Agent 的工具调用，扫描量和工具超时约束保留；并发由 `RIVU_REVIEW_CONCURRENCY` 控制。
 - 总时长由 `RIVU_REVIEW_TIMEOUT_SECONDS` 冻结。软截止停止新发现请求；硬截止阻止所有新模型请求，停止在途工作，只做合法的本地事实收尾。
 - 请求前原子预留，未知用量保持未知并占用预留；恢复不清零。实际用量超过估算后如实记录，停止后续超预算请求。

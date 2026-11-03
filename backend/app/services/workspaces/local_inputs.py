@@ -74,16 +74,25 @@ class LocalInputs:
         self._check(cancel)
         return result
 
-    def _command(self, repo, arguments, cancel=None, *, limit=32 * 1024**2):
+    def _command(self, repo, arguments, cancel=None, *, limit=32 * 1024**2,
+                 allow_fetch=False, input_data=b"", output_path=None, check=True):
         self._check(cancel)
         environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
             GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1",
             GIT_OPTIONAL_LOCKS="0")
-        command = [self.git._git, "-c", "protocol.allow=never", "-c", "core.autocrlf=false",
+        protocols = ([option for name in ("https", "http", "ssh", "file")
+                      for option in ("-c", f"protocol.{name}.allow=always")] if allow_fetch else [])
+        environment["GIT_NO_LAZY_FETCH"] = "0" if allow_fetch else "1"
+        command = [self.git._git, "-c", "protocol.allow=never", *protocols, "-c", "core.autocrlf=false",
                    "-c", f"core.hooksPath={os.devnull}", "-C", str(repo), *arguments]
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-            process = subprocess.Popen(command, stdout=output, stderr=errors, env=environment)
+        with (tempfile.TemporaryFile() as incoming,
+              (output_path.open("wb") if output_path else tempfile.TemporaryFile()) as output,
+              tempfile.TemporaryFile() as errors):
+            incoming.write(input_data)
+            incoming.seek(0)
+            process = subprocess.Popen(command, stdin=incoming, stdout=output, stderr=errors,
+                                       env=environment)
             deadline = time.monotonic() + self.git._command_timeout_seconds
             try:
                 while process.poll() is None:
@@ -94,8 +103,12 @@ class LocalInputs:
                         process.wait(timeout=0.1)
                     except subprocess.TimeoutExpired:
                         pass
-                if process.returncode:
+                if process.returncode and check:
                     raise LocalInputError("local_input_git_failed")
+                if output_path:
+                    if output.tell() > limit:
+                        raise LocalInputError("local_input_size_limit")
+                    return b""
                 output.seek(0)
                 result = output.read(limit + 1)
                 if len(result) > limit:
@@ -114,10 +127,11 @@ class LocalInputs:
         git = root / ".git"
         if not git.is_dir() or git.is_symlink() or getattr(git, "is_junction", lambda: False)():
             raise LocalInputError("local_repository_requires_normal_git_directory")
-        if (git / "shallow").exists() or (git / "objects/info/alternates").exists():
-            raise LocalInputError("local_repository_requires_complete_objects")
+        borrowed = (git / "shallow").exists() or (git / "objects/info/alternates").exists()
         total, count, directory_count = 0, 0, 0
         candidates = [git / "HEAD", git / "packed-refs"]
+        if (git / "shallow").exists():
+            candidates.append(git / "shallow")
         for directory in (git / "objects", git / "refs"):
             if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
                 raise LocalInputError("local_repository_link")
@@ -131,6 +145,7 @@ class LocalInputs:
                 candidates.extend(Path(parent) / name for name in files)
                 if len(candidates) + directory_count > settings.rivu_local_input_max_files:
                     raise LocalInputError("local_input_too_many_files")
+        borrowed = borrowed or any(path.suffix == ".promisor" for path in candidates)
         for path in candidates:
             self._check(cancel)
             if not path.exists() and path.name == "packed-refs":
@@ -138,10 +153,10 @@ class LocalInputs:
             relative = path.relative_to(git).as_posix()
             if relative.startswith("refs/") and not relative.startswith(("refs/heads/", "refs/tags/")):
                 continue
-            if relative.endswith(".promisor"):
-                raise LocalInputError("local_repository_requires_complete_objects")
             if path.is_symlink() or not path.resolve().is_relative_to(git):
                 raise LocalInputError("local_repository_link")
+            if borrowed and relative.startswith("objects/"):
+                continue
             metadata = path.stat()
             if not stat.S_ISREG(metadata.st_mode):
                 raise LocalInputError("local_repository_non_regular_file")
@@ -180,7 +195,48 @@ class LocalInputs:
                     keep = len(fields) == 2 and fields[1].startswith(("refs/heads/", "refs/tags/"))
                     if keep:
                         lines.append(line)
-                target.write_text("\n".join(lines) + "\n", encoding="ascii")
+                if lines:
+                    target.write_text("\n".join(lines) + "\n", encoding="ascii")
+                else:
+                    target.unlink()
+        if borrowed:
+            alternate = destination / ".git/objects/info/alternates"
+            alternate.parent.mkdir(parents=True, exist_ok=True)
+            alternate.write_text(str(git / "objects") + "\n", encoding="utf-8")
+            values = self._command(root, ["config", "--local", "--no-includes", "--get-regexp",
+                r"^remote\..*\.(url|promisor)$"], cancel, check=False).decode("utf-8")
+            config = dict(line.split(None, 1) for line in values.splitlines() if " " in line)
+            remote = next((key.removesuffix(".promisor") for key, value in config.items()
+                           if key.endswith(".promisor") and value.lower() == "true"), "remote.origin")
+            url = config.get(remote + ".url")
+            if url:
+                if ":" not in url and not Path(url).is_absolute():
+                    url = str((root / url).resolve())
+                self._command(destination, ["config", "remote.origin.url", url], cancel)
+                if any(path.suffix == ".promisor" for path in candidates):
+                    self._command(destination, ["config", "remote.origin.promisor", "true"], cancel)
+        return borrowed
+
+    def _freeze_borrowed_objects(self, repo, base, head, cancel):
+        if ((repo / ".git/shallow").exists()
+                and not self.git.merge_bases(repo, base, head, cancel_event=cancel)
+                and self._command(repo, ["config", "--get", "remote.origin.url"], cancel, check=False)):
+            self._command(repo, ["fetch", "--no-tags", "--no-recurse-submodules",
+                "--deepen=256", "origin", base, head], cancel, allow_fetch=True)
+        pack = repo / ".git/objects/pack/snapshot.pack"
+        pack.parent.mkdir(parents=True, exist_ok=True)
+        self._command(repo, ["pack-objects", "--revs", "--stdout"], cancel, allow_fetch=True,
+            input_data=f"{base}\n{head}\n".encode("ascii"), output_path=pack,
+            limit=settings.rivu_local_input_max_bytes)
+        self._command(repo, ["index-pack", str(pack)], cancel)
+        for marker in pack.parent.glob("*.promisor"):
+            marker.unlink()
+        (repo / ".git/objects/info/alternates").unlink()
+        self._command(repo, ["config", "--remove-section", "remote.origin"], cancel, check=False)
+        shutil.rmtree(repo / ".git/refs")
+        (repo / ".git/refs").mkdir()
+        (repo / ".git/packed-refs").unlink(missing_ok=True)
+        self._command(repo, ["update-ref", "--no-deref", "HEAD", head], cancel)
 
     def _resolve(self, repo, ref, cancel):
         if not re.fullmatch(r"[A-Za-z0-9_./-]+", ref) or ref.startswith("-") or ".." in ref:
@@ -226,7 +282,8 @@ class LocalInputs:
         if request.input_id:
             saved, input_id = self.load(request.input_id, repository_key=request.repository_key)
             if (request.base_ref not in {saved["base_ref"], saved["declared_base_sha"]}
-                    or request.head_ref not in {saved["head_ref"], saved["head_sha"]}):
+                    or request.head_ref not in {saved["head_ref"], saved["head_sha"]}
+                    or request.title != saved.get("title") or request.body != saved.get("body", "")):
                 raise LocalInputError("local_input_identity_mismatch")
             return saved, input_id
         input_id = uuid4().hex
@@ -238,9 +295,11 @@ class LocalInputs:
                 template = directory / "template"
                 template.mkdir()
                 self._command(repo, ["init", "--quiet", f"--template={template}"], cancel)
-                self._copy_objects(source, repo, cancel)
+                borrowed = self._copy_objects(source, repo, cancel)
                 base = self._resolve(repo, request.base_ref, cancel)
                 head = self._resolve(repo, request.head_ref, cancel)
+                if borrowed:
+                    self._freeze_borrowed_objects(repo, base, head, cancel)
                 self._command(repo, ["fsck", "--no-reflogs", "--no-dangling", base, head], cancel)
                 effective, diff = self._diff(repo, base, head, cancel)
                 self._materialize(repo, head, cancel)
@@ -249,6 +308,8 @@ class LocalInputs:
                     "declared_base_sha": base, "base_sha": effective, "head_sha": head,
                     "diff_policy": DIFF_POLICY_VERSION, "diff_hash": hashlib.sha256(diff.encode()).hexdigest(),
                     "base_ref": request.base_ref, "head_ref": request.head_ref}
+                if request.title is not None or request.body:
+                    manifest.update(title=request.title, body=request.body)
                 manifest["input_digest"] = identity(manifest)
                 now = utcnow()
                 with self.store.sessions.begin() as session:
@@ -294,7 +355,9 @@ class LocalInputs:
                 snapshot = Snapshot(review_id=run_id, repository=f"local:{saved['repository_key']}",
                     declared_base_sha=saved["declared_base_sha"], base_sha=effective, head_sha=saved["head_sha"])
                 source = LocalGitSource(repository_key=saved["repository_key"], input_id=input_id,
-                    title=f"{saved['repository_key']}: {saved['base_ref']} → {saved['head_ref']}"[:200],
+                    title=saved.get("title") or
+                          f"{saved['repository_key']}: {saved['base_ref']} → {saved['head_ref']}"[:200],
+                    body=saved.get("body", ""),
                     input_digest=saved["input_digest"])
                 return target, diff, snapshot, source
             except BaseException as exc:

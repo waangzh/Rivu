@@ -262,6 +262,8 @@ export interface LocalGitRequest {
   base_ref: string;
   head_ref: string;
   input_id?: string;
+  title?: string;
+  body?: string;
 }
 
 export interface LocalGitSource {
@@ -270,6 +272,7 @@ export interface LocalGitSource {
   input_id: string;
   input_digest: string;
   title: string;
+  body: string;
 }
 
 export interface Run {
