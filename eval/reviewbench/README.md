@@ -43,16 +43,21 @@ uv run python -m app.evaluation.reviewbench \
 
 Judge 使用自己的 provider、模型 ID 和对应环境变量；Reviewer 的 `.env` 不会自动成为 Node 评分器的凭据。可以使用已有的可用模型，不要求与官方榜单一致。模型需要支持工具调用。
 
-例如配置好 `DEEPSEEK_API_KEY` 后：
+例如配置好 `DEEPSEEK_API_KEY` 后，使用项目提供的 DeepSeek judge 配置（仍在 `backend/` 执行）：
 
 ```sh
+export PI_CODING_AGENT_DIR="$(pwd)/../eval/reviewbench/deepseek-judge"
 uv run python -m app.evaluation.reviewbench \
   --benchmark-dir .rivu/reviewbench \
   --run-dir .rivu/evaluations/first-reviewbench \
   --judge-only \
   --judge-provider deepseek \
-  --judge-model deepseek-chat
+  --judge-model deepseek-v4-pro
 ```
+
+此配置启用推理，使用 1,000,000 tokens 上下文和 64,000 tokens 最大输出；后者参考 ReviewBench 离线文档的 Claude 示例，是本地选择，并非官方对 DeepSeek 的指定值。评分器为 matcher 和 classifier 分别请求 low 和 medium 推理，DeepSeek 将 medium 映射为 high。DeepSeek 模型及服务可能变化，比较结果时应记录具体配置；本地 DeepSeek 评分与官方榜单 Claude 评分不能直接等同。
+
+参考：[ReviewBench 离线评测](https://github.com/review-bench/ReviewBench/blob/228f2a8d662c9c1c12d25757e23c52c9a6170d5a/docs/OFFLINE_EVAL.md)、[DeepSeek 模型规格](https://api-docs.deepseek.com/quick_start/pricing/)、[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)。
 
 也可首次运行时直接提供 `--judge-provider`、`--judge-model`，省略 `--no-judge`，一次完成审查和评分。`--judge-concurrency` 默认 1。自定义网关或模型使用官方支持的 `PI_CODING_AGENT_DIR/models.json`，具体配置见官方 `docs/OFFLINE_EVAL.md`；其中 `apiKey` 填环境变量名称，不写真实密钥。
 
