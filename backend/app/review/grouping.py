@@ -69,7 +69,10 @@ def grouped_plan(run, output=None, *, reason=None):
 async def freeze_semantic_groups(run, store, lease, model):
     with stage("review.grouping") as observation:
         result = await _freeze_semantic_groups(run, store, lease, model)
-        observation.set(status=result.plan.grouping_status, reason=result.plan.grouping_reason,
+        reason = result.plan.grouping_reason
+        if reason is not None:
+            reason = reason.removeprefix("grouping_budget:")
+        observation.set(status=result.plan.grouping_status, reason=reason,
                         unit_count=len(result.plan.units))
         return result
 

@@ -20,6 +20,8 @@ from app.core.config import settings
 from app.review import observability as obs
 from app.review.agent import AgentRunner
 from app.review.orchestrator import ReviewOrchestrator
+from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT
+from app.review.tools import READ_TOOLS, read_discussion, recall_context, record_investigation, submit_candidate
 from tests.review.test_orchestrator import ReviewModel
 from tests.review.vnext_helpers import setup_run, setup_source_run
 
@@ -156,14 +158,18 @@ async def test_export_enqueue_failure_never_changes_review_or_usage(tmp_path, mo
     assert "enqueue_failed" in caplog.text
 
 
+@pytest.mark.parametrize(("source_refs", "reason"), [
+    ([], "missing_decision_sources"),
+    (["S999"], "invalid_source_refs"),
+])
 async def test_model_confirmation_is_recorded_after_durable_admission_as_insufficient(
-        tmp_path, recorder):
+        tmp_path, recorder, source_refs, reason):
     class UnsourcedVerifier(ReviewModel):
         def _generate(self, messages, stop=None, run_manager=None, **kwargs):
             result = super()._generate(messages, stop, run_manager, **kwargs)
             message = result.generations[0].message
             if message.tool_calls[0]["name"] == "VerificationOutput":
-                message.tool_calls[0]["args"]["source_refs"] = []
+                message.tool_calls[0]["args"]["source_refs"] = source_refs
             return result
 
     store, run, lease, provider, _ = setup_source_run(tmp_path)
@@ -175,9 +181,70 @@ async def test_model_confirmation_is_recorded_after_durable_admission_as_insuffi
                  if operation == "create" and payload["name"] == "candidate.verified")
     assert event["model_verdict"] == "confirmed"
     assert event["verdict"] == "insufficient"
-    assert event["reason"] == "missing_decision_sources"
+    assert event["reason"] == reason
     assert event["finding"] is False
     assert report.usage["model_calls"] == 5
+
+
+async def test_agent_model_budget_rejection_preserves_reason(tmp_path, recorder):
+    from app.models.orm import ReviewTaskOrm
+    from app.review.budget import BudgetGate
+    from app.review.store import BudgetExceeded
+
+    store, run, lease, sessions = setup_run(tmp_path)
+    run.configuration.options.limits.model_calls = 1
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    work = store.claim(run.id, store.work_items(run.id)[0].id, lease)
+    budget = BudgetGate(store, run, lease)
+    with obs.review_trace(run, lease):
+        ticket = await budget.reserve(work, 1000)
+        await budget.settle(ticket, {"input_tokens": 100, "output_tokens": 5})
+        with pytest.raises(BudgetExceeded, match="^agent_model_limit$"):
+            await budget.reserve(work, 1000)
+    event = next(payload["extra"]["metadata"] for operation, payload in recorder.operations
+                 if operation == "create" and payload["name"] == "budget.rejected")
+    assert event["reason"] == "agent_model_limit"
+
+
+@pytest.mark.parametrize(("resource", "value", "reason"), [
+    ("total_model_calls", 3, "model_call_limit"),
+    ("total_input_tokens", OVERVIEW_INPUT + VERIFICATION_INPUT, "input_token_limit"),
+    ("total_output_tokens", 3 * 4096, "output_token_limit"),
+])
+async def test_grouping_budget_trace_preserves_reason(
+        tmp_path, recorder, resource, value, reason):
+    from app.models.orm import ReviewTaskOrm
+    from app.review.grouping import freeze_semantic_groups
+    from tests.review.test_grouping import GroupModel, pending_run
+
+    store, run, lease, sessions = pending_run(tmp_path)
+    setattr(run.configuration.options.limits, resource, value)
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    model = GroupModel()
+    with obs.review_trace(run, lease):
+        frozen = await freeze_semantic_groups(run, store, lease, model)
+    assert model.calls == []
+    assert frozen.plan.grouping_reason == f"grouping_budget:{reason}"
+    assert store.get(run.id).plan.grouping_reason == frozen.plan.grouping_reason
+    events = [payload["extra"]["metadata"] for operation, payload in recorder.operations
+              if operation in {"create", "update"} and payload.get("name") == "review.grouping"]
+    assert events[-1]["status"] == "fallback"
+    assert events[-1]["reason"] == reason
+
+
+async def test_grouping_trace_filters_unknown_budget_reason(tmp_path, recorder):
+    from app.review.grouping import freeze_semantic_groups
+
+    store, run, lease, _ = setup_run(tmp_path)
+    run.plan.grouping_reason = "grouping_budget:private-source-text"
+    with obs.review_trace(run, lease):
+        await freeze_semantic_groups(run, store, lease, None)
+    event = next(payload["extra"]["metadata"] for operation, payload in recorder.operations
+                 if operation == "update" and payload["name"] == "review.grouping")
+    assert event["reason"] == "other"
+    assert "private-source-text" not in json.dumps(recorder.operations, default=str)
 
 
 async def test_duplicate_settlement_observes_ledger_instead_of_ignored_usage(tmp_path, recorder):
@@ -225,6 +292,70 @@ async def test_paginated_tool_is_observed_as_partial_without_logging_query(tmp_p
     assert tools[0]["has_more"] is True
     assert tools[0]["match_count"] == 1
     assert "query" not in json.dumps(recorder.operations, default=str)
+
+
+@pytest.mark.parametrize(("tool_name", "arguments", "reason"), [
+    ("read_symbol", {"path": "a.py", "symbol": "ratio"}, None),
+    ("read_file", {"path": "a.py", "revision": "head", "start": 2, "end": 1},
+     "invalid_source_range"),
+    ("search_code", {"query": "return", "cursor": "invented"}, "invalid_cursor"),
+])
+async def test_tool_trace_preserves_registered_name_and_read_rejection(
+        tmp_path, recorder, caplog, tool_name, arguments, reason):
+    from app.review.index import OnDemandIndex
+
+    class ToolModel(ReviewModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if (not str(messages[0].content).startswith("Summarize")
+                    and not any(isinstance(message, ToolMessage) for message in messages)):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(
+                    content="", tool_calls=[{"name": tool_name, "id": "read", "args": arguments}],
+                    usage_metadata={"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}))])
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    provider.index = OnDemandIndex(provider.evidence)
+    with caplog.at_level(logging.INFO, logger="Rivu.Observation"):
+        await ReviewOrchestrator(store, AgentRunner(ToolModel())).run(run.id, provider, lease)
+    events = [payload["extra"]["metadata"] for operation, payload in recorder.operations
+              if operation == "update" and payload["name"] == (
+                  "tool.rejected" if reason else "tool.execute")]
+    assert events
+    assert events[0]["tool"] == tool_name
+    if reason:
+        assert events[0]["reason"] == reason
+    else:
+        assert events[0]["ok"] is True
+    encoded = json.dumps(recorder.operations, default=str)
+    for private in ("a.py", "def ratio", "invented"):
+        assert private not in encoded
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("registered_tool", [
+    *READ_TOOLS, read_discussion, record_investigation, recall_context, submit_candidate,
+], ids=lambda registered_tool: registered_tool.name)
+def test_registered_tool_names_are_preserved(registered_tool):
+    assert obs.safe_fields({"tool": registered_tool.name}) == {"tool": registered_tool.name}
+
+
+@pytest.mark.parametrize("reason", [
+    "invalid_cursor", "invalid_source_range", "invalid_source_side", "source_output_too_large",
+    "source_range_out_of_bounds", "source_range_too_large", "source_too_large", "source_unavailable",
+    "candidate_limit",
+])
+def test_host_read_and_candidate_limit_reasons_are_preserved(reason):
+    assert obs.safe_fields({"reason": reason}) == {"reason": reason}
+
+
+@pytest.mark.parametrize("reason", [
+    "grouping_budget:private-source-text", "input_token_limit:private-source-text",
+    "agent_model_call_limit", ["invalid_source_range"], {"reason": "invalid_cursor"},
+])
+def test_unknown_and_malformed_classification_values_are_filtered(reason):
+    assert obs.safe_fields({"tool": "private-tool-name", "reason": reason}) == {
+        "tool": "other", "reason": "other",
+    }
 
 
 async def test_parallel_agents_and_cancelled_spans_keep_context_isolated(
