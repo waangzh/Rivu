@@ -31,7 +31,7 @@ def build_report(run, work_items, candidates, usage):
             reasons.append(f"{item.unit_id}:{item.error_code or item.status}")
         if item.material_delivery != "complete":
             reasons.append(f"{item.unit_id}:material_incomplete")
-        if item.result and item.result.get("unresolved_reason"):
+        if item.has_unresolved_investigation:
             reasons.append(f"{item.unit_id}:unresolved_investigation")
     if any(candidate.verification is None for candidate in candidates):
         reasons.append("unverified_candidates")

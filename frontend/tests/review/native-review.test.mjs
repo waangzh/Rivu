@@ -7,6 +7,46 @@ import { renderToString } from '@vue/server-renderer';
 const sha = char => char.repeat(40);
 const task = status => ({ id: 'review', status, phase: status, pr_url: 'https://github.com/o/r/pull/1', pr: { owner: 'o', repo: 'r', number: 1, title: '<script>alert(1)</script>', body: null, html_url: 'https://github.com/o/r/pull/1' }, snapshot: { review_id: 'review', repository: 'o/r', repository_id: 1, pr_number: 1, declared_base_sha: sha('a'), base_sha: sha('b'), head_sha: sha('c') }, configuration: { provider: 'fixture', endpoint: '', model: 'fixture', options: { depth: 'standard', paths: null, focus: ['correctness'], include_pr_discussions: false, limits: {} }, prompt_version: 'review-vnext-1' }, changed_files: [], plan: { version: 'hunk-plan-v1', units: [], excluded: {}, incremental_from: null, history: [] }, report: null, review_cutoff: '', hard_deadline: '', created_at: '', updated_at: '', started_at: null, completed_at: null, error_code: status === 'failed' ? 'TimeoutError' : null });
 
+test('结构化缺口与历史未决项保持未完成，安全展示具体阻塞原因', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewActivityPage.vue');
+    const { progressSummary } = await server.ssrLoadModule('/src/utils/reviewProgress.ts');
+    const run = task('partial');
+    run.plan.units = [{ id: 'unit', paths: ['a.py'] }];
+    const unit = { id: 'work', kind: 'review', unit_id: 'unit', status: 'completed',
+      attempt: 1, material_delivery: 'complete', tool_calls: 0, error_code: null,
+      missing_material_reasons: {}, result: null };
+    const gap = {
+      required_check: '确认输入契约', observation: '源码使用输入作为除数',
+      missing_premise: '<script>未知的输入约束</script>', why_required: '合法输入决定失败是否可达',
+      source_refs: ['S1'],
+    };
+    for (const result of [{ unresolved: gap }, { unresolved_reason: '历史未决项仍需检查' }]) {
+      unit.result = result;
+      assert.equal(progressSummary(run, [unit], []).completed, 0);
+      assert.equal(progressSummary(run, [unit], []).unavailable, 1);
+      const html = await renderToString(createSSRApp(Component, { task: run, units: [unit], report: null }));
+      assert.match(html, /存在未完成检查/);
+      assert.doesNotMatch(html, /<script>/);
+      if (result.unresolved) {
+        assert.match(html, /必要检查：确认输入契约/);
+        assert.match(html, /缺失事实：&lt;script&gt;未知的输入约束&lt;\/script&gt;/);
+        assert.match(html, /阻塞原因：合法输入决定失败是否可达/);
+      } else {
+        assert.match(html, /历史未决项仍需检查/);
+      }
+    }
+    unit.result = { unresolved: null };
+    assert.equal(progressSummary(run, [unit], []).completed, 1);
+    assert.equal(progressSummary(run, [unit], []).unavailable, 0);
+  } finally { await server.close(); }
+});
+
 test('预算耗尽说明具体限制，避免显示为未知执行异常', async () => {
   const server = await createServer({
     server: { middlewareMode: true, hmr: false },

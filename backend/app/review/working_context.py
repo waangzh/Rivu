@@ -6,10 +6,9 @@ from dataclasses import dataclass, field
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.review.context import TOOL_LOOP_WARNING
-from app.review.planner import tokens, unit_capacity
+from app.review.planner import tokens
 
 
-INITIAL_INPUT_TOKENS = 32_000
 PERFORMANCE_INPUT_TOKENS = 64_000
 MIN_RECLAIM_TOKENS = 8_192
 
@@ -36,11 +35,11 @@ class WorkingContext:
 
     @staticmethod
     def initial_ceiling(limits):
-        return max(1, min(INITIAL_INPUT_TOKENS, limits.context_tokens - limits.output_tokens - 1024))
+        return max(1, limits.context_tokens - limits.output_tokens - 1024)
 
     @classmethod
     def initial_budget(cls, limits):
-        return min(cls.initial_ceiling(limits), unit_capacity(limits))
+        return cls.initial_ceiling(limits)
 
     @staticmethod
     def active_refs(context):

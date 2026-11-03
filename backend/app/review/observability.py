@@ -41,6 +41,7 @@ _COUNTS = {
     "path_count", "edge_count", "repeated_rounds", "candidate_count", "finding_count",
     "gap_count", "unit_count", "omitted_sources", "elapsed_ms", "call", "queue_ms",
     "shared_message_prefix_tokens", "minimum_reclaim_tokens", "retained_sources",
+    "repeated_cycle_length", "repeated_request_count", "repeated_source_read_count",
 }
 _FLAGS = {"ok", "closing", "compacted", "pressure", "unresolved", "finding", "reused",
           "truncated", "partial", "scope_complete", "has_more", "usage_known", "capture_content"}
@@ -61,6 +62,8 @@ _LABELS = {
         "source_output_too_large", "source_range_out_of_bounds", "source_range_too_large",
         "source_too_large", "source_unavailable",
         "invalid_tool_arguments", "unknown_tool", "source_or_submission_rejected",
+        "source_not_visible_in_this_attempt", "investigation_reference_not_received",
+        "unsupported_glob", "invalid_path_filter", "invalid_exclude_globs", "invalid_page_size",
         "context_checkpoint_required", "tool_call_limit", "investigation_closed",
         "candidate_snapshot_mismatch", "candidate_location_not_sourced",
         "grouping_unavailable", "previous_grouping_request_not_replayed",

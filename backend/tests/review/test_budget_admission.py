@@ -61,9 +61,11 @@ def test_small_call_budget_starts_only_one_reviewer_atomically(tmp_path):
     assert usage["input_tokens"] is None
 
 
-def test_output_budget_without_verification_space_does_not_start_reviewer(tmp_path):
+@pytest.mark.parametrize("output_tokens", [4096, 125_000])
+def test_output_budget_without_verification_space_does_not_start_reviewer(tmp_path, output_tokens):
     store, run, lease, sessions = setup_run(tmp_path, calls=3)
-    run.configuration.options.limits.total_output_tokens = 2 * 4096
+    run.configuration.options.limits.output_tokens = output_tokens
+    run.configuration.options.limits.total_output_tokens = 2 * output_tokens
     with sessions.begin() as session:
         session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
     work = store.work_items(run.id)[0]
@@ -71,6 +73,46 @@ def test_output_budget_without_verification_space_does_not_start_reviewer(tmp_pa
         store.claim(run.id, work.id, lease, check_budget=True)
     assert store.work_items(run.id)[0].status == "queued"
     assert store.usage(run.id)["model_calls"] == 0
+
+
+@pytest.mark.parametrize("unknown_usage", [False, True])
+def test_125k_output_preserves_verification_overview_and_unknown_reservation(tmp_path, unknown_usage):
+    store, run, lease, sessions = setup_run(tmp_path, calls=3)
+    limits = run.configuration.options.limits
+    limits.output_tokens = 125_000
+    limits.total_output_tokens = 3 * limits.output_tokens
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    work = store.claim(run.id, store.work_items(run.id)[0].id, lease, check_budget=True)
+    ticket = store.reserve(run.id, work, 1000, lease)
+    usage = None if unknown_usage else {"input_tokens": 1000, "output_tokens": 50}
+    store.settle(run.id, ticket, usage, lease)
+    reopened = type(store)(sessions)
+    settled = reopened.usage(run.id)
+    assert settled["output_tokens"] == (None if unknown_usage else 50)
+    assert settled["committed_output_tokens"] == (125_000 if unknown_usage else 50)
+    complete_reviewer(reopened, run, lease, work)
+    check = next(work for work in reopened.work_items(run.id) if work.kind == "verification")
+    check = reopened.claim(run.id, check.id, lease, check_budget=True)
+    reopened.reserve(run.id, check, 1000, lease)
+    reopened.reserve(run.id, None, 1000, lease, overview=True)
+    assert reopened.usage(run.id)["model_calls"] == 3
+
+
+def test_125k_output_keeps_model_context_capacity_enforced(tmp_path):
+    store, run, lease, sessions = setup_run(tmp_path, calls=3)
+    limits = run.configuration.options.limits
+    limits.output_tokens = 125_000
+    limits.total_input_tokens = limits.total_output_tokens = None
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    work = store.claim(run.id, store.work_items(run.id)[0].id, lease, check_budget=True)
+    input_capacity = limits.context_tokens - limits.output_tokens
+    with pytest.raises(BudgetExceeded, match="context_capacity"):
+        store.reserve(run.id, work, input_capacity + 1, lease)
+    assert store.usage(run.id)["model_calls"] == 0
+    store.reserve(run.id, work, input_capacity, lease)
+    assert store.usage(run.id)["model_calls"] == 1
 
 
 def test_reviewer_preserves_full_200k_overview_reservation(tmp_path):

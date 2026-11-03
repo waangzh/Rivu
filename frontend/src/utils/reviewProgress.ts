@@ -1,6 +1,6 @@
 import { ApiError } from '../api/client';
 import type { Candidate, Run, WorkItem } from '../types/review';
-import { terminal } from './nativeReview';
+import { hasUnresolvedInvestigation, terminal } from './nativeReview';
 
 export function initialReviewSection(status: Run['status']) {
   return terminal(status) ? 'overview' : 'activity';
@@ -24,9 +24,10 @@ export function formatElapsed(start: string, end: string | number) {
 
 export function progressSummary(task: Run, units: WorkItem[], candidates: Candidate[]) {
   const review = units.filter(item => item.kind === 'review');
-  const completed = new Set(review.filter(item => item.status === 'completed').map(item => item.unit_id));
+  const completed = new Set(review.filter(item =>
+    item.status === 'completed' && !hasUnresolvedInvestigation(item)).map(item => item.unit_id));
   const unavailable = new Set(review.filter(item =>
-    ['failed', 'interrupted', 'skipped'].includes(item.status),
+    ['failed', 'interrupted', 'skipped'].includes(item.status) || hasUnresolvedInvestigation(item),
   ).map(item => item.unit_id));
   const pending = candidates.filter(item => !item.verification).length;
   const insufficient = candidates.filter(item => item.verification?.verdict === 'insufficient').length;

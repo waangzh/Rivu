@@ -33,8 +33,12 @@ def freeze_configuration(request, provider):
     options = Options(depth=request.depth, paths=request.paths, focus=request.focus, limits=limits,
         include_pr_discussions=(False if request.source else settings.rivu_pr_discussions_enabled
             if request.include_pr_discussions is None else request.include_pr_discussions))
+    thinking = getattr(provider, "_thinking", False)
     return Configuration(provider=provider._provider_name, endpoint=provider._base_url,
-                         model=request.model or provider._default_model, options=options)
+                         model=request.model or provider._default_model, options=options,
+                         thinking=thinking,
+                         reasoning_effort=getattr(provider, "_reasoning_effort", None)
+                         if thinking else None)
 
 
 def capabilities():

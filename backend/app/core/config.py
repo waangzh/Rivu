@@ -3,6 +3,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +42,8 @@ class Settings(BaseSettings):
     rivu_model: str = "gpt-4.1-mini"
     rivu_provider: str = "openai"  # openai / deepseek / openai-compatible
     rivu_model_request_timeout_seconds: float = Field(default=60, ge=1, le=600)
+    rivu_deepseek_thinking: bool = True
+    rivu_deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
 
     rivu_pr_discussions_enabled: bool = True
 
@@ -83,7 +86,7 @@ class Settings(BaseSettings):
     # 调用次数只作熔断；调查以整轮 Token 和期限为主，深度不再覆盖此值。
     rivu_agent_max_calls: int = Field(default=48, ge=1, le=100)
     rivu_agent_max_tool_calls: int = Field(default=80, ge=1, le=500)
-    rivu_agent_output_tokens: int = Field(default=4096, ge=256, le=32768)
+    rivu_agent_output_tokens: int = Field(default=4096, ge=256, le=125_000)
     rivu_review_max_model_calls: int | None = Field(default=None, ge=3, le=1000)
     rivu_review_max_input_tokens: int | None = Field(default=None, ge=12000, le=10_000_000)
     rivu_review_max_output_tokens: int | None = Field(default=None, ge=1024, le=10_000_000)

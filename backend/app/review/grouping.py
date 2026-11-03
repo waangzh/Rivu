@@ -55,7 +55,7 @@ def grouped_plan(run, output=None, *, reason=None):
                 groups.append(selected)
     groups.extend([path] for index, path in enumerate(paths) if index not in assigned)
     plan = plan_review(run.changed_files, run.snapshot, run.configuration.options,
-                       run.plan.relations, file_groups=groups)
+                       run.plan.relations, file_groups=groups, preserve_relations=output is not None)
     for unit in plan.units:
         unit.label = labels.get(unit.paths[0])
     plan.grouping_status = "model" if output is not None else "fallback"

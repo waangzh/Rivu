@@ -5,9 +5,10 @@ import json
 import logging
 from inspect import signature
 from functools import wraps
-from typing import Literal
+from typing import Annotated, Literal
 
 from langchain.tools import ToolRuntime, tool
+from pydantic import Field
 
 from app.review.context import AgentContext, InvestigationState, TOOL_LOOP_WARNING
 from app.review.domain import CandidateInput
@@ -73,11 +74,20 @@ def bounded(function):
                            context.provider.run.id, context.work.id, function.__name__, exc.code)
             result = {"ok": False, "error": exc.code, **exc.details}
         except (ValueError, OSError) as exc:
+            reason = str(exc) if type(exc) is ValueError and str(exc) in {
+                "source_not_visible_in_this_attempt", "candidate_snapshot_mismatch",
+                "candidate_location_not_sourced", "investigation_reference_not_received",
+            } else "source_or_submission_rejected"
             event("tool.rejected", tool=function.__name__,
-                  reason="source_or_submission_rejected", ok=False)
+                  reason=reason, ok=False)
             logger.warning("工具调用被拒绝 review_id=%.8s work_id=%.8s tool=%s error_type=%s",
                            context.provider.run.id, context.work.id, function.__name__, type(exc).__name__)
-            result = {"ok": False, "error": "source_or_submission_rejected"}
+            result = {"ok": False, "error": reason}
+            if reason in {"source_not_visible_in_this_attempt", "candidate_location_not_sourced"}:
+                result.update(
+                    available_source_refs=list(context.visible)[:64],
+                    next_action="Use received source_ref handles covering the proposed location. "
+                                "Never invent handles or reuse another attempt's handles.")
         await context.check_active()
         # Submission receipts remain idempotent; never block saving a candidate.
         if function.__name__ != "submit_candidate":
@@ -94,9 +104,16 @@ def bounded(function):
 
 @tool
 @bounded
-async def read_file(path: str, revision: Literal["base", "head"], start: int, end: int,
+async def read_file(path: str, revision: Literal["base", "head"],
+                    start: Annotated[int, Field(ge=1, strict=True)],
+                    end: Annotated[int, Field(ge=1, strict=True)],
                     runtime: ToolRuntime[AgentContext]) -> dict:
-    """Read complete fixed source lines, 1-based inclusive, at most 240 lines."""
+    """Read fixed source lines using start/end, not start_line/end_line.
+
+    Lines are 1-based inclusive: at most 240, so end <= start + 239.
+    Reuse returned total_lines/max_read_lines for later ranges. For a named
+    function, prefer read_symbol. Rejected ranges include corrected arguments.
+    """
     return await runtime.context.read(path, start, end, revision)
 
 
@@ -115,21 +132,34 @@ async def read_diff(hunk_id: str, runtime: ToolRuntime[AgentContext]) -> dict:
 @bounded
 async def search_code(query: str, runtime: ToolRuntime[AgentContext], path: str = "",
                       glob: str = "", revision: Literal["base", "head"] = "head",
-                      cursor: str = "", limit: int = 12) -> dict:
+                      cursor: str = "",
+                      limit: Annotated[int, Field(ge=1, le=40, strict=True)] = 12,
+                      exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None) -> dict:
     """Bounded literal search. Results are hints, read source before citing them.
 
-    Continue next_cursor with the same query/path/glob/revision. If any filter changes,
-    omit cursor to start a new search. An empty partial page is not absence.
+    Glob * and ? stay within one path component; ** spans directories.
+    Patterns with / are repository-relative; bare *.ts matches basenames anywhere.
+    Exclude tests with exclude_globs=["**/__tests__/**"], never a leading !.
+    limit is 1..40. Continue next_cursor with identical query/path/glob/revision
+    and exclude_globs; omit cursor if filters change. An empty partial page is not absence.
     """
-    return await search(runtime.context, query, path, glob, revision, cursor, limit)
+    return await search(runtime.context, query, path, glob, revision, cursor, limit,
+                        exclude_globs=exclude_globs)
 
 
 @tool
 @bounded
 async def find_files(runtime: ToolRuntime[AgentContext], query: str = "", path: str = "",
-                     glob: str = "", cursor: str = "", limit: int = 80) -> dict:
-    """Page through the authorized tracked file inventory."""
-    return await asyncio.to_thread(find_paths, runtime.context, query, path, glob, cursor, limit)
+                     glob: str = "", cursor: str = "",
+                     limit: Annotated[int, Field(ge=1, le=80, strict=True)] = 80,
+                     exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None) -> dict:
+    """Page tracked paths, limit 1..80, with the same glob rules as search_code.
+
+    Use exclude_globs for exclusions, never !. Keep all filters for next_cursor.
+    scope_empty means no authorized paths satisfy the filters.
+    """
+    return await asyncio.to_thread(find_paths, runtime.context, query, path, glob, cursor, limit,
+                                   exclude_globs=exclude_globs)
 
 
 @tool
@@ -138,6 +168,8 @@ async def submit_candidate(proposal: CandidateInput, runtime: ToolRuntime[AgentC
     """Persist a concrete defect claim for independent verification immediately.
 
     Success means saved, never confirmed. Cite only source_ref handles actually received.
+    Check relevant guards and counterevidence first. Do not submit a hypothesis already
+    refuted by source; reopen it only for new evidence or a specific reasoning error.
     """
     context = runtime.context
     candidate = admit_candidate(proposal, context, runtime.tool_call_id)
@@ -163,6 +195,8 @@ async def record_investigation(note: InvestigationState, runtime: ToolRuntime[Ag
     depends_on links prerequisite question IDs; outcome is separate from progress status.
     Notes guide batched context compaction. Open/blocked questions keep their premises.
     Use at branch changes or a context checkpoint, preferably alongside the next read.
+    Resolve source-refuted branches with outcome=refuted and their counterevidence.
+    Reuse question_id when new evidence or a reasoning correction reopens a branch.
     Submit supported defects separately with submit_candidate.
     """
     context = runtime.context

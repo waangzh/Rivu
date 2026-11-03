@@ -26,7 +26,7 @@ class Limits(Model):
     model_calls: int = Field(default=48, ge=1, le=100)
     tool_calls: int = Field(default=80, ge=1, le=500)
     timeout_seconds: int = Field(default=1800, ge=1, le=86400)
-    output_tokens: int = Field(default=4096, ge=256, le=32768)
+    output_tokens: int = Field(default=4096, ge=256, le=125_000)
     total_model_calls: int | None = Field(default=None, ge=3, le=1000)
     total_input_tokens: int | None = Field(default=None, ge=12000, le=10_000_000)
     total_output_tokens: int | None = Field(default=None, ge=1024, le=10_000_000)
@@ -52,8 +52,10 @@ class Configuration(Model):
     provider: str
     endpoint: str
     model: str
+    thinking: bool = False
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     options: Options
-    prompt_version: str = "review-vnext-9"
+    prompt_version: str = "review-vnext-11"
 
 
 class Snapshot(Model):
@@ -144,14 +146,22 @@ class VerificationOutput(Model):
     question: VerificationQuestion | None = None
 
 
-class UnitCompletion(Model):
-    """Finish this unit's investigation; this is not a review summary."""
+class CompletionGap(Model):
+    required_check: str = Field(min_length=1, max_length=500)
+    observation: str = Field(min_length=1, max_length=1000)
+    missing_premise: str = Field(min_length=1, max_length=1000)
+    why_required: str = Field(min_length=1, max_length=1000)
+    source_refs: list[str] = Field(min_length=1, max_length=32)
 
-    unresolved_reason: str | None = Field(default=None, max_length=1500, description=(
-        "An actual missing premise that prevents finishing this investigation. "
-        "Use null when the necessary investigation is complete, including when no defect "
-        "was found or only speculative claims remain. Do not put summaries, checked cases, "
-        "refuted claims, or already submitted candidates here; those are recorded separately."
+
+class UnitCompletion(Model):
+    """Finish this investigation, with a sourced gap only if a necessary check is blocked."""
+
+    unresolved: CompletionGap | None = Field(default=None, description=(
+        "Use null when necessary checks are finished, including no defects or only "
+        "unsupported speculation. Otherwise identify the required check, sourced observation, "
+        "missing fact and why that fact prevents completion. Cite received S source handles. "
+        "Summaries, refuted hypotheses and pending candidate verifications are not gaps."
     ))
 
 
@@ -203,6 +213,11 @@ class WorkItem(Model):
     result: dict | None = None
     tool_calls: int = 0
     reused_from: str | None = None
+
+    @property
+    def has_unresolved_investigation(self):
+        return bool(self.result and (
+            self.result.get("unresolved") or self.result.get("unresolved_reason")))
 
 
 class OverviewParagraph(Model):

@@ -56,6 +56,26 @@ def request_input_tokens(messages, tools, schema):
     }) + 512
 
 
+def completion_correction(context):
+    if context.structured_output_retry:
+        raise MissingStructuredResult
+    if context.model_calls >= context.provider.run.configuration.options.limits.model_calls:
+        raise BudgetExceeded("agent_model_limit")
+    context.structured_output_retry = True
+    context.structured_correction_limit = context.model_calls + 1
+    event("agent.completion_correction")
+    return (
+        "Runtime correction (trusted host): Return UnitCompletion once using the current schema. "
+        "No further investigation is available. Set unresolved=null when necessary checks "
+        "are complete, including when only unsupported possibilities remain. Otherwise supply "
+        "required_check, a source-supported observation, missing_premise, why_required and "
+        "received S source_refs. Explain why this missing fact actually blocks a necessary "
+        "check; lack of proof that every conceivable failure is absent is not a blocker. "
+        "Do not copy a summary or refuted hypothesis into a gap, or assume completion to "
+        "avoid describing a real gap. R receipts and invented S handles are not source evidence."
+    )
+
+
 class RequestGate(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         context = request.runtime.context
@@ -74,6 +94,12 @@ class RequestGate(AgentMiddleware):
                 "next_action": "Correct the arguments using the tool schema. Do not repeat "
                                "the same rejected call. Return the required result tool if finished.",
             }
+            if request.tool_call["name"] == "read_file":
+                corrections = {name: replacement for name, replacement in (
+                    ("start_line", "start"), ("end_line", "end"))
+                    if name in request.tool_call["args"]}
+                if corrections:
+                    body["argument_corrections"] = corrections
             context.note_tool_result(request.tool_call["name"], request.tool_call["args"], body)
             event("tool.rejected", tool=request.tool_call["name"], reason=error, ok=False)
             result = ToolMessage(content=json.dumps(body), tool_call_id=request.tool_call["id"],
@@ -115,8 +141,8 @@ class RequestGate(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         context = request.runtime.context
         await context.check_active()
-        if (context.verification_correction_limit is not None
-                and context.model_calls >= context.verification_correction_limit):
+        if (context.structured_correction_limit is not None
+                and context.model_calls >= context.structured_correction_limit):
             raise MissingStructuredResult
         repeated = context.begin_round()
         if context.loop_closing_calls >= 2:
@@ -189,8 +215,34 @@ class RequestGate(AgentMiddleware):
         if repeated >= TOOL_LOOP_WARNING:
             instruction += (
                 f" The last {repeated} tool rounds repeated identical calls with identical results. "
+                if context.repeated_cycle_length == 1 else
+                f" The last {repeated} cycles of {context.repeated_cycle_length} tool rounds "
+                "repeated identical calls with identical results. "
+            )
+            instruction += (
                 "Reuse those results or change the specific request to resolve a missing premise. "
                 "Repetition does not establish whether the investigation is complete."
+            )
+        elif (context.repeated_request_count >= TOOL_LOOP_WARNING
+                and context.repeated_request_count > context.repetition_notice_sent):
+            context.repetition_notice_sent = context.repeated_request_count
+            instruction += (
+                f" An identical request has returned the same result "
+                f"{context.repeated_request_count} times, including interleaved checks. "
+                "Reuse received evidence. State the specific missing premise before another read. "
+                "If multiple branches remain, preserve their questions and counterevidence with "
+                "record_investigation; if the concrete claim is decided, return the result. "
+                "Repeated data alone neither proves completion nor refutes an unresolved claim."
+            )
+        if context.repeated_source_read_count - context.source_read_notice_sent >= TOOL_LOOP_WARNING:
+            context.source_read_notice_sent = context.repeated_source_read_count
+            instruction += (
+                f" Earlier source reads already covered the full ranges of "
+                f"{context.repeated_source_read_count} later reads, even where range arguments differed. "
+                "Identify the specific missing premise before another overlapping read. "
+                "Reuse source bodies still present; restore archived bodies when needed. "
+                "This is an efficiency reminder, not evidence that a question is answered "
+                "or a reason to stop a necessary investigation."
             )
         if call_remaining == 2:
             instruction += (
@@ -212,7 +264,7 @@ class RequestGate(AgentMiddleware):
                 f" Close now because of {','.join(closing_reasons)}. "
                 f"No investigation tools are available. Return {schema.__name__} now using the "
                 "evidence already received. If a necessary premise is still missing, "
-                "state it concretely in unresolved_reason (Reviewer) or return insufficient "
+                "describe it in the structured unresolved gap (Reviewer) or return insufficient "
                 "(Verifier). Never present unfinished investigation as a clean result."
             )
             if tools:
@@ -226,7 +278,7 @@ class RequestGate(AgentMiddleware):
                     "This is a bounded finalization opportunity, not permission to assume success."
                 )
                 instruction += (
-                    " Finish with unresolved_reason=null if the necessary checks are complete; "
+                    " Finish with unresolved=null if the necessary checks are complete; "
                     "otherwise identify the specific unanswered question."
                     if context.work.kind == "review" else
                     " Confirm or refute only with the required supporting evidence; "
@@ -265,7 +317,10 @@ class RequestGate(AgentMiddleware):
                     ([request.system_message] if request.system_message else []) + request.messages)})
                 event("context.projected", **context.window.metrics,
                       investigation_questions=len(context.investigations),
-                      repeated_rounds=repeated)
+                      repeated_rounds=repeated,
+                      repeated_cycle_length=context.repeated_cycle_length,
+                      repeated_request_count=context.repeated_request_count,
+                      repeated_source_read_count=context.repeated_source_read_count)
                 for reason in closing_reasons:
                     event("agent.closing", reason=reason)
                 response = await handler(request)
@@ -314,6 +369,27 @@ class AgentRunner:
     def __init__(self, model):
         self.model = model
 
+    async def _admit_completion(self, agent, result, output, context):
+        try:
+            if output.unresolved:
+                context.resolve(output.unresolved.source_refs)
+            return output
+        except ValueError:
+            message = HumanMessage(content=completion_correction(context))
+        corrected = await agent.ainvoke(
+            {"messages": [*result["messages"], message], "structured_response": None},
+            context=context, config={"recursion_limit": 12})
+        revised = corrected.get("structured_response")
+        if not isinstance(revised, UnitCompletion):
+            raise MissingStructuredResult
+        await context.budget.active()
+        if revised.unresolved:
+            try:
+                context.resolve(revised.unresolved.source_refs)
+            except ValueError as exc:
+                raise MissingStructuredResult from exc
+        return revised
+
     async def _correct_verification(self, agent, result, output, candidate, context):
         if (candidate.admission_reason not in {"invalid_source_refs", "missing_decision_sources"}
                 or context.structured_output_retry
@@ -321,7 +397,7 @@ class AgentRunner:
             return output, candidate
         problem = candidate.admission_reason
         context.structured_output_retry = True
-        context.verification_correction_limit = context.model_calls + 1
+        context.structured_correction_limit = context.model_calls + 1
         event("agent.verification_correction", reason=problem)
         logger.warning(
             "复核引用未通过校验，将在原预算内纠正一次 review_id=%.8s work_id=%.8s reason=%s",
@@ -400,8 +476,10 @@ class AgentRunner:
             initial = await provider.initial(context, candidate, request_budget=request_budget,
                                              estimate_request=estimate_initial)
             context.initial_packet = initial
+            response_format = (ToolStrategy(schema, handle_errors=lambda error: completion_correction(context))
+                               if role == "reviewer" else ToolStrategy(schema))
             agent = create_agent(self.model, tools=tools, system_prompt=prompt,
-                response_format=ToolStrategy(schema), middleware=[RequestGate()],
+                response_format=response_format, middleware=[RequestGate()],
                 context_schema=AgentContext, name=role)
             initial_message.content = json.dumps(initial, ensure_ascii=False)
             result = await agent.ainvoke(
@@ -415,6 +493,8 @@ class AgentRunner:
                 candidate = admit_verification(candidate, output, context)
                 output, candidate = await self._correct_verification(
                     agent, result, output, candidate, context)
+            else:
+                output = await self._admit_completion(agent, result, output, context)
             # ainvoke only returns after all tool tasks and their DB receipts finish.
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
                 "completed", output.model_dump(), None, provider.lease,
@@ -426,7 +506,7 @@ class AgentRunner:
                       finding=candidate.finding is not None)
             event("agent.finished", status="completed", model_calls=context.model_calls,
                   tool_calls=context.tool_calls,
-                  unresolved=bool(output.unresolved_reason) if isinstance(output, UnitCompletion) else False)
+                  unresolved=output.unresolved is not None if isinstance(output, UnitCompletion) else False)
             logger.info(
                 "Agent结果已提交 review_id=%.8s work_id=%.8s kind=%s elapsed_ms=%.0f "
                 "model_calls=%d tool_calls=%d verdict=%s finding=%s unresolved=%s",
@@ -434,7 +514,7 @@ class AgentRunner:
                 context.model_calls, context.tool_calls,
                 candidate.verification.verdict if candidate else "-",
                 candidate.finding is not None if candidate else False,
-                bool(output.unresolved_reason) if isinstance(output, UnitCompletion) else False)
+                output.unresolved is not None if isinstance(output, UnitCompletion) else False)
         except (LeaseLost, ReviewStopped, asyncio.CancelledError) as exc:
             event("agent.stopped",
                   status="cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted",

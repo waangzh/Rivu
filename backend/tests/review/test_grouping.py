@@ -53,6 +53,38 @@ def test_grouping_failure_falls_back_to_single_file_units(tmp_path):
     assert plan.grouping_reason == "grouping_unavailable"
 
 
+def test_model_grouping_cannot_split_strong_relations_when_capacity_allows(tmp_path):
+    _, run, _, _ = setup_run(tmp_path)
+    run.changed_files = changes("core/engine.ts", "server/parser.ts",
+                                "tests/engine.test.ts", "unrelated.ts")
+    relations = [(0, "core/engine.ts", "server/parser.ts"),
+                 (1, "core/engine.ts", "tests/engine.test.ts")]
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options, relations)
+    output = GroupingOutput(groups=[FileGroup(label=str(index), files=[index])
+                                    for index in range(4)])
+    plan = grouped_plan(run, output)
+    assert any(unit.paths == ["core/engine.ts", "server/parser.ts", "tests/engine.test.ts"]
+               for unit in plan.units)
+    assert any(unit.paths == ["unrelated.ts"] for unit in plan.units)
+    assert sorted(path for unit in plan.units for path in unit.paths) == sorted(
+        change.file_path for change in run.changed_files)
+    fallback = grouped_plan(run, reason="grouping_unavailable")
+    assert all(len(unit.paths) == 1 for unit in fallback.units)
+
+
+def test_strong_relations_take_priority_over_large_model_group(tmp_path):
+    _, run, _, _ = setup_run(tmp_path)
+    paths = [f"pkg/file{index:02d}.py" for index in range(12)]
+    run.changed_files = changes(*paths)
+    relations = [(0, paths[0], paths[-1])]
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options, relations)
+    output = GroupingOutput(groups=[FileGroup(label="all", files=list(range(12)))])
+    plan = grouped_plan(run, output)
+    assert all(len(unit.paths) <= 10 for unit in plan.units)
+    assert any({paths[0], paths[-1]} <= set(unit.paths) for unit in plan.units)
+    assert len({path for unit in plan.units for path in unit.paths}) == 12
+
+
 def test_repeated_immutable_tool_result_is_counted_for_advisory_warning():
     context = AgentContext(provider=None, work=None, budget=None)
     arguments = {"path": "a.py", "revision": "head", "start": 1, "end": 2}

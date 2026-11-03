@@ -11,8 +11,8 @@ from typing import Any
 
 _SOURCE_EXTENSIONS = {
     "python": (".py",),
-    "javascript": (".js", ".jsx", ".ts", ".tsx"),
-    "typescript": (".ts", ".tsx", ".js", ".jsx"),
+    "javascript": (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"),
+    "typescript": (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"),
     "java": (".java",),
     "go": (".go",),
     "rust": (".rs",),
@@ -278,10 +278,19 @@ def resolve_import(
         base = posixpath.normpath((source_path.parent / module).as_posix())
         if base == ".." or base.startswith("../"):
             return []
-        for ext in _SOURCE_EXTENSIONS[language]:
-            for path in (f"{base}{ext}", f"{base}/index{ext}"):
-                if path in files:
-                    candidates.append((path, 0.99))
+        suffix = PurePosixPath(base).suffix
+        replacements = {
+            ".js": (".ts", ".tsx", ".js", ".jsx"),
+            ".jsx": (".tsx", ".jsx"), ".mjs": (".mts", ".mjs"),
+            ".cjs": (".cts", ".cjs"),
+        }
+        if suffix:
+            paths = ([base.removesuffix(suffix) + extension
+                      for extension in replacements[suffix]] if suffix in replacements else [base])
+        else:
+            paths = [path for extension in _SOURCE_EXTENSIONS[language]
+                     for path in (f"{base}{extension}", f"{base}/index{extension}")]
+        candidates.extend((path, 0.99) for path in paths if path in files)
     elif language == "java":
         for path in lookup["java_modules"].get(module, ()):
             candidates.append((path, 0.96))
@@ -340,6 +349,7 @@ def resolved_import_targets(
 
 def resolved_import_edges(
     sources: Iterable[str], files: dict[str, dict[str, Any]], *, minimum: float = 0.9,
+    aliases: dict[str, str] | None = None,
 ) -> list[tuple[str, str, float]]:
     """Resolve direct imports to one unique target, preserving confidence.
 
@@ -347,6 +357,7 @@ def resolved_import_edges(
     leaving the files separate.
     """
     lookup = _build_lookup(files)
+    aliases = aliases or {}
     edges: dict[tuple[str, str], float] = {}
     for source in sorted(set(sources)):
         item = files.get(source)
@@ -362,7 +373,7 @@ def resolved_import_edges(
             resolved = [(path, confidence) for path, confidence in
                         resolve_import(source, module, files, lookup)
                         if min(confidence, ref_confidence) >= minimum]
-            targets = {path for path, _ in resolved}
+            targets = {aliases.get(path, path) for path, _ in resolved}
             if len(targets) == 1:
                 target = next(iter(targets))
                 edges[(source, target)] = max(
@@ -375,7 +386,7 @@ def resolved_import_edges(
                 resolved = [(path, confidence) for path, confidence in
                             resolve_import(source, submodule, files, lookup)
                             if min(confidence, ref_confidence) >= sub_minimum]
-                targets = {path for path, _ in resolved}
+                targets = {aliases.get(path, path) for path, _ in resolved}
                 if len(targets) == 1:
                     target = next(iter(targets))
                     edges[(source, target)] = max(

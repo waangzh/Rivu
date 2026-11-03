@@ -6,7 +6,7 @@ import pytest
 
 from app.models.review.diff import ChangedFile
 from app.review.context import AgentContext, ContextProvider
-from app.review.planner import members
+from app.review.planner import members, tokens, unit_capacity
 from tests.review.vnext_helpers import setup_source_run, submit_candidate
 
 
@@ -14,6 +14,19 @@ def count_members(monkeypatch):
     build = Mock(wraps=members)
     monkeypatch.setattr("app.review.context.members", build)
     return build
+
+
+async def test_material_exceeding_grouping_capacity_is_delivered_within_model_capacity(tmp_path):
+    source = 'DATA = [' + ', '.join('"x"' for _ in range(1200)) + ']\n'
+    store, run, _, provider, _ = setup_source_run(tmp_path, head_source=source)
+    limits = run.configuration.options.limits
+    limits.context_tokens = 32_768
+    context = AgentContext(provider, store.work_items(run.id)[0], None)
+    key = run.plan.units[0].required_hunk_ids[0]
+    packet = await provider.material(context, key)
+    assert tokens(packet) > unit_capacity(limits)
+    assert tokens(packet) < provider.material_capacity()
+    assert context.pending and key in context.pending_hunks
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import type { Candidate, Report, ReviewUsage, Run, WorkItem } from '../../types/review';
 import type { ReviewSection } from '../../types/workspace';
-import { executionErrorLabel, observedUsage, phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
+import { executionErrorLabel, hasUnresolvedInvestigation, observedUsage, phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
 import { formatElapsed, progressHeading, progressSummary } from '../../utils/reviewProgress';
 import { useReviewClock } from '../../composables/useReviewClock';
 import AppIcon from '../common/AppIcon.vue';
@@ -137,13 +137,20 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
     <p v-else-if="!ordered.length" class="muted space-top">{{ ended ? '本轮没有执行记录，请结合审查单元和结束原因查看结果。' : '准备期间尚无执行记录，开始分析后会在此显示。' }}</p>
     <ol v-else class="rg-stage-list">
       <li v-for="item in ordered" :key="item.id">
-        <StatusBadge :status="item.status" :label="workLabel[item.status]" />
+        <StatusBadge :status="hasUnresolvedInvestigation(item) ? 'partial' : item.status" :label="hasUnresolvedInvestigation(item) ? '存在未完成检查' : workLabel[item.status]" />
         <div class="min0">
           <strong>{{ item.kind === 'review' ? '分析代码' : '核验疑似问题' }} · {{ workDescription(item) }}</strong>
           <p v-if="workPaths(item)" class="muted small">{{ workPaths(item) }}</p>
           <p class="rg-activity-meta"><span>{{ materialLabel[item.material_delivery] }}</span><span>尝试 {{ item.attempt }} 次</span><span>工具调用 {{ item.tool_calls }} 次</span></p>
           <p v-if="item.reused_from" class="notice small">复用了此前已完成且源码一致的审查单元。历史问题仍由本轮独立核验。</p>
           <p v-if="item.error_code" class="notice warn small">{{ executionErrorLabel(item.error_code) }}</p>
+          <div v-if="item.kind === 'review' && item.result?.unresolved" class="notice warn small">
+            <p>必要检查：{{ item.result.unresolved.required_check }}</p>
+            <p>源码观察：{{ item.result.unresolved.observation }}</p>
+            <p>缺失事实：{{ item.result.unresolved.missing_premise }}</p>
+            <p>阻塞原因：{{ item.result.unresolved.why_required }}</p>
+          </div>
+          <p v-else-if="item.kind === 'review' && item.result?.unresolved_reason" class="notice warn small">{{ item.result.unresolved_reason }}</p>
           <details v-if="item.error_code || item.reused_from || Object.keys(item.missing_material_reasons).length" class="space-top">
             <summary class="link">查看执行详情</summary>
             <p v-if="item.error_code" class="muted small">错误类别：<code>{{ item.error_code }}</code></p>

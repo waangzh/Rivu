@@ -107,7 +107,8 @@ def _bundles(path_members, path_cost,
     return sorted(bundles, key=lambda item: (-item[2], item[0]))
 
 def plan_review(changed_files, snapshot, options,
-                relations: list[tuple[int, str, str]] | None = None, *, file_groups=None) -> Plan:
+                relations: list[tuple[int, str, str]] | None = None, *, file_groups=None,
+                preserve_relations=False) -> Plan:
     excluded = excluded_changes(changed_files, options)
     by_path = {change.file_path: change.model_dump() for change in changed_files}
     known = set(by_path) - {path for path, reason in excluded.items() if reason != "user_excluded"}
@@ -122,6 +123,14 @@ def plan_review(changed_files, snapshot, options,
         path_members.setdefault(member["path"], []).append((key, member))
     path_cost = {path: sum(member_cost[key] for key, _ in entries)
                  for path, entries in path_members.items()}
+    if file_groups is not None and preserve_relations:
+        combined = [edge for edge in relations or [] if edge[0] <= 1]
+        for proposed in file_groups:
+            selected = list(dict.fromkeys(path for path in proposed if path in path_members))
+            combined.extend((3, *sorted((left, right)))
+                            for left, right in zip(selected, selected[1:]))
+        file_groups = [list(paths) for paths, _, _ in
+                       _bundles(path_members, path_cost, combined, capacity)]
     if file_groups is None:
         if len(path_members) <= 3:
             volume = sum(change.additions + change.deletions for change in changed_files

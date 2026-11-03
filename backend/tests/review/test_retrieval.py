@@ -4,11 +4,63 @@ import json
 import subprocess
 from types import SimpleNamespace
 import pytest
-from app.review.retrieval import find_paths, search
+from app.review.retrieval import _paths, find_paths, search
 from tests.support.source_fixtures import commit_sources
 
 def context_for(service):
     return SimpleNamespace(evidence=service, denied_paths=frozenset(), check_active=None, cursors={})
+
+
+def test_path_globs_keep_components_and_support_explicit_exclusions(source_service):
+    source_service.allowed_paths = frozenset({
+        "src/api.ts", "src/server/handlers.ts", "src/server/__tests__/handlers.test.ts",
+        "src/server/deeper/router.ts", ".env",
+    })
+    context = context_for(source_service)
+    assert _paths(context, glob="src/*.ts") == ["src/api.ts"]
+    assert _paths(context, glob="src/**/*.ts", exclude_globs=["**/__tests__/**"]) == [
+        "src/api.ts", "src/server/deeper/router.ts", "src/server/handlers.ts"]
+    assert _paths(context, glob="*.test.ts") == ["src/server/__tests__/handlers.test.ts"]
+    with pytest.raises(ValueError, match="unsupported_glob"):
+        _paths(context, glob="!**/__tests__/**")
+    with pytest.raises(ValueError, match="unsupported_glob"):
+        _paths(context, exclude_globs=["!**/__tests__/**"])
+    for invalid in (["../*"], [""] , ["*.ts"] * 17):
+        with pytest.raises(ValueError):
+            _paths(context, exclude_globs=invalid)
+
+
+async def test_search_exclusions_are_visible_and_bound_to_cursor(source_service):
+    commit_sources(source_service, {
+        "src/__tests__/rule.test.ts": "VALUE\n",
+        "src/rule.ts": "VALUE\nVALUE\n",
+    })
+    context = context_for(source_service)
+    first = await search(context, "VALUE", path="src", glob="*.ts", limit=1,
+                         exclude_globs=["**/__tests__/**"])
+    assert first["matches"][0]["path"] == "src/rule.ts"
+    assert first["filters"]["exclude_globs"] == ["**/__tests__/**"]
+    assert not first["scope_empty"] and first["scope_files"] == 1
+    with pytest.raises(ValueError, match="invalid_cursor"):
+        await search(context, "VALUE", path="src", glob="*.ts", limit=1,
+                     cursor=first["next_cursor"])
+    final = await search(context, "VALUE", path="src", glob="*.ts", limit=1,
+                         cursor=first["next_cursor"], exclude_globs=["**/__tests__/**"])
+    assert final["scope_complete"] and final["matches"][0]["line"] == 2
+    empty = await search(context, "VALUE", glob="missing/**/*.ts")
+    assert empty["scope_empty"] and empty["matches"] == [] and empty["scope_files"] == 0
+    assert empty["filters"]["glob"] == "missing/**/*.ts"
+
+
+def test_path_exclusion_changes_invalidate_inventory_cursor(source_service):
+    source_service.allowed_paths = frozenset({"src/a.ts", "src/b.ts", "src/tests/a.ts"})
+    context = context_for(source_service)
+    first = find_paths(context, path="src", limit=1, exclude_globs=["**/tests/**"])
+    with pytest.raises(ValueError, match="invalid_cursor"):
+        find_paths(context, path="src", limit=1, cursor=first["next_cursor"])
+    final = find_paths(context, path="src", limit=1, cursor=first["next_cursor"],
+                       exclude_globs=["**/tests/**"])
+    assert final["paths"] == ["src/b.ts"] and not final["has_more"]
 
 
 

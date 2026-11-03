@@ -55,6 +55,31 @@ def test_relation_edge_survives_capacity_packing(tmp_path):
     assert any({"a/order.py", "z/routes.py"} <= set(unit.paths) for unit in plan.units)
 
 
+def test_typescript_runtime_suffix_import_groups_changed_feature(tmp_path):
+    write(tmp_path, "src/core/engine.ts", "export const MAX_LENGTH = 100;\n")
+    write(tmp_path, "src/server/parser.ts",
+          "import { MAX_LENGTH } from '../core/engine.js';\nexport const limit = MAX_LENGTH;\n")
+    write(tmp_path, "other/a.ts", "export const a = 1;\n")
+    write(tmp_path, "unrelated/b.ts", "export const b = 1;\n")
+    changed = [change(path) for path in (
+        "src/core/engine.ts", "src/server/parser.ts", "other/a.ts", "unrelated/b.ts")]
+    relations = change_relations(tmp_path, changed, Options())
+    assert (0, "src/core/engine.ts", "src/server/parser.ts") in relations
+    plan = plan_review(changed, snapshot(), Options(), relations)
+    assert any(unit.paths == ["src/core/engine.ts", "src/server/parser.ts"]
+               for unit in plan.units)
+
+
+def test_typescript_suffix_rename_aliases_are_deduplicated_before_ambiguity(tmp_path):
+    write(tmp_path, "src/core/engine.js", "export const limit = 100;\n")
+    write(tmp_path, "src/server/parser.ts",
+          "import { limit } from '../core/engine.js';\n")
+    changed = [change("src/core/engine.js", old_file_path="src/core/engine.ts",
+                      change_type="renamed"), change("src/server/parser.ts")]
+    assert (0, "src/core/engine.js", "src/server/parser.ts") in change_relations(
+        tmp_path, changed, Options())
+
+
 def test_imported_name_resolves_submodule(tmp_path):
     write(tmp_path, "app/services/order.py", "def create():\n    return 1\n")
     write(tmp_path, "app/api/routes.py", "from app.services import order\n")

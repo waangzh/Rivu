@@ -11,7 +11,7 @@ from pydantic import Field
 
 from app.review.domain import Model, Snapshot, SourceRef
 from app.review.evidence import digest, source_lines
-from app.review.planner import identity, members, tokens, unit_capacity
+from app.review.planner import identity, members, tokens
 from app.review.store import BudgetExceeded
 
 
@@ -54,12 +54,19 @@ class AgentContext:
     tool_calls: int = 0
     model_calls: int = 0
     structured_output_retry: bool = False
-    verification_correction_limit: int | None = None
+    structured_correction_limit: int | None = None
     source_counter: int = 0
     tool_repetitions: dict[str, tuple[str, int]] = field(default_factory=dict)
     round_calls: list[str] = field(default_factory=list)
     previous_tool_round: str | None = None
     repeated_tool_rounds: int = 0
+    tool_round_history: list[str] = field(default_factory=list)
+    repeated_cycle_length: int = 1
+    repeated_request_count: int = 0
+    repetition_notice_sent: int = 0
+    recent_source_reads: list[tuple[str, str, str, int, int]] = field(default_factory=list)
+    repeated_source_read_count: int = 0
+    source_read_notice_sent: int = 0
     loop_closing_calls: int = 0
     investigation_closed: bool = False
     investigation_tools: set[str] = field(default_factory=set)
@@ -129,7 +136,29 @@ class AgentContext:
         previous, count = self.tool_repetitions.get(key, (None, 0))
         count = count + 1 if previous == digest else 1
         self.tool_repetitions[key] = (digest, count)
+        self.repeated_request_count = max(self.repeated_request_count, count)
+        if name in {"read_file", "read_symbol"} and result.get("ok") is True:
+            self.note_source_read(result)
         return count
+
+    def note_source_read(self, result):
+        ranges = [self._source_range(source) for _, source in self._source_items(result)]
+        if not ranges:
+            return
+        repeated = True
+        for commit, side, path, start, end in ranges:
+            next_line = start
+            for previous in sorted(self.recent_source_reads, key=lambda item: item[3]):
+                if previous[:3] != (commit, side, path) or previous[4] < next_line:
+                    continue
+                if previous[3] > next_line:
+                    break
+                next_line = max(next_line, previous[4] + 1)
+            if next_line <= end:
+                repeated = False
+        if repeated:
+            self.repeated_source_read_count += 1
+        self.recent_source_reads = [*self.recent_source_reads, *ranges][-64:]
 
     @staticmethod
     def is_test_path(path: str) -> bool:
@@ -297,6 +326,12 @@ class AgentContext:
             "receipts": self.receipts, "visible_receipts": sorted(self.visible_receipts),
             "candidates": self.submitted, "cursors": self.cursors,
             "context_metrics": self.window.metrics if self.window else {},
+            "investigation_efficiency": {
+                "repeated_request_count": self.repeated_request_count,
+                "repeated_tool_rounds": self.repeated_tool_rounds,
+                "repeated_cycle_length": self.repeated_cycle_length,
+                "repeated_source_read_count": self.repeated_source_read_count,
+            },
         }
         artifact = await asyncio.to_thread(self.evidence.artifacts.put_text,
             task_id=self.provider.run.id, kind="context-state",
@@ -313,10 +348,20 @@ class AgentContext:
         self.memory_only_round = False
         if fingerprint is None:
             self.repeated_tool_rounds = 0
-        elif fingerprint == self.previous_tool_round:
-            self.repeated_tool_rounds += 1
+            self.tool_round_history.clear()
         else:
-            self.repeated_tool_rounds = 1
+            self.tool_round_history.append(fingerprint)
+            self.tool_round_history = self.tool_round_history[-TOOL_LOOP_LIMIT * 4:]
+            self.repeated_tool_rounds, self.repeated_cycle_length = 1, 1
+            for length in range(1, min(4, len(self.tool_round_history) // 2) + 1):
+                pattern = self.tool_round_history[-length:]
+                cycles = 1
+                while (len(self.tool_round_history) >= (cycles + 1) * length
+                       and self.tool_round_history[-(cycles + 1) * length:-cycles * length]
+                       == pattern):
+                    cycles += 1
+                if cycles > self.repeated_tool_rounds:
+                    self.repeated_tool_rounds, self.repeated_cycle_length = cycles, length
         self.previous_tool_round = fingerprint
         self.round_calls.clear()
         return self.repeated_tool_rounds
@@ -371,7 +416,8 @@ class ContextProvider:
     _member_changes: list | None = field(default=None, init=False, repr=False, compare=False)
 
     def material_capacity(self) -> int:
-        return unit_capacity(self.run.configuration.options.limits)
+        limits = self.run.configuration.options.limits
+        return max(1, limits.context_tokens - limits.output_tokens - 1024)
 
     @property
     def _member_map(self):

@@ -252,7 +252,9 @@ class ReviewService:
             if snapshot != run.snapshot or changed != run.changed_files:
                 raise NonRetryableJobError("fixed_snapshot_inputs_changed")
             model = self._provider.agent_model(run.configuration.model,
-                output_tokens=run.configuration.options.limits.output_tokens)
+                output_tokens=run.configuration.options.limits.output_tokens,
+                thinking=run.configuration.thinking,
+                reasoning_effort=run.configuration.reasoning_effort)
             if job.kind == "review" and run.plan.grouping_status == "pending":
                 run = await freeze_semantic_groups(run, self.store, lease, model)
             paths = await asyncio.to_thread(self._git_tool.list_tracked_files, repo)

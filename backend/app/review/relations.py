@@ -106,8 +106,7 @@ def change_relations(repo_path, changed_files, options, *, cancel_event=None):
         entries[path]["import_refs"] = [ref.model_dump(mode="json") for ref in analysis.imports]
         parsed.add(path)
     edges = set()
-    for source, target, _ in resolved_import_edges(parsed, entries):
-        target = aliases.get(target, target)
+    for source, target, _ in resolved_import_edges(parsed, entries, aliases=aliases):
         if target in included and target != source:
             edges.add((0, *sorted((source, target))))
     for test, source, _ in related_test_edges(included, entries):

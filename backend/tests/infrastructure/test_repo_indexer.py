@@ -936,3 +936,34 @@ def test_relative_import_cannot_escape_repository_or_fall_back_to_same_stem():
              "order.ts": {"language": "typescript"}}
     assert resolve_import("src/consumer.ts", "../../order", files) == []
     assert resolve_import("src/consumer.ts", "../order", files) == [("order.ts", 0.99)]
+
+
+@pytest.mark.parametrize(("specifier", "target"), [
+    ("./order.js", "src/order.ts"), ("./order.js", "src/order.js"),
+    ("./order.ts", "src/order.ts"), ("./order.jsx", "src/order.tsx"),
+    ("./order.mjs", "src/order.mts"), ("./order.cjs", "src/order.cts"),
+    ("./order", "src/order/index.ts"),
+])
+def test_relative_ecmascript_imports_resolve_explicit_suffixes(specifier, target):
+    from app.tools.repository_graph import resolve_import, resolved_import_edges
+
+    files = {"src/consumer.ts": {"language": "typescript", "imports": [specifier]},
+             target: {"language": "typescript"}}
+    assert resolve_import("src/consumer.ts", specifier, files) == [(target, 0.99)]
+    assert resolved_import_edges(["src/consumer.ts"], files) == [
+        ("src/consumer.ts", target, 0.99)]
+
+
+def test_relative_suffix_substitution_keeps_ambiguity_and_canonical_rename_identity():
+    from app.tools.repository_graph import resolve_import, resolved_import_edges
+
+    files = {
+        "src/consumer.ts": {"language": "typescript", "imports": ["./order.js"]},
+        "src/order.ts": {"language": "typescript"},
+        "src/order.js": {"language": "javascript"},
+        "elsewhere/order.ts": {"language": "typescript"},
+    }
+    assert resolved_import_edges(["src/consumer.ts"], files) == []
+    assert resolved_import_edges(["src/consumer.ts"], files, aliases={
+        "src/order.ts": "src/order.js"}) == [("src/consumer.ts", "src/order.js", 0.99)]
+    assert resolve_import("src/consumer.ts", "../../order.js", files) == []

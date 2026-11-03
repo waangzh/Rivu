@@ -395,6 +395,9 @@ def test_fields_reject_unknown_metadata_and_content_is_bounded(monkeypatch):
     assert "private-value" not in encoded
     assert len(encoded) < 40000
     assert obs.safe_fields({"input_tokens": 10**1000, "output_tokens": float("inf")}) == {}
+    assert obs.safe_fields({"repeated_source_read_count": 3,
+                            "recent_source_reads": ["private/path.py"]}) == {
+                                "repeated_source_read_count": 3}
     assert obs._content({"text": "x" * 9000})["_rivu_truncated"] is True
 
 

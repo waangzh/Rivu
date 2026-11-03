@@ -13,7 +13,81 @@ from app.review.domain import utcnow
 from app.review.orchestrator import ReviewOrchestrator
 from app.review.planner import tokens
 from app.review.store import OVERVIEW_INPUT
-from tests.review.vnext_helpers import setup_source_run
+from tests.review.vnext_helpers import completion_gap, setup_source_run
+
+
+@pytest.mark.parametrize(("line_count", "minimum_input"), [(150, 32_000), (650, 200_000)])
+async def test_reviewer_and_verifier_receive_initial_source_packets_beyond_grouping_limits(
+    tmp_path, line_count, minimum_input,
+):
+    def large_source(value):
+        return "".join(f"VALUES_{index} = [{value}," + "0," * 75 + "]\n" for index in range(line_count))
+
+    store, run, lease, provider, sessions = setup_source_run(
+        tmp_path, base_source=large_source(0), head_source=large_source(1))
+    run.configuration.options.limits.total_input_tokens = None
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    requests = []
+    initial_sizes = {}
+
+    def transport(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        names = {tool["function"]["name"] for tool in payload["tools"]}
+        packet = json.loads(payload["messages"][1]["content"])
+        extra_calls = []
+        if "OverviewOutput" in names:
+            name, result = "OverviewOutput", {
+                "change_overview": [{"text": "调整固定列表值。", "source_refs": ["S1"]}],
+            }
+        else:
+            role = "reviewer" if "UnitCompletion" in names else "verifier"
+            initial_sizes[role] = tokens({"messages": payload["messages"], "tools": payload["tools"]})
+            assert initial_sizes[role] > minimum_input
+            assert initial_sizes[role] + run.configuration.options.limits.output_tokens \
+                < run.configuration.options.limits.context_tokens
+            assert not packet["missing_material"]
+            assert {material["member"]["id"] for material in packet["materials"]} == set(
+                run.plan.units[0].required_hunk_ids)
+            if role == "reviewer":
+                refs = [source["source_ref"] for material in packet["materials"]
+                        for source in material["sources"]]
+                name, result = "submit_candidate", {"proposal": {
+                    "claim": "固定源码候选夹具", "trigger": "指定输入", "impact": "结果改变",
+                    "source_refs": refs,
+                }}
+                extra_calls = [{"id": "done", "type": "function", "function": {
+                    "name": "UnitCompletion", "arguments": "{}"}}]
+            else:
+                assert not packet["missing_candidate_materials"]
+                name, result = "VerificationOutput", {
+                    "verdict": "refuted", "attribution": "uncertain",
+                    "reason": "固定源码仅修改列表值，未发生候选所称的操作失败。",
+                    "source_refs": [source["source_ref"] for source in packet["candidate_materials"]],
+                }
+        return httpx.Response(200, json={
+            "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": f"call-{len(requests)}", "type": "function", "function": {
+                        "name": name, "arguments": json.dumps(result)},
+                }, *extra_calls],
+            }}],
+            "usage": {"prompt_tokens": 100_000, "completion_tokens": 5, "total_tokens": 100_005},
+        })
+
+    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1",
+                          http_client=client, max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert set(initial_sizes) == {"reviewer", "verifier"}
+    assert report.status == "completed"
+    assert len(requests) == report.usage["model_calls"] == 3
+    assert report.candidates[0].verification.verdict == "refuted"
+    assert not report.findings
 
 
 async def test_real_provider_adapter_uses_tools_and_all_calls_have_tickets(tmp_path):
@@ -102,7 +176,7 @@ async def test_short_investigation_notes_preserve_cache_prefix_and_unresolved_re
             else:
                 assert "return 42" in receipts[0]["content"]
                 name, result = "UnitCompletion", {
-                    "unresolved_reason": "仍需确认其他消费者的输入约束。",
+                    "unresolved": completion_gap("仍需确认其他消费者的输入约束。"),
                 }
         return httpx.Response(200, json={
             "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
@@ -132,7 +206,8 @@ async def test_short_investigation_notes_preserve_cache_prefix_and_unresolved_re
     assert len(state["receipts"]) == 4
 
 
-async def test_capacity_epochs_restore_archived_query_and_source_through_http_tools(tmp_path):
+@pytest.mark.parametrize("thinking", [False, True])
+async def test_capacity_epochs_restore_archived_query_and_source_through_http_tools(tmp_path, thinking):
     support = {
         f"branch_{branch}.py": "\n".join(
             f"ITEM_{index} = '{branch} alpha{index} beta{index} gamma{index} delta{index} epsilon{index}'"
@@ -153,6 +228,12 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
     def transport(request):
         nonlocal action_step, checkpoint_calls, recall_call_id, reread_call_id
         payload = json.loads(request.content)
+        if thinking:
+            assert payload["thinking"] == {"type": "enabled"}
+            assert payload.get("tool_choice", "auto") == "auto"
+            for previous in payload["messages"]:
+                if previous["role"] == "assistant":
+                    assert previous["reasoning_content"].startswith("synthetic-reasoning-")
         names = {tool["function"]["name"] for tool in payload["tools"]}
         if "OverviewOutput" in names:
             name, result = "OverviewOutput", {
@@ -203,18 +284,24 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
                                if message.get("tool_call_id") == reread_call_id)
                 assert receipt["content"] == support["branch_0.py"]
                 restored.append("source")
-                name, result = "UnitCompletion", {"unresolved_reason": "消费者的输入契约仍未查明。"}
+                name, result = "UnitCompletion", {
+                    "unresolved": completion_gap("消费者的输入契约仍未查明。")}
         return httpx.Response(200, json={
             "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
             "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
-                "role": "assistant", "content": None, "tool_calls": [{
+                "role": "assistant", "content": None,
+                "reasoning_content": f"synthetic-reasoning-{len(reviews)}" if thinking else None,
+                "tool_calls": [{
                     "id": f"step-{len(reviews)}", "type": "function", "function": {
                         "name": name, "arguments": json.dumps(result)},
                 }],
             }}], "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105},
         })
 
-    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    model = OpenAICompatibleProvider(
+        "fixture", "https://example.test/v1", "fixture",
+        provider_name="deepseek" if thinking else "openai-compatible",
+        thinking=thinking).agent_model()
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
         sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client,
                           max_retries=0)
@@ -265,7 +352,7 @@ async def test_small_unit_checkpoint_keeps_tools_for_concrete_followup(tmp_path,
                 assert "read_file" in names
                 assert "Small-unit coverage checkpoint" not in payload["messages"][-1]["content"]
                 name, result = "UnitCompletion", {
-                    "unresolved_reason": "尚未查明零输入约束。" if unfinished else None,
+                    "unresolved": completion_gap("尚未查明零输入约束。") if unfinished else None,
                 }
         return httpx.Response(200, json={
             "id": "chat", "object": "chat.completion", "created": 1, "model": "fixture",
@@ -314,7 +401,7 @@ async def test_last_allowed_request_finishes_instead_of_starting_more_tools(
         elif names == {"UnitCompletion", "submit_candidate"}:
             finalizations.append(payload)
             name, result = "UnitCompletion", {
-                "unresolved_reason": "尚未查明外部调用方的零输入约束。" if unfinished else None,
+                "unresolved": completion_gap("尚未查明外部调用方的零输入约束。") if unfinished else None,
             }
         else:
             name, result = "read_file", {"path": "a.py", "revision": "head", "start": 1, "end": 2}
@@ -515,8 +602,10 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
 
 
 @pytest.mark.parametrize("boundary", [
-    "long", "arguments", "cursor", "loop", "loop_unresolved", "loop_refuses", "loop_corrects",
+    "long", "arguments", "line_arguments", "cursor", "loop", "loop_unresolved",
+    "loop_refuses", "loop_corrects",
     "loop_invalid", "loop_unknown", "loop_recovers",
+    "alternating_loop",
     "input_tokens", "output_tokens", "time",
 ])
 async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, boundary, monkeypatch):
@@ -577,13 +666,16 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                 and (boundary != "loop_recovers" or len(review_requests) <= 3)
                 and boundary != "cursor"
             ):
-                start = len(review_requests) + 5 if boundary == "long" else 1
+                start = (len(review_requests) + 5 if boundary == "long" else
+                         1 + (len(review_requests) % 2) if boundary == "alternating_loop" else 1)
                 name, result = "read_file", {"path": "a.py", "revision": "head",
                                              "start": start, "end": start + 1}
                 if boundary == "loop_invalid" or (boundary == "arguments" and len(review_requests) == 1):
                     result.pop("end")
                 elif boundary == "loop_unknown":
                     name, result = "unregistered_tool", {}
+                elif boundary == "line_arguments" and len(review_requests) == 1:
+                    result["end_line"] = result.pop("end")
             else:
                 if boundary == "loop_corrects" and len(review_requests) == 6:
                     return httpx.Response(200, json={
@@ -592,7 +684,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                             "message": {"role": "assistant", "content": "Completed checks."}}],
                         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
                 name, result = "UnitCompletion", {
-                    "unresolved_reason": "尚未查明调用方的零输入约束。"
+                    "unresolved": completion_gap("尚未查明调用方的零输入约束。")
                     if boundary == "loop_unresolved" else None,
                 }
         return httpx.Response(200, json={"id": "chat", "object": "chat.completion", "created": 1,
@@ -627,6 +719,10 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         assert json.loads(error["content"])["error"] == "invalid_tool_arguments"
         assert "end" in json.loads(error["content"])["required_arguments"]
         assert "read_file" in {tool["function"]["name"] for tool in review_requests[-1]["tools"]}
+    elif boundary == "line_arguments":
+        error = next(message for message in review_requests[1]["messages"]
+                     if message["role"] == "tool")
+        assert json.loads(error["content"])["argument_corrections"] == {"end_line": "end"}
     elif boundary == "cursor":
         assert len(review_requests) == 4
         assert report.units[0].tool_calls == 3
@@ -640,6 +736,12 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         assert report.units[0].status == "completed"
         assert report.units[0].tool_calls == 4
         assert "read_file" in {tool["function"]["name"] for tool in review_requests[-1]["tools"]}
+    elif boundary == "alternating_loop":
+        assert len(review_requests) == 11
+        assert report.units[0].tool_calls == 10
+        assert "cycles of 2 tool rounds" in review_requests[-1]["messages"][-1]["content"]
+        assert {tool["function"]["name"] for tool in review_requests[-1]["tools"]} == {
+            "submit_candidate", "UnitCompletion"}
     elif boundary.startswith("loop"):
         assert len(review_requests) == (7 if boundary in {"loop_refuses", "loop_corrects"} else 6)
         assert report.units[0].status == ("interrupted" if boundary == "loop_refuses" else "completed")
@@ -696,6 +798,11 @@ async def test_low_novelty_keeps_tools_for_a_specific_followup(tmp_path, role, i
             if step == 1:
                 assert not any("Runtime guidance (trusted host):" in (message.get("content") or "")
                                for message in payload["messages"])
+            if step == 5 and investigation == "overlapping_reads":
+                assert "Earlier source reads already covered" in payload["messages"][-1]["content"]
+                assert "restore archived bodies when needed" in payload["messages"][-1]["content"]
+            if investigation == "empty_searches":
+                assert "Earlier source reads already covered" not in payload["messages"][-1]["content"]
             assert "Close now because of" not in payload["messages"][-1]["content"]
             if step <= 6 and investigation == "overlapping_reads":
                 name, result = "read_file", {

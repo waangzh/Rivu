@@ -124,6 +124,20 @@ export interface Candidate {
   previous_candidate_id: string | null;
 }
 
+export interface CompletionGap {
+  required_check: string;
+  observation: string;
+  missing_premise: string;
+  why_required: string;
+  source_refs: string[];
+}
+
+export interface WorkItemResult {
+  [key: string]: unknown;
+  unresolved?: CompletionGap | null;
+  unresolved_reason?: string | null;
+}
+
 export interface WorkItem {
   id: string;
   kind: 'review' | 'verification';
@@ -139,7 +153,7 @@ export interface WorkItem {
   missing_material_reasons: Record<string, string>;
   material_delivery: 'complete' | 'incomplete' | 'not_started';
   error_code: string | null;
-  result: Record<string, unknown> | null;
+  result: WorkItemResult | null;
   tool_calls: number;
   reused_from: string | null;
 }
@@ -270,6 +284,8 @@ export interface Run {
     provider: string;
     endpoint: string;
     model: string;
+    thinking: boolean;
+    reasoning_effort: 'low' | 'high' | 'max' | null;
     options: ReviewOptions;
     prompt_version: string;
   };

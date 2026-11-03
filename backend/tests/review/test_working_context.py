@@ -7,7 +7,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.review.context import AgentContext, InvestigationState
 from app.review.domain import Limits
-from app.review.planner import tokens
+from app.review.planner import tokens, unit_capacity
+from app.review.store import VERIFICATION_INPUT, review_input_estimate, verification_input_limit
 from app.review.working_context import WorkingContext
 from tests.review.test_context_efficiency import packet, source
 from tests.review.vnext_helpers import setup_source_run
@@ -49,6 +50,32 @@ def memory(projected):
 
 def source_text(projected):
     return "\n".join(item.content for item in projected)
+
+
+def test_initial_packet_capacity_is_independent_of_grouping_capacity():
+    limits = Limits(context_tokens=1_000_000, output_tokens=125_000)
+    assert WorkingContext.initial_ceiling(limits) == 873_976
+    assert WorkingContext.initial_budget(limits) == 873_976
+    assert verification_input_limit(limits) == 873_976
+    assert unit_capacity(limits) == 200_000
+    assert review_input_estimate(SimpleNamespace(estimated_input_tokens=300_000), limits) == 604_096
+    assert review_input_estimate(SimpleNamespace(estimated_input_tokens=900_000), limits) == 873_976
+
+
+@pytest.mark.parametrize(("context_tokens", "output_tokens", "expected"), [
+    (24_576, 4096, 19_456),
+    (65_536, 4096, 60_416),
+])
+def test_removing_32k_ceiling_preserves_small_window_headroom(context_tokens, output_tokens, expected):
+    limits = Limits(context_tokens=context_tokens, output_tokens=output_tokens)
+    assert WorkingContext.initial_ceiling(limits) == context_tokens - output_tokens - 1024
+    assert WorkingContext.initial_budget(limits) == expected
+
+
+def test_bounded_verification_still_keeps_its_shared_budget_reservation():
+    limits = Limits(context_tokens=1_000_000, output_tokens=125_000, total_input_tokens=250_000)
+    assert verification_input_limit(limits) == VERIFICATION_INPUT
+    assert verification_input_limit(limits, committed_input_tokens=40_000) == 10_000
 
 
 def test_short_context_notes_do_not_rewrite_a_cached_prefix():
@@ -316,12 +343,15 @@ async def test_archive_and_scoped_recall_survive_reopening_the_store(tmp_path):
     assert recalled["original"]["result"] == result
     assert recalled["original"]["arguments"]["revision"] == "base"
     assert context.visible == {}
+    context.repeated_source_read_count = 3
     await context.persist()
     reopened = type(store)(sessions).work_items(run.id)[0]
     state = json.loads(provider.evidence.artifacts.read_text(reopened.context_archive_uri))
     assert state["attempt_id"] == work.attempt_id
     assert json.loads(provider.evidence.artifacts.read_text(state["initial_context"]["uri"])) == {}
     assert state["receipts"][receipt_ref]["sha256"] == context.receipts[receipt_ref]["sha256"]
+    assert state["investigation_efficiency"]["repeated_source_read_count"] == 3
     other = AgentContext(provider=provider, work=work.model_copy(update={"attempt_id": "other"}), budget=None)
+    assert other.repeated_source_read_count == 0
     with pytest.raises(ValueError, match="receipt_not_visible"):
         await other.recall(receipt_ref)

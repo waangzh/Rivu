@@ -5,6 +5,7 @@ import fnmatch
 import json
 import re
 import subprocess
+from functools import lru_cache
 from uuid import uuid4
 
 from app.review.evidence import SourceReadError, digest, source_lines
@@ -22,7 +23,8 @@ def _size(value):
 
 def _limit(value, maximum):
     if type(value) is not int or not 1 <= value <= maximum:
-        raise ValueError("invalid_page_size")
+        raise SourceReadError("invalid_page_size", minimum=1, maximum=maximum,
+                              next_action=f"Use an integer limit between 1 and {maximum}.")
 
 
 def _scope(context, operation, parameters):
@@ -61,22 +63,65 @@ def _page(context, scope, cursor, position, has_more, *, unreadable_total=0, sea
         next_cursor = digest(uuid4().hex)
         context.cursors[next_cursor] = {"scope": scope, "position": position[0], "column": position[1],
                                        "unreadable_files": unreadable_total, "search_window": search_window}
-    return {"ok": True, **body, "pagination_id": scope, "cursor": cursor,
+    return {"ok": True, **body,
+            **({"scope_empty": body["scope_files"] == 0} if "scope_files" in body else {}),
+            "pagination_id": scope, "cursor": cursor,
             "next_cursor": next_cursor, "has_more": has_more, "truncated": False}
 
 
-def _paths(context, path="", glob=""):
+def _validate_glob(pattern):
+    if pattern.startswith("!"):
+        raise SourceReadError("unsupported_glob",
+            next_action="Use a positive glob; put exclusions in exclude_globs without a leading !.")
+    if (len(pattern) > 200 or "\\" in pattern or "\x00" in pattern
+            or ".." in pattern.split("/")):
+        raise SourceReadError("invalid_path_filter")
+
+
+def _exclusions(patterns):
+    if patterns is None:
+        return []
+    if (not isinstance(patterns, list) or len(patterns) > 16
+            or any(not isinstance(pattern, str) or not pattern for pattern in patterns)):
+        raise SourceReadError("invalid_exclude_globs",
+                              next_action="Supply at most 16 nonempty positive glob strings.")
+    for pattern in patterns:
+        _validate_glob(pattern)
+    return sorted(set(patterns))
+
+
+def _matches_glob(path, pattern):
+    path_parts = path.split("/")
+    pattern_parts = pattern.split("/") if "/" in pattern else ["**", pattern]
+
+    @lru_cache(maxsize=None)
+    def matches(path_index, pattern_index):
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        component = pattern_parts[pattern_index]
+        if component == "**":
+            return (matches(path_index, pattern_index + 1)
+                    or path_index < len(path_parts) and matches(path_index + 1, pattern_index))
+        return (path_index < len(path_parts)
+                and fnmatch.fnmatchcase(path_parts[path_index], component)
+                and matches(path_index + 1, pattern_index + 1))
+
+    return matches(0, 0)
+
+
+def _paths(context, path="", glob="", exclude_globs=None):
     if path:
         _validate_repository_relative_path(path.rstrip("/"))
         if path.rstrip("/") in context.denied_paths or is_sensitive_repository_path(path.rstrip("/")):
             raise ValueError("path_not_authorized")
-    if len(glob) > 200 or "\\" in glob or "\x00" in glob or ".." in glob.split("/"):
-        raise ValueError("invalid_path_filter")
+    _validate_glob(glob)
+    exclusions = _exclusions(exclude_globs)
     prefix = path.rstrip("/")
     return sorted(item for item in context.evidence.allowed_paths
         if item not in context.denied_paths and not is_sensitive_repository_path(item)
         and (not prefix or item == prefix or item.startswith(prefix + "/"))
-        and (not glob or fnmatch.fnmatchcase(item, glob)))
+        and (not glob or _matches_glob(item, glob))
+        and not any(_matches_glob(item, pattern) for pattern in exclusions))
 
 
 def _matching_paths(service, paths, side, query):
@@ -109,12 +154,16 @@ def _matching_paths(service, paths, side, query):
     return service.git.find_matching_paths(service.repo_path, sha, query, readable), unreadable, excluded, processed
 
 
-async def search(context, query, path="", glob="", side="head", cursor="", limit=12):
+async def search(context, query, path="", glob="", side="head", cursor="", limit=12,
+                 *, exclude_globs=None):
     _limit(limit, 40)
     if not query or len(query) > 200 or "\x00" in query or "\n" in query or side not in {"head", "base"}:
         raise ValueError("invalid_search")
-    paths = _paths(context, path, glob)
-    scope = _scope(context, "search", [query, path, glob, side])
+    exclusions = _exclusions(exclude_globs)
+    paths = _paths(context, path, glob, exclusions)
+    filters = {"query": query, "path": path, "glob": glob,
+               "exclude_globs": exclusions, "revision": side}
+    scope = _scope(context, "search", filters)
     first, line_start, prior_unreadable = await asyncio.to_thread(
         _position, context, cursor, scope, len(paths))
     window = None
@@ -168,22 +217,25 @@ async def search(context, query, path="", glob="", side="head", cursor="", limit
                     policy_exclusions=len(excluded),
                     search_window=window,
                     unreadable_total=prior_unreadable + unreadable,
-                    scope_files=len(paths), scope_complete=False)
+                    scope_files=len(paths), scope_complete=False, filters=filters)
             matches.append(match)
     return await asyncio.to_thread(
         _page, context, scope, cursor, (stop, 0), stop < len(paths), source="search_hint",
         matches=matches, scanned_files=scanned, matched_files=matched, unreadable_files=unreadable,
         policy_exclusions=len(excluded),
         unreadable_total=prior_unreadable + unreadable,
-        scope_files=len(paths), scope_complete=stop == len(paths) and not (prior_unreadable + unreadable))
+        scope_files=len(paths), scope_complete=stop == len(paths) and not (prior_unreadable + unreadable),
+        filters=filters)
 
 
-def find_paths(context, query="", path="", glob="", cursor="", limit=80):
+def find_paths(context, query="", path="", glob="", cursor="", limit=80, *, exclude_globs=None):
     _limit(limit, 80)
     if len(query) > 200 or "\x00" in query:
         raise ValueError("invalid_path_query")
-    paths = [item for item in _paths(context, path, glob) if query in item]
-    scope = _scope(context, "paths", [query, path, glob])
+    exclusions = _exclusions(exclude_globs)
+    paths = [item for item in _paths(context, path, glob, exclusions) if query in item]
+    filters = {"query": query, "path": path, "glob": glob, "exclude_globs": exclusions}
+    scope = _scope(context, "paths", filters)
     index, column, _ = _position(context, cursor, scope, len(paths))
     if column:
         raise ValueError("invalid_cursor")
@@ -196,7 +248,7 @@ def find_paths(context, query="", path="", glob="", cursor="", limit=80):
         selected.append(paths[index])
         index += 1
     return _page(context, scope, cursor, (index, 0), index < len(paths),
-                 source="path_hint", paths=selected, scope_files=len(paths))
+                 source="path_hint", paths=selected, scope_files=len(paths), filters=filters)
 
 
 def diff_page(context, path, hunk_index=None, start=0, cursor="", limit=60):

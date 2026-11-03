@@ -39,7 +39,7 @@ def refine_plan(run, previous, previous_work, git, repo, history):
         for unit in previous.plan.units
         for work in previous_work if work.unit_id == unit.id and work.kind == "review"
         and work.status == "completed" and work.material_delivery == "complete"
-        and not (work.result or {}).get("unresolved_reason")
+        and not work.has_unresolved_investigation
         for key in unit.required_hunk_ids}
     units, reused = [], False
     for unit in run.plan.units:

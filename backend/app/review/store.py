@@ -32,8 +32,7 @@ def cached_input_tokens(usage):
 
 def verification_input_limit(limits, committed_input_tokens=0):
     if limits.total_input_tokens is None:
-        from app.review.planner import unit_capacity
-        return max(1, min(unit_capacity(limits), limits.context_tokens - limits.output_tokens - 1024))
+        return max(1, limits.context_tokens - limits.output_tokens - 1024)
     available = [VERIFICATION_INPUT, limits.context_tokens - limits.output_tokens]
     if limits.total_input_tokens is not None:
         available.append(limits.total_input_tokens - committed_input_tokens - OVERVIEW_INPUT)
@@ -41,8 +40,8 @@ def verification_input_limit(limits, committed_input_tokens=0):
 
 
 def review_input_estimate(unit, limits):
-    from app.review.planner import unit_capacity
-    return min(unit.estimated_input_tokens * 2 + 4096, unit_capacity(limits))
+    return min(unit.estimated_input_tokens * 2 + 4096,
+               max(1, limits.context_tokens - limits.output_tokens - 1024))
 
 
 class LeaseLost(RuntimeError):

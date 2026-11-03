@@ -14,6 +14,16 @@ from app.review.store import OVERVIEW_INPUT, ReviewStore
 from app.services.review.task_queue import DatabaseTaskQueue
 
 
+def completion_gap(missing_premise="尚未确定调用方允许的输入。", source_refs=None):
+    return {
+        "required_check": "确认本次输入处理变更与调用契约一致。",
+        "observation": "已读取的源码包含以输入值参与的比例计算。",
+        "missing_premise": missing_premise,
+        "why_required": "此契约决定变更后的计算路径是否允许被调用，现有源码未能确定。",
+        "source_refs": ["S1"] if source_refs is None else source_refs,
+    }
+
+
 def setup_run(tmp_path, *, calls=20, input_tokens=OVERVIEW_INPUT + 94_000, concurrency=2):
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}",
                           connect_args={"check_same_thread": False, "timeout": 30})

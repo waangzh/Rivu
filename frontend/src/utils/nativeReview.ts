@@ -1,4 +1,4 @@
-import type { FileContext, Report, Run, ReviewOptions } from '../types/review';
+import type { FileContext, Report, Run, ReviewOptions, WorkItem } from '../types/review';
 
 export const terminal = (status: string) =>
   ['completed', 'partial', 'failed', 'cancelled'].includes(status);
@@ -50,6 +50,9 @@ export const reviewReasonLabel = (reason: string) =>
   ({
     unverified_historical_candidates: '仍有增量复核项未完成。',
   })[reason] || reason;
+
+export const hasUnresolvedInvestigation = (item: WorkItem) =>
+  item.kind === 'review' && Boolean(item.result?.unresolved || item.result?.unresolved_reason);
 
 export function observedUsage(report: Pick<Report, 'usage'> | null) {
   if (!report) return {
