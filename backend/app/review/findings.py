@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from app.review.domain import Candidate, Finding
+from app.review.domain import Candidate, Finding, FindingGroup
 from app.review.planner import identity
 
 
@@ -12,11 +12,10 @@ def admit_candidate(proposal, context, tool_call_id):
     if any(ref.review_id != snapshot.review_id or ref.commit_sha != (
             snapshot.head_sha if ref.side == "head" else snapshot.base_sha) for ref in refs):
         raise ValueError("candidate_snapshot_mismatch")
-    if proposal.location and not any(
-        ref.path == proposal.location.path and ref.side == proposal.location.side
-        and ref.start_line <= proposal.location.line <= ref.end_line for ref in refs
-    ):
+    if proposal.location and not location_sourced(proposal.location, refs):
         raise ValueError("candidate_location_not_sourced")
+    if proposal.root_cause and not location_sourced(proposal.root_cause.location, refs):
+        raise ValueError("root_cause_not_sourced")
     return Candidate(id=uuid4().hex, unit_id=context.work.unit_id,
         attempt_id=context.work.attempt_id, tool_call_id=tool_call_id,
         proposal=proposal, sources=refs)
@@ -24,7 +23,8 @@ def admit_candidate(proposal, context, tool_call_id):
 
 def finding_digest(candidate, snapshot):
     return identity({"snapshot": snapshot.model_dump(), "candidate_id": candidate.id,
-        "proposal": candidate.proposal.model_dump(),
+        "proposal": candidate.proposal.model_dump(
+            exclude={"root_cause"} if candidate.proposal.root_cause is None else set()),
         "verification": candidate.verification.model_dump(exclude_none=True),
         "sources": [ref.model_dump() for ref in candidate.verification_sources]})
 
@@ -33,12 +33,29 @@ def verified_description(candidate):
     return candidate.verification.verified_claim or candidate.proposal
 
 
+def location_sourced(location, refs):
+    return any(ref.path == location.path and ref.side == location.side
+               and ref.start_line <= location.line <= ref.end_line for ref in refs)
+
+
+def candidate_summary(candidate):
+    output = candidate.verification
+    root = output.root_cause if output and output.verdict == "confirmed" else candidate.proposal.root_cause
+    return {"id": candidate.id, "claim": candidate.proposal.claim[:300],
+            "trigger": candidate.proposal.trigger[:300], "impact": candidate.proposal.impact[:300],
+            "location": candidate.proposal.location.model_dump() if candidate.proposal.location else None,
+            "root_cause": root.model_dump() if root else None,
+            "status": output.verdict if output else "unverified"}
+
+
 def verification_problem(output, refs, changed_files):
     """Return the admission failure code for a verifier output, if any."""
     if not refs and (output.verdict in {"confirmed", "refuted"}
                      or (output.verdict == "insufficient" and output.question is not None)):
         return "missing_decision_sources"
     if output.verdict == "confirmed":
+        if output.root_cause and not location_sourced(output.root_cause.location, refs):
+            return "root_cause_not_sourced"
         if (output.severity is None or not output.reason.strip()
                 or not output.author_comment or not output.author_comment.strip()):
             return "missing_confirmed_fields"
@@ -83,17 +100,35 @@ def admit_verification(candidate, output, context):
     return candidate
 
 
-def aggregate(candidates):
-    findings, seen = [], set()
+def group_findings(candidates):
+    grouped = {}
     for candidate in candidates:
         finding = candidate.finding
-        if finding is None:
+        if (finding is None or candidate.admission_reason or candidate.verification is None
+                or candidate.verification.verdict != "confirmed"):
             continue
-        key = identity([finding.claim, finding.trigger, finding.impact, finding.severity,
-                        finding.attribution, finding.author_comment,
-                        finding.location.model_dump() if finding.location else None,
-                        sorted(ref.id for ref in finding.sources)])
-        if key not in seen:
-            findings.append(finding)
-            seen.add(key)
-    return findings
+        output = candidate.verification
+        root = output.root_cause
+        if (root and location_sourced(root.location, candidate.verification_sources)
+                and (finding.location is None
+                     or location_sourced(finding.location, candidate.verification_sources))):
+            origins = sorted({(ref.review_id, ref.commit_sha) for ref in candidate.verification_sources
+                              if location_sourced(root.location, [ref])})
+            key = identity(["root_cause", root.model_dump(), origins, finding.severity,
+                            finding.attribution, finding.publishable])
+        else:
+            key = identity(["exact", finding.claim, finding.trigger, finding.impact, finding.severity,
+                            finding.attribution, finding.author_comment,
+                            finding.location.model_dump() if finding.location else None,
+                            sorted(ref.id for ref in finding.sources)])
+        grouped.setdefault(key, []).append(finding)
+    groups = list(grouped.values())
+    return [FindingGroup(
+        representative_id=next((item.id for item in items
+                                if item.location and item.location.side == "head"), items[0].id),
+        member_candidate_ids=[item.candidate_id for item in items]) for items in groups]
+
+
+def aggregate(candidates):
+    by_id = {item.finding.id: item.finding for item in candidates if item.finding}
+    return [by_id[group.representative_id] for group in group_findings(candidates)]

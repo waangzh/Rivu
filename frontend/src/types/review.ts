@@ -78,6 +78,14 @@ export interface CandidateInput {
   impact: string;
   source_refs: string[];
   location: Location | null;
+  root_cause: RootCause | null;
+}
+
+export interface RootCause {
+  claim: string;
+  trigger: string;
+  impact: string;
+  location: Location;
 }
 
 export interface VerificationOutput {
@@ -88,6 +96,7 @@ export interface VerificationOutput {
   source_refs: string[];
   author_comment: string | null;
   verified_claim: Pick<CandidateInput, 'claim' | 'trigger' | 'impact'> | null;
+  root_cause: RootCause | null;
   question: {
     observation: string;
     missing_premise: string;
@@ -123,6 +132,11 @@ export interface Candidate {
   question_digest: string | null;
   finding: Finding | null;
   previous_candidate_id: string | null;
+}
+
+export interface FindingGroup {
+  representative_id: string;
+  member_candidate_ids: string[];
 }
 
 export interface CompletionGap {
@@ -227,6 +241,7 @@ export interface Report {
   status: RunStatus;
   findings: Finding[];
   candidates: Candidate[];
+  finding_groups: FindingGroup[];
   units: WorkItem[];
   excluded: Record<string, string>;
   overview: Overview;

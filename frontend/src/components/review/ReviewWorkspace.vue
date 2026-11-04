@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { getFindings, getProgress, getPublicationPlan, getReport } from '../../api/client';
-import type { Candidate, Finding, Report, ReviewProgress, Run } from '../../types/review';
+import type { Candidate, Finding, FindingGroup, Report, ReviewProgress, Run } from '../../types/review';
 import type { PublicationPlan } from '../../types/publication';
 import { reviewPrimarySections, type ReviewSection } from '../../types/workspace';
 import { executionErrorLabel, phaseLabel, reviewTitle, safeGitHubLink, terminal } from '../../utils/nativeReview';
@@ -50,6 +50,7 @@ async function inspectPublication() {
 const plan = ref<PublicationPlan | null>(null);
 const findings = ref<Finding[]>([]);
 const candidates = ref<Candidate[]>([]);
+const findingGroups = ref<FindingGroup[]>([]);
 const findingsLoaded = ref(false);
 const progress = ref<ReviewProgress | null>(null);
 const syncedAt = ref<number | null>(null);
@@ -118,6 +119,7 @@ async function load() {
     if (nextFindings.status === 'fulfilled') {
       findings.value = nextFindings.value.findings;
       candidates.value = nextFindings.value.candidates;
+      findingGroups.value = nextFindings.value.finding_groups;
       findingsLoaded.value = true;
     }
     if (nextReport.status === 'fulfilled') {
@@ -200,7 +202,7 @@ function exportReport() {
 
   <ReviewOverviewPage v-if="tab === 'overview'" :task="task" :report="report" :findings="findings" :loading="loading" @navigate="tab = $event" @retry-overview="$emit('overviewRetry')" />
   <ReviewFilesPage v-else-if="tab === 'changes'" :task="task" :findings="findings" @finding="tab = 'findings'" />
-  <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :loading="loading" />
+  <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :finding-groups="findingGroups" :loading="loading" />
   <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="progress?.units ?? []" :usage="progress?.usage" :report="report" :candidates="candidates" :findings-count="findings.length" :findings-loaded="findingsLoaded" :loaded="!!progress" :synced-at="syncedAt" :sync-error="connectionError || progressError" @navigate="tab = $event" @refresh="refreshData" />
   <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" :publish-open="publishOpen" @update:publish-open="publishOpen = $event" @export="exportReport" />
 

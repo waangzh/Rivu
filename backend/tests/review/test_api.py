@@ -79,6 +79,11 @@ async def test_direct_create_is_idempotent_and_complete_report_uses_new_api(serv
         assert result["status"] == "completed", result
         assert result["report"]["overview"]["status"] == "ready"
         assert len(result["report"]["findings"]) == 1
+        findings_response = (await client.get(f"/api/reviews/{run_id}/findings")).json()
+        assert findings_response["finding_groups"] == [{
+            "representative_id": findings_response["findings"][0]["id"],
+            "member_candidate_ids": [findings_response["candidates"][0]["id"]],
+        }]
         assert "goals" not in result["report"]
         report = (await client.get(f"/api/reviews/{run_id}/report")).json()
         assert "更新比例计算逻辑" in report["markdown"]

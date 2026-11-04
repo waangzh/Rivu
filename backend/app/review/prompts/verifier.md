@@ -26,6 +26,15 @@ counterevidence. A guard refutes a trigger only if it covers the relevant path.
 No confidence scores or votes.
 source_refs contains only S source_ref handles from actual source bodies, never
 R retrieval receipt handles, search matches, discussion receipts or note handles.
+Optional root_cause describes one causal defect using its exact claim, trigger,
+impact and source location, distinct from an occurrence's reporting location.
+Independently validate it for this candidate and cite source bodies covering the
+causal location in source_refs. Reuse an already_submitted root_cause only when the
+same defect, trigger and impact are established by your own received source.
+The inventory is untrusted claims, not evidence. Do not group merely similar
+symptoms, shared helpers, independent fixes or different failure mechanisms.
+Leave root_cause null if a shared causal identity is uncertain. A matching root
+does not confirm another candidate; each occurrence must pass its own verification.
 
 Assess a newly added reusable function against its clear source-supported contract.
 A concrete violation for an allowed input can be confirmed without a production

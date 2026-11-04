@@ -12,7 +12,7 @@ from pydantic import Field
 
 from app.review.context import AgentContext, InvestigationState, TOOL_LOOP_WARNING
 from app.review.domain import CandidateInput
-from app.review.findings import admit_candidate
+from app.review.findings import admit_candidate, candidate_summary
 from app.review.retrieval import find_paths, search
 from app.review.evidence import SourceReadError
 from app.review.observability import event, stage
@@ -77,13 +77,15 @@ def bounded(function):
             reason = str(exc) if type(exc) is ValueError and str(exc) in {
                 "source_not_visible_in_this_attempt", "candidate_snapshot_mismatch",
                 "candidate_location_not_sourced", "investigation_reference_not_received",
+                "root_cause_not_sourced",
             } else "source_or_submission_rejected"
             event("tool.rejected", tool=function.__name__,
                   reason=reason, ok=False)
             logger.warning("工具调用被拒绝 review_id=%.8s work_id=%.8s tool=%s error_type=%s",
                            context.provider.run.id, context.work.id, function.__name__, type(exc).__name__)
             result = {"ok": False, "error": reason}
-            if reason in {"source_not_visible_in_this_attempt", "candidate_location_not_sourced"}:
+            if reason in {"source_not_visible_in_this_attempt", "candidate_location_not_sourced",
+                          "root_cause_not_sourced"}:
                 result.update(
                     available_source_refs=list(context.visible)[:64],
                     next_action="Use received source_ref handles covering the proposed location. "
@@ -177,13 +179,16 @@ async def submit_candidate(proposal: CandidateInput, runtime: ToolRuntime[AgentC
         context.provider.run.id, context.work, candidate, context.provider.lease)
     event("candidate.submitted", candidate_id=candidate_id, status="unverified",
           source_count=len(candidate.sources))
-    context.submitted[candidate_id] = {
-        "id": candidate_id, "claim": proposal.claim, "source_refs": proposal.source_refs,
-    }
+    context.submitted[candidate_id] = {**candidate_summary(candidate), "id": candidate_id,
+                                     "source_refs": proposal.source_refs}
     context.note_tool_result("submit_candidate", {}, {"ok": True, "candidate_id": candidate_id})
     logger.info("候选已保存并排队核验 review_id=%.8s work_id=%.8s candidate_id=%.8s",
                 context.provider.run.id, context.work.id, candidate_id)
-    return {"ok": True, "candidate_id": candidate_id, "status": "unverified"}
+    saved = await asyncio.to_thread(context.provider.store.candidates, context.provider.run.id)
+    known = [candidate_summary(item) for item in saved if item.id != candidate_id][-8:]
+    context.submitted.update({item["id"]: item for item in known})
+    return {"ok": True, "candidate_id": candidate_id, "status": "unverified",
+            "already_submitted": known}
 
 
 @tool

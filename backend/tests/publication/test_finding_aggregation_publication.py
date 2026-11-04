@@ -112,10 +112,12 @@ def test_absent_optional_verifier_details_do_not_invalidate_existing_admission_d
 
     run, _ = normalized_run
     candidate = run.report.candidates[0]
-    original_verification = candidate.verification.model_dump(exclude={"verified_claim", "question"})
+    original_verification = candidate.verification.model_dump(
+        exclude={"verified_claim", "question", "root_cause"})
     original_digest = identity({
         "snapshot": run.snapshot.model_dump(), "candidate_id": candidate.id,
-        "proposal": candidate.proposal.model_dump(), "verification": original_verification,
+        "proposal": candidate.proposal.model_dump(exclude={"root_cause"}),
+        "verification": original_verification,
         "sources": [ref.model_dump() for ref in candidate.verification_sources],
     })
     assert finding_digest(candidate, run.snapshot) == original_digest

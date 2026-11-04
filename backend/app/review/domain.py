@@ -56,7 +56,7 @@ class Configuration(Model):
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] | None = None
     options: Options
-    prompt_version: str = "review-vnext-11"
+    prompt_version: str = "review-vnext-12"
 
 
 class Snapshot(Model):
@@ -125,9 +125,14 @@ class FailureDescription(Model):
     impact: str = Field(min_length=1, max_length=2000)
 
 
+class RootCause(FailureDescription):
+    location: Location
+
+
 class CandidateInput(FailureDescription):
     source_refs: list[str] = Field(min_length=1, max_length=32)
     location: Location | None = None
+    root_cause: RootCause | None = None
 
 
 class VerificationQuestion(Model):
@@ -145,6 +150,7 @@ class VerificationOutput(Model):
     author_comment: str | None = Field(default=None, max_length=3000)
     verified_claim: FailureDescription | None = None
     question: VerificationQuestion | None = None
+    root_cause: RootCause | None = None
 
 
 class CompletionGap(Model):
@@ -194,6 +200,11 @@ class Candidate(Model):
     question_digest: str | None = None
     finding: Finding | None = None
     previous_candidate_id: str | None = None
+
+
+class FindingGroup(Model):
+    representative_id: str
+    member_candidate_ids: list[str]
 
 
 class WorkItem(Model):
@@ -272,6 +283,7 @@ class Report(Model):
     status: RunStatus
     findings: list[Finding]
     candidates: list[Candidate]
+    finding_groups: list[FindingGroup] = Field(default_factory=list)
     units: list[WorkItem]
     excluded: dict[str, str]
     overview: Overview = Field(default_factory=Overview)

@@ -601,6 +601,110 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
         assert all(ticket.state == "settled" for ticket in tickets)
 
 
+@pytest.mark.parametrize("mode", [
+    "recover", "repeat", "insufficient", "invented", "receipt", "exhausted", "budget",
+    "request_failure", "unknown_usage", "investigate", "format_used",
+])
+async def test_missing_change_attribution_gets_one_correction_in_original_attempt(tmp_path, mode):
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.limits.model_calls = 1 if mode == "exhausted" else 12
+    if mode == "budget":
+        run.configuration.options.limits.total_model_calls = 3
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    requests, verifier_requests = [], []
+
+    def transport(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        names = {tool["function"]["name"] for tool in payload["tools"]}
+        packet = json.loads(payload["messages"][1]["content"])
+        if "OverviewOutput" in names:
+            results = [("OverviewOutput", {
+                "change_overview": [{"text": "调整比例计算。", "source_refs": ["S1"]}],
+            })]
+        elif "UnitCompletion" in names:
+            handle = next(source["source_ref"] for material in packet["materials"]
+                          for source in material["sources"] if source["source"]["side"] == "head")
+            results = [
+                ("submit_candidate", {"proposal": {"claim": "零输入导致除零", "trigger": "x=0",
+                    "impact": "请求失败", "source_refs": [handle]}}),
+                ("UnitCompletion", {}),
+            ]
+        else:
+            verifier_requests.append(payload)
+            sources = [source for material in packet["materials"] for source in material["sources"]]
+            handles = [source["source_ref"] for source in sources]
+            head = next(source["source_ref"] for source in sources if source["source"]["side"] == "head")
+            result = {"verdict": "confirmed", "attribution": "introduced", "severity": "high",
+                "reason": "BASE 使用非零回退，HEAD 在零输入时除零。",
+                "source_refs": [head], "author_comment": "请恢复零输入回退或显式处理。"}
+            if len(verifier_requests) == 2:
+                assert names == {"VerificationOutput"}
+                if mode != "format_used":
+                    guidance = next(message["content"] for message in payload["messages"]
+                                    if isinstance(message["content"], str)
+                                    and "VerificationOutput was rejected" in message["content"])
+                    assert "missing_change_attribution_sources" in guidance
+                    assert "Do not add unrelated BASE evidence" in guidance
+                    assert "No more investigation is available" in guidance
+                assert any(source["source"]["side"] == "base" for source in sources)
+                if mode == "request_failure":
+                    return httpx.Response(503, json={"error": {"message": "fixture failure"}})
+                if mode not in {"repeat", "format_used"}:
+                    result["source_refs"] = handles
+                if mode == "insufficient":
+                    result.update(verdict="insufficient", attribution="uncertain", severity=None,
+                                  author_comment=None, reason="尚未确定零输入的调用契约。")
+                elif mode in {"invented", "receipt"}:
+                    result["source_refs"] = [head, "S999" if mode == "invented" else "R1"]
+            results = [("read_file", {"path": "a.py", "revision": "base", "start": 1, "end": 2})
+                       if mode == "investigate" and len(verifier_requests) == 2
+                       else ("VerificationOutput", result)]
+        response = {"id": "chat", "object": "chat.completion", "created": 1,
+            "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": f"call-{len(requests)}-{index}", "type": "function", "function": {
+                        "name": name, "arguments": json.dumps(result)}}
+                    for index, (name, result) in enumerate(results)]}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+        if mode == "unknown_usage" and len(verifier_requests) == 2 and "VerificationOutput" in names:
+            response.pop("usage")
+        if mode == "format_used" and len(verifier_requests) == 1 and "VerificationOutput" in names:
+            response["choices"][0].update(finish_reason="stop",
+                message={"role": "assistant", "content": "零输入存在问题，尚未提交结构化结果。"})
+        return httpx.Response(200, json=response)
+
+    model = OpenAICompatibleProvider("fixture", "https://example.test/v1", "fixture").agent_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client,
+                          max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    expected_calls = 1 if mode in {"exhausted", "budget"} else 2
+    assert len(verifier_requests) == expected_calls
+    candidate = report.candidates[0]
+    check = next(item for item in report.units if item.kind == "verification")
+    assert check.status == "completed"
+    assert check.attempt == 1
+    assert candidate.verification.verdict == ("confirmed" if mode in {"recover", "unknown_usage"}
+                                            else "insufficient")
+    assert len(report.findings) == (1 if mode in {"recover", "unknown_usage"} else 0)
+    if mode in {"invented", "receipt"}:
+        assert candidate.admission_reason == "invalid_source_refs"
+    elif mode == "insufficient":
+        assert candidate.admission_reason is None
+    elif mode not in {"recover", "unknown_usage"}:
+        assert candidate.admission_reason == "missing_change_attribution_sources"
+    assert report.usage["model_calls"] == len(requests)
+    assert report.usage["unknown_calls"] == (1 if mode in {"request_failure", "unknown_usage"} else 0)
+    with sessions() as session:
+        tickets = list(session.scalars(select(ReviewRequestOrm)))
+        verification_tickets = [ticket for ticket in tickets if ticket.kind == "verification"]
+        assert len(verification_tickets) == expected_calls
+        assert {ticket.attempt_id for ticket in verification_tickets} == {check.attempt_id}
+
+
 @pytest.mark.parametrize("boundary", [
     "long", "arguments", "line_arguments", "cursor", "loop", "loop_unresolved",
     "loop_refuses", "loop_corrects",
@@ -620,7 +724,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
     if boundary == "input_tokens":
         # Isolate token-driven closing from strict-call discovery buffers.
         run.configuration.options.limits.total_model_calls = None
-        run.configuration.options.limits.total_input_tokens = OVERVIEW_INPUT + 6000
+        run.configuration.options.limits.total_input_tokens = OVERVIEW_INPUT + 8000
         run.pr.body = "预算调查上下文。" * 100
     elif boundary == "output_tokens":
         # One discovery, one possible first verification, and the overview.

@@ -64,6 +64,7 @@ class ReferenceCorrectionModel(ReviewModel):
     correction_reads: bool = False
     correction_count: int = 0
     missing_sources: bool = False
+    missing_attribution_sources: bool = False
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         if not str(messages[0].content).startswith("Independently"):
@@ -77,7 +78,12 @@ class ReferenceCorrectionModel(ReviewModel):
         result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         call = result.generations[0].message.tool_calls[0]
         if not correcting:
-            if self.missing_sources:
+            if self.missing_attribution_sources:
+                packet = json.loads(messages[1].content)
+                call["args"]["source_refs"] = [
+                    source["source_ref"] for material in packet["materials"]
+                    for source in material["sources"] if source["source"]["side"] == "head"]
+            elif self.missing_sources:
                 call["args"]["source_refs"] = []
             else:
                 call["args"]["source_refs"].append("R1")
@@ -114,6 +120,57 @@ class QuestionReferenceModel(ReferenceCorrectionModel):
             if self.missing_after_correction:
                 payload["source_refs"] = []
         return result
+
+
+class SharedRootModel(ReviewModel):
+    reject_second: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        message = result.generations[0].message
+        call = message.tool_calls[0]
+        root = {"claim": "ratio 移除了非零回退", "trigger": "x=0", "impact": "除零异常",
+                "location": {"path": "a.py", "line": 2, "side": "head"}}
+        if call["name"] == "submit_candidate":
+            proposal = call["args"]["proposal"]
+            proposal["root_cause"] = root
+            message.tool_calls.extend([
+                {"name": "submit_candidate", "id": "second-location", "type": "tool_call",
+                 "args": {"proposal": {
+                    **proposal, "claim": "另一位置的相同零输入失败",
+                    "location": {"path": "a.py", "line": 1, "side": "head"},
+                }}},
+            ])
+        elif call["name"] == "VerificationOutput":
+            packet = json.loads(messages[1].content)
+            if self.reject_second and packet["candidate"]["claim"].startswith("另一位置"):
+                call["args"].update(verdict="insufficient", severity=None, author_comment=None,
+                                    reason="这一位置的入口契约尚未确定。")
+            else:
+                call["args"]["root_cause"] = root
+        return result
+
+
+@pytest.mark.parametrize("reject_second", [False, True])
+async def test_root_grouping_survives_concurrent_verification_and_report_reopen(tmp_path, reject_second):
+    from app.services.publication.publication_planner import PublicationPlanner
+
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    report = await ReviewOrchestrator(store, AgentRunner(SharedRootModel(
+        reject_second=reject_second))).run(run.id, provider, lease)
+    assert len(report.candidates) == 2
+    assert len([item for item in report.units if item.kind == "verification"
+                and item.status == "completed"]) == 2
+    assert len(report.findings) == len(report.finding_groups) == 1
+    assert len(report.finding_groups[0].member_candidate_ids) == (1 if reject_second else 2)
+    assert report.usage["model_calls"] == 5
+    saved = store.get(run.id)
+    assert saved.report.candidates == report.candidates
+    assert saved.report.finding_groups == report.finding_groups
+    plan = PublicationPlanner(provider.evidence.artifacts).build(saved)
+    assert len(plan.inline_drafts) == 1
+    assert not plan.withheld_findings
+    assert plan.outcome.unresolved_count == (1 if reject_second else 0)
 
 
 @pytest.mark.parametrize("missing_sources", [False, True])
@@ -298,7 +355,10 @@ async def test_failed_correction_keeps_rejected_result_and_never_reinvestigates(
 
 
 @pytest.mark.parametrize("stop", ["cancelled", "lease_lost"])
-async def test_reference_correction_propagates_cancellation_and_lease_loss(tmp_path, stop):
+@pytest.mark.parametrize("missing_attribution_sources", [False, True])
+async def test_reference_correction_propagates_cancellation_and_lease_loss(
+    tmp_path, stop, missing_attribution_sources,
+):
     from app.models.orm import ReviewTaskOrm, WorkerJobOrm
     from app.review.store import LeaseLost, ReviewStopped
 
@@ -316,13 +376,17 @@ async def test_reference_correction_propagates_cancellation_and_lease_loss(tmp_p
 
     interruption = stop
     with pytest.raises(ReviewStopped if stop == "cancelled" else LeaseLost):
-        await ReviewOrchestrator(store, AgentRunner(StopDuringCorrectionModel())).run(run.id, provider, lease)
+        await ReviewOrchestrator(store, AgentRunner(StopDuringCorrectionModel(
+            missing_attribution_sources=missing_attribution_sources))).run(run.id, provider, lease)
     assert store.candidates(run.id)[0].verification is None
     assert all(item.status != "completed" for item in store.work_items(run.id)
                if item.kind == "verification")
 
 
-async def test_reference_correction_returning_after_deadline_cannot_save_a_finding(tmp_path):
+@pytest.mark.parametrize("missing_attribution_sources", [False, True])
+async def test_reference_correction_returning_after_deadline_cannot_save_a_finding(
+    tmp_path, missing_attribution_sources,
+):
     from datetime import timedelta
     from app.models.orm import ReviewTaskOrm
     from app.review.domain import utcnow
@@ -339,7 +403,8 @@ async def test_reference_correction_returning_after_deadline_cannot_save_a_findi
                         "hard_deadline": provider.run.hard_deadline.isoformat()}
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
-    report = await ReviewOrchestrator(store, AgentRunner(LateCorrectionModel())).run(run.id, provider, lease)
+    report = await ReviewOrchestrator(store, AgentRunner(LateCorrectionModel(
+        missing_attribution_sources=missing_attribution_sources))).run(run.id, provider, lease)
     assert report.findings == []
     assert report.candidates[0].verification is None
     work = next(item for item in report.units if item.kind == "verification")

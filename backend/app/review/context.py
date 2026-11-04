@@ -11,6 +11,7 @@ from pydantic import Field
 
 from app.review.domain import Model, Snapshot, SourceRef
 from app.review.evidence import digest, source_lines
+from app.review.findings import candidate_summary
 from app.review.planner import identity, members, tokens
 from app.review.store import BudgetExceeded
 
@@ -472,9 +473,7 @@ class ContextProvider:
     async def initial(self, context, candidate=None, *, request_budget=None, estimate_request=None):
         unit = next(unit for unit in self.run.plan.units if unit.id == context.work.unit_id)
         saved = await asyncio.to_thread(self.store.candidates, self.run.id)
-        context.submitted = {
-            item.id: {"id": item.id, "claim": item.proposal.claim}
-            for item in saved if item.unit_id == unit.id}
+        saved.sort(key=lambda item: item.unit_id != unit.id)
         material, candidate_materials = [], []
         missing_candidate_materials = [
             {"path": ref.path, "side": ref.side, "start_line": ref.start_line,
@@ -492,8 +491,7 @@ class ContextProvider:
                 "title": self.run.pr.title if self.run.pr else self.run.source.title,
                 "body": (self.run.pr.body or "")[:4000] if self.run.pr else self.run.source.body},
             "unit": unit.model_dump(), "materials": material, "missing_material": context.material_failures,
-            "already_submitted": [{"id": item.id, "claim": item.proposal.claim}
-                                  for item in saved if item.unit_id == unit.id][:100],
+            "already_submitted": [candidate_summary(item) for item in saved][:100],
             "candidate": candidate.proposal.model_dump(exclude={"source_refs"}) if candidate else None,
             "candidate_materials": candidate_materials,
             "missing_candidate_materials": missing_candidate_materials,
@@ -563,4 +561,5 @@ class ContextProvider:
             spent += cost
         if not fits_request():
             raise BudgetExceeded("input_token_limit")
+        context.submitted = {item["id"]: item for item in base["already_submitted"]}
         return base

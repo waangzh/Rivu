@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { Candidate, Finding, Run } from '../../types/review';
+import type { Candidate, Finding, FindingGroup, Run } from '../../types/review';
 import AppIcon from '../common/AppIcon.vue';
 import EmptyState from '../common/EmptyState.vue';
 import StatusBadge from '../common/StatusBadge.vue';
@@ -9,19 +9,30 @@ const props = defineProps<{
   task: Run;
   findings: Finding[];
   candidates: Candidate[];
+  findingGroups?: FindingGroup[];
   loading?: boolean;
 }>();
 
 const query = ref('');
 const selected = ref('');
 
-const visible = computed(() => props.findings.filter(item => (
-  item.claim + ' ' + (item.location?.path || '')
-).toLowerCase().includes(query.value.toLowerCase())));
+const membersOf = (finding: Finding) => {
+  const group = props.findingGroups?.find(item => item.representative_id === finding.id);
+  return group ? props.candidates.filter(item => group.member_candidate_ids.includes(item.id))
+    .flatMap(item => item.finding ? [item.finding] : []) : [finding];
+};
+const visible = computed(() => props.findings.filter(item => membersOf(item).some(member => (
+  member.claim + ' ' + (member.location?.path || '')
+).toLowerCase().includes(query.value.toLowerCase()))));
 const unresolvedCandidates = computed(() => props.candidates.filter(
   item => item.admission_reason || !item.verification || item.verification.verdict === 'insufficient',
 ));
 const current = computed(() => visible.value.find(item => item.id === selected.value) || visible.value[0]);
+const currentMembers = computed(() => current.value ? membersOf(current.value) : []);
+const currentRoot = computed(() => props.candidates.find(
+  item => item.id === current.value?.candidate_id,
+)?.verification?.root_cause);
+const confirmedOccurrences = computed(() => props.candidates.filter(item => item.finding).length);
 
 const attribution = {
   introduced: '本次变更引入',
@@ -39,7 +50,7 @@ watch(() => props.task.id, () => { selected.value = ''; });
       <h2>问题与证据</h2>
       <p class="title-sub">已确认问题均经过源码证据检查与独立核验；疑似问题和证据不足项单独保留。</p>
     </div>
-    <span class="badge neutral">{{ findings.length }} 条 Finding</span>
+    <span class="badge neutral">{{ findings.length }} 个问题组 · {{ confirmedOccurrences }} 条已确认记录</span>
   </div>
 
   <div class="workspace-toolbar rg-finding-filters">
@@ -125,6 +136,27 @@ watch(() => props.task.id, () => { selected.value = ''; });
           <code v-for="source in current.sources" :key="source.id" class="rg-evidence-id">{{ source.side.toUpperCase() }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.id }}</code>
         </details>
         <p v-if="!current.publishable" class="notice small">该 Finding 不具备发布资格，发布面板会按服务端计划进一步校验。</p>
+      </section>
+      <section v-if="currentMembers.length > 1" class="card card-pad">
+        <h2>同根因的各位置记录</h2>
+        <p class="muted small">各记录分别通过独立核验，列表展示一个代表问题；每个位置的主张、归因与来源证据均保留。</p>
+        <dl v-if="currentRoot" class="rg-finding-facts">
+          <div><dt>共同根因</dt><dd>{{ currentRoot.claim }}</dd></div>
+          <div><dt>根因位置</dt><dd><code>{{ currentRoot.location.path }}:{{ currentRoot.location.line }} · {{ currentRoot.location.side.toUpperCase() }}</code></dd></div>
+          <div><dt>共同触发条件</dt><dd>{{ currentRoot.trigger }}</dd></div>
+          <div><dt>共同影响</dt><dd>{{ currentRoot.impact }}</dd></div>
+        </dl>
+        <details v-for="member in currentMembers" :key="member.id" class="space-top">
+          <summary class="link">
+            {{ member.location ? `${member.location.path}:${member.location.line} · ${member.location.side.toUpperCase()}` : '位置尚未确定' }}
+          </summary>
+          <p>{{ member.claim }}</p>
+          <p>触发条件：{{ member.trigger }}</p>
+          <p>影响：{{ member.impact }}</p>
+          <p class="rg-preserve-lines">审查意见：{{ member.author_comment }}</p>
+          <p>变更归因：{{ attribution[member.attribution] }}</p>
+          <code v-for="source in member.sources" :key="source.id" class="rg-evidence-id">{{ source.side.toUpperCase() }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.id }}</code>
+        </details>
       </section>
     </article>
   </div>

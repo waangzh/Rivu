@@ -58,6 +58,7 @@ _LABELS = {
         "hard_deadline", "review_cutoff", "tool_loop", "input_tokens", "output_tokens",
         "time", "call_fuse", "tool_limit", "format_correction", "scope_empty",
         "missing_decision_sources", "missing_confirmed_fields", "missing_change_attribution_sources",
+        "root_cause_not_sourced",
         "invalid_source_refs", "invalid_cursor", "invalid_source_range", "invalid_source_side",
         "source_output_too_large", "source_range_out_of_bounds", "source_range_too_large",
         "source_too_large", "source_unavailable",

@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import ValidationError
 
 from app.review.domain import Overview, OverviewDiagnostic, OverviewOutput, Report, SourceRef, utcnow
-from app.review.findings import aggregate
+from app.review.findings import aggregate, group_findings
 from app.review.overview_materials import overview_material
 from app.review.planner import identity, tokens
 from app.review.store import OVERVIEW_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
@@ -97,7 +97,8 @@ def build_report(run, work_items, candidates, usage):
     if not reviews and run.plan.grouping_status != "pending":
         reasons.append("scope_empty")
     findings = aggregate(candidates)
-    facts = {"findings": findings, "candidates": candidates, "units": work_items,
+    facts = {"findings": findings, "finding_groups": group_findings(candidates),
+             "candidates": candidates, "units": work_items,
              "excluded": run.plan.excluded, "status": status, "reasons": reasons, "usage": usage}
     return Report(version=identity(facts), **facts)
 

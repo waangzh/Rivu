@@ -391,7 +391,8 @@ class AgentRunner:
         return revised
 
     async def _correct_verification(self, agent, result, output, candidate, context):
-        if (candidate.admission_reason not in {"invalid_source_refs", "missing_decision_sources"}
+        if (candidate.admission_reason not in {
+                "invalid_source_refs", "missing_decision_sources", "missing_change_attribution_sources"}
                 or context.structured_output_retry
                 or context.model_calls >= context.provider.run.configuration.options.limits.model_calls):
             return output, candidate
@@ -409,7 +410,11 @@ class AgentRunner:
             "and MUST NOT appear in source_refs. Do not treat search results as decision evidence. "
             "No more investigation is available. Reassess the existing source: confirm/refute "
             "only when it supports that decision; otherwise return insufficient with the specific "
-            "missing premise. An insufficient result containing a question must also cite "
+            "missing premise. For introduced/exposed attribution in modified or renamed code, "
+            "cite the received BASE and HEAD source bodies relevant to the claimed causal change. "
+            "Do not add unrelated BASE evidence merely to satisfy the side check. If the received "
+            "sources cannot establish that change, return insufficient and explain the gap. "
+            "An insufficient result containing a question must also cite "
             "the actual S source_ref handles supporting its observation. If no received source "
             "supports an author question, leave question null and explain the missing premise. "
             "Do not simply preserve your previous verdict. "

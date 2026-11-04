@@ -2,6 +2,7 @@ import type {
   Candidate,
   FileContext,
   Finding,
+  FindingGroup,
   Report,
   Run,
   ReviewCreateRequest,
@@ -192,6 +193,7 @@ export const getFindings = (id: string, signal?: AbortSignal) =>
   request<{
     findings: Finding[];
     candidates: Candidate[];
+    finding_groups: FindingGroup[];
     report_version: string | null;
   }>(reviewPath(id, '/findings'), { signal });
 export const getReport = (id: string, signal?: AbortSignal) =>

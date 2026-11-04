@@ -270,3 +270,50 @@ test('疑似问题区分引用校验失败和业务前提不足，安全展示�
     assert.doesNotMatch(html, /<script>|低风险/);
   } finally { await server.close(); }
 });
+
+test('同根因显示一个问题组，保留各位置独立主张、归因与证据', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewFindingsPage.vue');
+    const finding = (id, path, claim) => ({
+      id: `finding-${id}`, candidate_id: id, claim, trigger: `调用 ${path}`,
+      impact: `${path} 入口失败`, severity: 'high', attribution: 'introduced',
+      author_comment: `请修复 ${path}`, location: { path, line: 1, side: 'head' },
+      sources: [{ id: `source-${id}`, side: 'head', path, start_line: 1, end_line: 2 }],
+      publishable: true, admission_digest: `digest-${id}`,
+    });
+    const first = finding('first', 'first.py', '第一处入口失败');
+    const second = finding('second', 'second.py', '<script>第二处入口失败</script>');
+    const candidates = [first, second].map(item => ({
+      id: item.candidate_id, finding: item, admission_reason: null,
+      proposal: { claim: item.claim, location: item.location }, sources: item.sources,
+      verification_sources: item.sources, verification: { verdict: 'confirmed',
+        root_cause: { claim: '<script>共同失败机制</script>', trigger: '零输入', impact: '异常',
+          location: { path: 'shared.py', line: 2, side: 'head' } } },
+    }));
+    candidates.push({
+      id: 'pending', finding: null, admission_reason: null, sources: [], verification_sources: [],
+      proposal: { claim: '第三处尚未确定', location: null }, verification: null,
+    });
+    const html = await renderToString(createSSRApp(Component, {
+      task: task('completed'), findings: [first], candidates,
+      findingGroups: [{ representative_id: first.id, member_candidate_ids: ['first', 'second'] }],
+    }));
+    assert.match(html, /1 个问题组 · 2 条已确认记录/);
+    assert.equal((html.match(/\brg-finding-row\b/g) || []).length, 1);
+    assert.match(html, /同根因的各位置记录/);
+    assert.match(html, /&lt;script&gt;共同失败机制&lt;\/script&gt;/);
+    assert.match(html, /shared.py:2 · HEAD/);
+    assert.match(html, /first.py:1 · HEAD/);
+    assert.match(html, /second.py:1 · HEAD/);
+    assert.match(html, /source-first/);
+    assert.match(html, /source-second/);
+    assert.match(html, /&lt;script&gt;第二处入口失败&lt;\/script&gt;/);
+    assert.match(html, /第三处尚未确定/);
+    assert.doesNotMatch(html, /<script>/);
+  } finally { await server.close(); }
+});
