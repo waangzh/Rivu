@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from app.review.domain import Model, Snapshot, SourceRef
+from app.review.domain import AgentErrorDiagnostic, Model, Snapshot, SourceRef
 from app.review.evidence import digest, source_lines
 from app.review.findings import candidate_summary
 from app.review.planner import identity, members, tokens
@@ -54,6 +54,7 @@ class AgentContext:
     cursors: dict[str, dict] = field(default_factory=dict)
     tool_calls: int = 0
     model_calls: int = 0
+    error_diagnostic: AgentErrorDiagnostic | None = None
     structured_output_retry: bool = False
     structured_correction_limit: int | None = None
     source_counter: int = 0

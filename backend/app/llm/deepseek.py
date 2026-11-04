@@ -1,7 +1,7 @@
 """DeepSeek chat-completion fields on the existing LangChain transport."""
 
 from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_openai import ChatOpenAI
+from app.llm.receipts import ObservedChatOpenAI, capture_response
 
 
 def response_payload(response):
@@ -17,7 +17,14 @@ def response_payload(response):
     return payload
 
 
-class DeepSeekChatModel(ChatOpenAI):
+class DeepSeekChatModel(ObservedChatOpenAI):
+    def validate_replay(self, messages):
+        enabled = (self.extra_body or {}).get("thinking", {}).get("type") == "enabled"
+        if enabled and any(isinstance(message, AIMessage)
+                           and not isinstance(message.additional_kwargs.get("reasoning_content"), str)
+                           for message in messages):
+            raise ValueError("deepseek_reasoning_content_missing")
+
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(messages, stop=stop, **kwargs)
@@ -25,6 +32,7 @@ class DeepSeekChatModel(ChatOpenAI):
             payload["max_tokens"] = payload.pop("max_completion_tokens")
         enabled = (self.extra_body or {}).get("thinking", {}).get("type") == "enabled"
         if enabled and payload.get("tools"):
+            self.validate_replay(messages)
             choice = payload.get("tool_choice")
             if isinstance(choice, dict):
                 tools = payload["tools"]
@@ -36,12 +44,11 @@ class DeepSeekChatModel(ChatOpenAI):
             for original, outgoing in zip(messages, payload["messages"], strict=True):
                 if isinstance(original, AIMessage):
                     reasoning = original.additional_kwargs.get("reasoning_content")
-                    if not isinstance(reasoning, str):
-                        raise ValueError("deepseek_reasoning_content_missing")
                     outgoing["reasoning_content"] = reasoning
         return payload
 
     def _create_chat_result(self, response, generation_info=None):
+        capture_response(response)
         payload = response_payload(response)
         result = super()._create_chat_result(payload, generation_info)
         for generation, choice in zip(result.generations, payload["choices"], strict=True):

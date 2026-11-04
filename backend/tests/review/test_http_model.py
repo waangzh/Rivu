@@ -500,10 +500,12 @@ async def test_verifier_final_request_preserves_admission_and_hard_limit(tmp_pat
     assert len(report.findings) == (1 if verdict == "confirmed" else 0)
     check = next(item for item in report.units if item.kind == "verification")
     if verdict == "invalid":
-        assert check.status == "interrupted"
-        assert check.error_code == ("agent_tool_loop" if call_limit == 8 else "agent_model_limit")
+        assert check.status == ("failed" if call_limit == 8 else "interrupted")
+        assert check.error_code == (
+            "agent_structured_output_missing" if call_limit == 8 else "agent_model_limit")
         assert candidate.verification is None
         assert report.status == "partial"
+        assert report.usage["unknown_calls"] == 0
     else:
         assert check.status == "completed"
         assert candidate.verification.verdict == verdict

@@ -202,7 +202,7 @@ function exportReport() {
 
   <ReviewOverviewPage v-if="tab === 'overview'" :task="task" :report="report" :findings="findings" :loading="loading" @navigate="tab = $event" @retry-overview="$emit('overviewRetry')" />
   <ReviewFilesPage v-else-if="tab === 'changes'" :task="task" :findings="findings" @finding="tab = 'findings'" />
-  <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :finding-groups="findingGroups" :loading="loading" />
+  <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :finding-groups="findingGroups" :deduplication="report?.finding_deduplication" :loading="loading" />
   <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="progress?.units ?? []" :usage="progress?.usage" :report="report" :candidates="candidates" :findings-count="findings.length" :findings-loaded="findingsLoaded" :loaded="!!progress" :synced-at="syncedAt" :sync-error="connectionError || progressError" @navigate="tab = $event" @refresh="refreshData" />
   <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" :publish-open="publishOpen" @update:publish-open="publishOpen = $event" @export="exportReport" />
 

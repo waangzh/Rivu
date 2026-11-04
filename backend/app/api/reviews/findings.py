@@ -17,4 +17,5 @@ async def get_findings(task_id: str):
     from app.review.findings import aggregate, group_findings
     return {"findings": run.report.findings if run.report else aggregate(candidates),
             "finding_groups": run.report.finding_groups if run.report else group_findings(candidates),
+            "finding_deduplication": run.report.finding_deduplication if run.report else None,
             "candidates": candidates, "report_version": run.report.version if run.report else None}

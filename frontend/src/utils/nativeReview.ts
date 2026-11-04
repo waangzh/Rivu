@@ -46,6 +46,15 @@ export const executionErrorLabel = (code: string | null) =>
     review_deadline: '达到本轮审查总期限',
   })[code || ''] || '执行异常，未取得有效结果';
 
+export const executionStageLabel = (stage: string) =>
+  ({
+    request_preparation: '请求准备或历史消息校验',
+    transport: '模型调用或传输',
+    response_parsing: '模型响应解析',
+    agent_processing: 'Agent 结构化处理',
+    execution: 'Agent 执行',
+  })[stage] || '执行阶段未确定';
+
 export const reviewReasonLabel = (reason: string) =>
   ({
     unverified_historical_candidates: '仍有增量复核项未完成。',

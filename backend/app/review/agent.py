@@ -13,8 +13,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.core.config import settings
+from app.llm.receipts import observe_response, safe_request_id
 from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
-from app.review.domain import UnitCompletion, VerificationOutput, utcnow
+from app.review.domain import AgentErrorDiagnostic, UnitCompletion, VerificationOutput, utcnow
 from app.review.findings import admit_verification
 from app.review.planner import tokens
 from app.review.observability import event, message_content, review_trace, stage
@@ -48,6 +49,43 @@ def safe_error_detail(exc):
     return detail if detail in codes else "-"
 
 
+def error_diagnostic(exc, *, ticket=None, receipt=None):
+    allowed_types = {
+        "ValueError", "TypeError", "KeyError", "AttributeError", "ValidationError",
+        "APIConnectionError", "APITimeoutError", "RateLimitError", "AuthenticationError",
+        "PermissionDeniedError", "BadRequestError", "NotFoundError", "InternalServerError",
+        "APIStatusError", "APIResponseValidationError", "TimeoutError", "ReadTimeout",
+        "ConnectError", "RemoteProtocolError", "StructuredOutputValidationError",
+        "MultipleStructuredOutputsError", "OutputParserException", "MissingStructuredResult",
+    }
+    transport_types = {
+        "APIConnectionError", "APITimeoutError", "RateLimitError", "AuthenticationError",
+        "PermissionDeniedError", "BadRequestError", "NotFoundError", "InternalServerError",
+        "APIStatusError", "APIResponseValidationError", "TimeoutError", "ReadTimeout",
+        "ConnectError", "RemoteProtocolError",
+    }
+    codes = {"deepseek_reasoning_content_missing", "deepseek_thinking_forced_tool_unsupported"}
+    code = str(exc) if type(exc) is ValueError and str(exc) in codes else None
+    status = getattr(exc, "status_code", None)
+    if type(status) is not int or not 100 <= status <= 599:
+        status = None
+    received = receipt is not None and receipt.received
+    return AgentErrorDiagnostic(
+        ticket=ticket,
+        stage="request_preparation" if code else
+              "agent_processing" if received and receipt.parsed else
+              "response_parsing" if received else
+              "transport" if ticket and type(exc).__name__ in transport_types else "execution",
+        error_type=type(exc).__name__ if type(exc).__name__ in allowed_types else "other",
+        code=code, http_status=status,
+        request_id=(receipt.request_id if receipt else None) or
+                   safe_request_id(getattr(exc, "request_id", None)),
+        response_received=received, usage_known=receipt is not None and receipt.usage is not None,
+        finish_reason=receipt.finish_reason if receipt else None,
+        tool_calls=receipt.tool_calls if receipt else 0,
+        reasoning_present=receipt.reasoning_present if receipt else False)
+
+
 def request_input_tokens(messages, tools, schema):
     return tokens({
         "messages": [message.model_dump(mode="json") for message in messages],
@@ -64,6 +102,15 @@ def completion_correction(context):
     context.structured_output_retry = True
     context.structured_correction_limit = context.model_calls + 1
     event("agent.completion_correction")
+    if context.work.kind == "verification":
+        return (
+            "Runtime correction (trusted host): Return exactly one VerificationOutput using "
+            "the current schema and S source_refs already received. No additional investigation "
+            "is available. Independently reassess the same claim; confirm only with the required "
+            "fields, actionable author_comment and source-supported PR attribution. If the "
+            "received evidence cannot establish a necessary premise, return insufficient. "
+            "Do not invent references, infer confirmation from another candidate or return prose."
+        )
     return (
         "Runtime correction (trusted host): Return UnitCompletion once using the current schema. "
         "No further investigation is available. Set unresolved=null when necessary checks "
@@ -157,6 +204,9 @@ class RequestGate(AgentMiddleware):
 
         input_limit = limits.context_tokens - limits.output_tokens
         messages = context.window.project(context, request.messages, estimate_packet, input_limit)
+        validate_replay = getattr(request.model, "validate_replay", None)
+        if validate_replay is not None:
+            validate_replay(([request.system_message] if request.system_message else []) + messages)
         await context.persist()
         # Reserve the full packet, including all tools and room for budget guidance.
         estimate = estimate_packet(messages)
@@ -307,8 +357,10 @@ class RequestGate(AgentMiddleware):
             context.window.metrics["pressure_reason"] or "-",
             context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"])
         pending, hunks = dict(context.pending), dict(context.pending_hunks)
+        context.error_diagnostic = None
+        receipt = None
         try:
-            with stage("model.request", run_type="llm", ticket=ticket,
+            with observe_response() as receipt, stage("model.request", run_type="llm", ticket=ticket,
                        call=context.model_calls, estimated_input_tokens=estimate,
                        remaining_input_tokens=available["input_tokens"],
                        remaining_output_tokens=available["output_tokens"],
@@ -333,11 +385,15 @@ class RequestGate(AgentMiddleware):
                         context.provider.run.id, context.work.id, ticket, (perf_counter() - started) * 1000)
             raise
         except Exception as exc:
-            await context.budget.settle(ticket, None)
+            usage = receipt.usage if receipt else None
+            await context.budget.settle(ticket, usage)
+            context.error_diagnostic = error_diagnostic(exc, ticket=ticket, receipt=receipt)
             logger.warning(
-                "模型请求失败 review_id=%.8s work_id=%.8s ticket=%.8s elapsed_ms=%.0f error_type=%s usage=unknown",
+                "模型请求未交付 review_id=%.8s work_id=%.8s ticket=%.8s elapsed_ms=%.0f "
+                "error_type=%s stage=%s response_received=%s usage_known=%s",
                 context.provider.run.id, context.work.id, ticket, (perf_counter() - started) * 1000,
-                type(exc).__name__)
+                context.error_diagnostic.error_type, context.error_diagnostic.stage,
+                context.error_diagnostic.response_received, usage is not None)
             raise
         message = next((item for item in reversed(response.result) if isinstance(item, AIMessage)), None)
         usage = getattr(message, "usage_metadata", None)
@@ -482,8 +538,7 @@ class AgentRunner:
             initial = await provider.initial(context, candidate, request_budget=request_budget,
                                              estimate_request=estimate_initial)
             context.initial_packet = initial
-            response_format = (ToolStrategy(schema, handle_errors=lambda error: completion_correction(context))
-                               if role == "reviewer" else ToolStrategy(schema))
+            response_format = ToolStrategy(schema, handle_errors=lambda error: completion_correction(context))
             agent = create_agent(self.model, tools=tools, system_prompt=prompt,
                 response_format=response_format, middleware=[RequestGate()],
                 context_schema=AgentContext, name=role)
@@ -540,7 +595,8 @@ class AgentRunner:
                 code = "agent_execution_failed"
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
                 "interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed", None, code,
-                provider.lease, tool_calls=context.tool_calls)
+                provider.lease, tool_calls=context.tool_calls,
+                diagnostic=context.error_diagnostic or error_diagnostic(exc))
             event("agent.finished",
                   status="interrupted" if isinstance(exc, (BudgetExceeded, RepeatedToolLoop)) else "failed",
                   reason=code, model_calls=context.model_calls, tool_calls=context.tool_calls)

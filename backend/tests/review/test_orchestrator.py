@@ -151,6 +151,55 @@ class SharedRootModel(ReviewModel):
         return result
 
 
+class ParaphrasedRootModel(SharedRootModel):
+    comparison_calls: int = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if str(messages[0].content).startswith("Compare suspected"):
+            self.comparison_calls += 1
+            packet = json.loads(messages[1].content)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="",
+                usage_metadata={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+                tool_calls=[{"id": "comparison", "name": "FindingComparisonOutput", "args": {
+                    "assessments": [{"pair_index": pair["pair_index"], "verdict": "same",
+                        "reason": "两个位置都因相同的零值保护缺失而失败。",
+                        "source_refs": [source["source_ref"]
+                                        for source in packet["source_materials"]]}
+                        for pair in packet["pairs"]],
+                }}]))])
+        result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        call = result.generations[0].message.tool_calls[0]
+        if (call["name"] == "VerificationOutput"
+                and json.loads(messages[1].content)["candidate"]["claim"].startswith("另一位置")):
+            call["args"]["root_cause"].update(
+                claim="零输入的分母保护已移除", trigger="参数为零", impact="直接除零抛错")
+            call["args"]["severity"] = "medium"
+        return result
+
+
+async def test_semantic_comparison_groups_independent_verifications_and_publisher_rechecks_members(
+    tmp_path,
+):
+    from app.services.publication.publication_planner import PublicationPlanner
+
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    model = ParaphrasedRootModel()
+    report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert len(report.candidates) == 2 and len(report.findings) == 1
+    assert report.finding_deduplication.status == "ready"
+    assert len(report.finding_deduplication.comparisons) == 1 and model.comparison_calls == 1
+    assert {item.finding.severity for item in report.candidates} == {"high", "medium"}
+    assert report.usage["model_calls"] == 6
+    saved = store.get(run.id)
+    plan = PublicationPlanner(provider.evidence.artifacts).build(saved)
+    assert len(plan.inline_drafts) == 1 and not plan.withheld_findings
+    hidden = next(item for item in saved.report.candidates
+                  if item.id != saved.report.findings[0].candidate_id)
+    hidden.verification_sources = []
+    changed = PublicationPlanner(provider.evidence.artifacts).build(saved)
+    assert any(item.candidate_id == hidden.id for item in changed.withheld_findings)
+
+
 @pytest.mark.parametrize("reject_second", [False, True])
 async def test_root_grouping_survives_concurrent_verification_and_report_reopen(tmp_path, reject_second):
     from app.services.publication.publication_planner import PublicationPlanner
@@ -534,8 +583,8 @@ async def test_model_failure_logs_unknown_usage_without_provider_exception(tmp_p
     text = "\n".join(record.getMessage() for record in caplog.records
                      if record.name.startswith("Rivu.Review"))
     assert report.status == "partial"
-    assert "模型请求失败" in text
-    assert "error_type=ValueError usage=unknown" in text
+    assert "模型请求未交付" in text
+    assert "error_type=ValueError stage=execution response_received=False usage_known=False" in text
     assert "Agent未完成" in text
     assert private_body not in text
     assert "detail=-" in text

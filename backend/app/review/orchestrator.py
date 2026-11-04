@@ -5,6 +5,7 @@ import logging
 from time import perf_counter
 
 from app.review.budget import BudgetGate
+from app.review.deduplication import apply_deduplication, deduplicate_findings
 from app.review.domain import utcnow
 from app.review.observability import event, review_trace, stage
 from app.review.report import build_report, generate_overview
@@ -104,6 +105,10 @@ class ReviewOrchestrator:
         await asyncio.to_thread(self.store.save_report, run_id, report, lease)
         logger.info("审查事实已保存 review_id=%.8s status=%s candidates=%d findings=%d gaps=%d",
                     run_id, report.status, len(report.candidates), len(report.findings), len(report.reasons))
+        deduplication = await deduplicate_findings(report, provider, budget, self.runner.model)
+        await asyncio.to_thread(apply_deduplication, report, deduplication)
+        report.usage = await asyncio.to_thread(self.store.usage, run_id)
+        await asyncio.to_thread(self.store.save_report, run_id, report, lease)
         report.overview = await generate_overview(report, provider, budget, self.runner.model)
         report.usage = await asyncio.to_thread(self.store.usage, run_id)
         # Content version binds facts and overview; counters do not mutate confirmed text.

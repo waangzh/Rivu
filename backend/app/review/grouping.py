@@ -7,6 +7,7 @@ import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import Field, StrictInt
 
+from app.llm.receipts import observe_response
 from app.review.domain import Model, utcnow
 from app.review.planner import excluded_changes, plan_review, tokens
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
@@ -93,7 +94,7 @@ async def _freeze_semantic_groups(run, store, lease, model):
             if left in indices and right in indices],
     }
     estimate = tokens([GROUPING_PROMPT, packet, GroupingOutput.model_json_schema()]) + 1024
-    ticket, output, reason = None, None, None
+    ticket, output, reason, response_receipt = None, None, None, None
     try:
         ticket = await asyncio.to_thread(store.reserve_grouping, run.id, estimate, lease)
         if ticket is None:
@@ -105,7 +106,8 @@ async def _freeze_semantic_groups(run, store, lease, model):
             seconds = max(0, (run.review_cutoff - utcnow()).total_seconds())
             messages = [SystemMessage(content=GROUPING_PROMPT),
                         HumanMessage(content=json.dumps(packet, ensure_ascii=False))]
-            with stage("model.request", run_type="llm", ticket=ticket) as observation:
+            with observe_response() as response_receipt, stage(
+                    "model.request", run_type="llm", ticket=ticket) as observation:
                 observation.content(inputs={"messages": message_content(messages)})
                 async with asyncio.timeout(seconds):
                     raw = await structured.ainvoke(messages)
@@ -124,7 +126,8 @@ async def _freeze_semantic_groups(run, store, lease, model):
         logger.info("分组跳过 review_id=%.8s reason=%s", run.id, reason)
     except Exception as exc:
         if ticket is not None:
-            receipt = await asyncio.to_thread(store.settle, run.id, ticket, None, lease)
+            receipt = await asyncio.to_thread(store.settle, run.id, ticket,
+                response_receipt.usage if response_receipt else None, lease)
             settlement(ticket, receipt)
         reason = "grouping_unavailable"
         logger.warning("分组降级 review_id=%.8s error_type=%s", run.id, type(exc).__name__)

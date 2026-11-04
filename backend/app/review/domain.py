@@ -56,7 +56,7 @@ class Configuration(Model):
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] | None = None
     options: Options
-    prompt_version: str = "review-vnext-12"
+    prompt_version: str = "review-vnext-13"
 
 
 class Snapshot(Model):
@@ -207,6 +207,37 @@ class FindingGroup(Model):
     member_candidate_ids: list[str]
 
 
+class FindingComparison(Model):
+    candidate_ids: tuple[str, str]
+    admission_digests: tuple[str, str]
+    verdict: Literal["same", "distinct", "uncertain"]
+    reason: str = Field(min_length=1, max_length=1500)
+    source_ids: list[str] = Field(min_length=1, max_length=32)
+
+
+class FindingDeduplication(Model):
+    status: Literal["not_needed", "running", "ready", "failed", "skipped"] = "not_needed"
+    input_hash: str | None = None
+    comparisons: list[FindingComparison] = Field(default_factory=list, max_length=12)
+    omitted_pairs: int = Field(default=0, ge=0)
+    error_code: str | None = None
+
+
+class AgentErrorDiagnostic(Model):
+    ticket: str | None = None
+    stage: Literal["request_preparation", "transport", "response_parsing", "agent_processing",
+                   "execution"]
+    error_type: str
+    code: str | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    request_id: str | None = None
+    response_received: bool = False
+    usage_known: bool = False
+    finish_reason: str | None = None
+    tool_calls: int = Field(default=0, ge=0)
+    reasoning_present: bool = False
+
+
 class WorkItem(Model):
     id: str
     kind: Literal["review", "verification"]
@@ -222,6 +253,7 @@ class WorkItem(Model):
     missing_material_reasons: dict[str, str] = Field(default_factory=dict)
     material_delivery: Literal["complete", "incomplete", "not_started"] = "not_started"
     error_code: str | None = None
+    error_diagnostic: AgentErrorDiagnostic | None = None
     result: dict | None = None
     tool_calls: int = 0
     reused_from: str | None = None
@@ -284,6 +316,7 @@ class Report(Model):
     findings: list[Finding]
     candidates: list[Candidate]
     finding_groups: list[FindingGroup] = Field(default_factory=list)
+    finding_deduplication: FindingDeduplication = Field(default_factory=FindingDeduplication)
     units: list[WorkItem]
     excluded: dict[str, str]
     overview: Overview = Field(default_factory=Overview)

@@ -145,7 +145,24 @@ def validated_findings(run, artifacts=None):
             withheld.append((finding.candidate_id, reason))
         else:
             selected.append(finding)
-    canonical_ids = {finding.id for finding in aggregate(report.candidates)}
+    valid_members = []
+    accepted_ids = {finding.id for finding in selected}
+    for candidate in report.candidates:
+        if candidate.finding is None:
+            continue
+        if candidate.finding.id in seen:
+            if candidate.finding.id in accepted_ids:
+                valid_members.append(candidate)
+            continue
+        try:
+            reason = _valid_finding(run, candidate, candidate.finding, archive)
+        except (OSError, ValueError, TypeError):
+            reason = "publication_evidence_invalid"
+        if reason:
+            withheld.append((candidate.id, reason))
+        else:
+            valid_members.append(candidate)
+    canonical_ids = {finding.id for finding in aggregate(valid_members, report.finding_deduplication)}
     for candidate in report.candidates:
         if candidate.finding is not None and candidate.finding.id in canonical_ids and candidate.finding.id not in seen:
             withheld.append((candidate.id, "finding_missing_from_report"))

@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import type { Candidate, Report, ReviewUsage, Run, WorkItem } from '../../types/review';
 import type { ReviewSection } from '../../types/workspace';
-import { executionErrorLabel, hasUnresolvedInvestigation, observedUsage, phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
+import { executionErrorLabel, executionStageLabel, hasUnresolvedInvestigation, observedUsage, phaseLabel, reviewReasonLabel, terminal } from '../../utils/nativeReview';
 import { formatElapsed, progressHeading, progressSummary } from '../../utils/reviewProgress';
 import { useReviewClock } from '../../composables/useReviewClock';
 import AppIcon from '../common/AppIcon.vue';
@@ -154,6 +154,14 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
           <details v-if="item.error_code || item.reused_from || Object.keys(item.missing_material_reasons).length" class="space-top">
             <summary class="link">查看执行详情</summary>
             <p v-if="item.error_code" class="muted small">错误类别：<code>{{ item.error_code }}</code></p>
+            <template v-if="item.error_diagnostic">
+              <p class="muted small">失败阶段：{{ executionStageLabel(item.error_diagnostic.stage) }} · {{ item.error_diagnostic.error_type }}</p>
+              <p v-if="item.error_diagnostic.response_received" class="muted small">已收到模型响应；{{ item.error_diagnostic.usage_known ? '用量已保留' : '用量仍未知' }}，响应到达不代表核验成功。</p>
+              <p v-if="item.error_diagnostic.code" class="muted small">诊断码：<code>{{ item.error_diagnostic.code }}</code></p>
+              <p v-if="item.error_diagnostic.http_status" class="muted small">HTTP 状态：{{ item.error_diagnostic.http_status }}</p>
+              <p v-if="item.error_diagnostic.ticket" class="muted small">请求票据：<code>{{ item.error_diagnostic.ticket }}</code></p>
+              <p v-if="item.error_diagnostic.request_id" class="muted small">上游请求 ID：<code>{{ item.error_diagnostic.request_id }}</code></p>
+            </template>
             <p v-if="item.reused_from" class="muted small">复用来源：<code>{{ item.reused_from }}</code></p>
             <pre v-if="Object.keys(item.missing_material_reasons).length" class="rg-json">{{ JSON.stringify(item.missing_material_reasons, null, 2) }}</pre>
           </details>

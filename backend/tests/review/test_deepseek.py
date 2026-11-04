@@ -140,6 +140,21 @@ def test_deepseek_stream_chunks_keep_reasoning_and_top_level_cache_usage():
     assert message.usage_metadata["output_token_details"]["reasoning"] == 7
 
 
+@pytest.mark.parametrize("complete", [True, False])
+def test_stream_terminal_usage_survives_null_delta_without_inventing_missing_counts(complete):
+    model = deepseek_model()
+    usage = completion({})["usage"] if complete else {
+        "completion_tokens_details": {"reasoning_tokens": 5356}}
+    result = model._convert_chunk_to_generation_chunk({
+        "choices": [{"index": 0, "delta": None}], "usage": usage}, AIMessageChunk, {})
+    assert result is not None
+    if complete:
+        assert result.message.usage_metadata["output_tokens"] == 12
+        assert result.message.usage_metadata["input_token_details"]["cache_read"] == 20
+    else:
+        assert result.message.usage_metadata is None
+
+
 async def test_deepseek_http_stream_preserves_reasoning_in_following_tool_request():
     requests = []
 
@@ -296,3 +311,132 @@ async def test_deepseek_transport_failures_do_not_retry_or_invent_usage(reason):
             else:
                 await model.ainvoke("fixture")
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("failure", ["tool_arguments", "extra_choice", "structured_output", "replay"])
+async def test_http_success_retains_usage_when_response_or_agent_processing_fails(
+    tmp_path, failure, caplog,
+):
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.generate_overview = False
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    requests = []
+
+    def transport(request):
+        requests.append(json.loads(request.content))
+        if failure == "replay":
+            message = tool_message("read_file", {
+                "path": "a.py", "start": 1, "end": 2, "revision": "head"}, "read", None)
+        else:
+            message = tool_message("UnitCompletion", {"unresolved": "invalid-schema"},
+                                   f"call-{len(requests)}", "PRIVATE_REASONING_BODY")
+        payload = completion(message, reasoning_tokens=5356)
+        payload["usage"].update(completion_tokens=5956, total_tokens=5986)
+        message["content"] = "PRIVATE_RESPONSE_BODY"
+        if failure == "tool_arguments":
+            message["tool_calls"][0]["function"]["arguments"] = "[1]"
+        elif failure == "extra_choice":
+            payload["choices"].append({"index": 1, "message": None, "finish_reason": "stop"})
+        return httpx.Response(200, json=payload, headers={"x-request-id": "safe-request-id"})
+
+    model = deepseek_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1",
+                          http_client=client, max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    count = 2 if failure == "structured_output" else 1
+    assert len(requests) == report.usage["model_calls"] == count
+    assert report.usage["unknown_calls"] == 0
+    assert report.usage["output_tokens"] == 5956 * count
+    assert report.status == "failed" and not report.findings
+    diagnostic = report.units[0].error_diagnostic
+    assert diagnostic.stage == (
+        "request_preparation" if failure == "replay" else
+        "agent_processing" if failure == "structured_output" else "response_parsing")
+    if failure == "replay":
+        assert diagnostic.code == "deepseek_reasoning_content_missing"
+    else:
+        assert diagnostic.response_received and diagnostic.usage_known
+        assert diagnostic.request_id == "safe-request-id"
+        assert diagnostic.ticket
+    assert "PRIVATE_RESPONSE_BODY" not in caplog.text
+    assert "PRIVATE_REASONING_BODY" not in caplog.text
+    reopened = store.get(run.id).report
+    assert reopened.units[0].error_diagnostic == diagnostic
+
+
+async def test_usage_without_total_counts_is_unknown_instead_of_zero(tmp_path):
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.generate_overview = False
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+
+    def transport(request):
+        payload = completion(tool_message("UnitCompletion", {}, "done", "reasoning"))
+        payload["usage"] = {"completion_tokens_details": {"reasoning_tokens": 5356}}
+        return httpx.Response(200, json=payload)
+
+    model = deepseek_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1",
+                          http_client=client, max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert report.status == "completed"
+    assert report.usage["model_calls"] == report.usage["unknown_calls"] == 1
+    assert report.usage["input_tokens"] is report.usage["output_tokens"] is None
+    assert report.usage["committed_output_tokens"] == run.configuration.options.limits.output_tokens
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+async def test_verifier_schema_correction_is_bounded_and_preserves_successful_response_usage(
+    tmp_path, corrected,
+):
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
+    run.configuration.options.generate_overview = False
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    verifier_calls = 0
+    requests = []
+
+    def transport(request):
+        nonlocal verifier_calls
+        payload = json.loads(request.content)
+        requests.append(payload)
+        packet = json.loads(payload["messages"][1]["content"])
+        if "UnitCompletion" in {item["function"]["name"] for item in payload["tools"]}:
+            refs = [source["source_ref"] for material in packet["materials"]
+                    for source in material["sources"]]
+            message = tool_message("submit_candidate", {"proposal": {
+                "claim": "零输入除零", "trigger": "x=0", "impact": "抛出异常",
+                "source_refs": refs, "location": {"path": "a.py", "line": 2, "side": "head"},
+            }}, "candidate", "reviewer-reasoning")
+            message["tool_calls"].extend(tool_message("UnitCompletion", {}, "done", "")["tool_calls"])
+        else:
+            verifier_calls += 1
+            refs = [source["source_ref"] for material in packet["materials"]
+                    for source in material["sources"]]
+            output = {"verdict": "confirmed", "attribution": "introduced", "severity": "high",
+                      "reason": "零值回退被移除。", "source_refs": refs,
+                      "author_comment": "零输入会除零，请恢复保护。"}
+            if verifier_calls == 1 or not corrected:
+                output["verdict"] = "invalid"
+            message = tool_message("VerificationOutput", output,
+                                   f"verify-{verifier_calls}", "verifier-reasoning")
+        return httpx.Response(200, json=completion(message))
+
+    model = deepseek_model()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1",
+                          http_client=client, max_retries=0)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
+        report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
+    assert verifier_calls == 2 and len(requests) == report.usage["model_calls"] == 3
+    assert report.usage["unknown_calls"] == 0 and report.usage["output_tokens"] == 36
+    assert len(report.findings) == (1 if corrected else 0)
+    if not corrected:
+        work = next(item for item in report.units if item.kind == "verification")
+        assert work.error_diagnostic.stage == "agent_processing"
+        assert report.candidates[0].verification is None

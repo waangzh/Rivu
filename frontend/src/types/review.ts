@@ -139,6 +139,20 @@ export interface FindingGroup {
   member_candidate_ids: string[];
 }
 
+export interface FindingDeduplication {
+  status: 'not_needed' | 'running' | 'ready' | 'failed' | 'skipped';
+  input_hash: string | null;
+  comparisons: {
+    candidate_ids: [string, string];
+    admission_digests: [string, string];
+    verdict: 'same' | 'distinct' | 'uncertain';
+    reason: string;
+    source_ids: string[];
+  }[];
+  omitted_pairs: number;
+  error_code: string | null;
+}
+
 export interface CompletionGap {
   required_check: string;
   observation: string;
@@ -168,6 +182,19 @@ export interface WorkItem {
   missing_material_reasons: Record<string, string>;
   material_delivery: 'complete' | 'incomplete' | 'not_started';
   error_code: string | null;
+  error_diagnostic: {
+    ticket: string | null;
+    stage: 'request_preparation' | 'transport' | 'response_parsing' | 'agent_processing' | 'execution';
+    error_type: string;
+    code: string | null;
+    http_status: number | null;
+    request_id: string | null;
+    response_received: boolean;
+    usage_known: boolean;
+    finish_reason: string | null;
+    tool_calls: number;
+    reasoning_present: boolean;
+  } | null;
   result: WorkItemResult | null;
   tool_calls: number;
   reused_from: string | null;
@@ -242,6 +269,7 @@ export interface Report {
   findings: Finding[];
   candidates: Candidate[];
   finding_groups: FindingGroup[];
+  finding_deduplication: FindingDeduplication;
   units: WorkItem[];
   excluded: Record<string, string>;
   overview: Overview;

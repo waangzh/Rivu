@@ -9,6 +9,7 @@ from time import perf_counter
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import ValidationError
 
+from app.llm.receipts import observe_response
 from app.review.domain import Overview, OverviewDiagnostic, OverviewOutput, Report, SourceRef, utcnow
 from app.review.findings import aggregate, group_findings
 from app.review.overview_materials import overview_material
@@ -152,11 +153,12 @@ async def _generate_overview(report, provider, budget, model):
                 len(refs), tokens(packet), packet["omitted"]["changes"], packet["omitted"]["sources"])
     report.overview = overview
     await asyncio.to_thread(provider.store.save_report, provider.run.id, report, provider.lease)
-    ticket = None
+    ticket, receipt = None, None
     try:
         messages = [SystemMessage(content=prompt), HumanMessage(content=json.dumps(packet, ensure_ascii=False))]
         structured = model.bind_tools([OverviewOutput], tool_choice="OverviewOutput")
         for attempt in (1, 2):
+            receipt = None
             await budget.active()
             estimate = tokens({
                 "messages": [message.model_dump(mode="json") for message in messages],
@@ -166,7 +168,9 @@ async def _generate_overview(report, provider, budget, model):
             logger.info("总览模型请求开始 review_id=%.8s ticket=%.8s attempt=%d estimated_input_tokens=%d",
                         run_id, ticket, attempt, estimate)
             seconds = max(0, (provider.run.hard_deadline - utcnow()).total_seconds())
-            with stage("model.request", run_type="llm", ticket=ticket, attempt=attempt) as observation:
+            with observe_response() as observed_receipt, stage(
+                    "model.request", run_type="llm", ticket=ticket, attempt=attempt) as observation:
+                receipt = observed_receipt
                 observation.content(inputs={"messages": message_content(messages)})
                 async with asyncio.timeout(seconds):
                     raw = await structured.ainvoke(messages)
@@ -211,7 +215,7 @@ async def _generate_overview(report, provider, budget, model):
         raise
     except Exception as exc:
         if ticket:
-            await budget.settle(ticket, None)
+            await budget.settle(ticket, receipt.usage if receipt else None)
         overview.status = "skipped_deadline" if utcnow() >= provider.run.hard_deadline else "failed"
         overview.error_code = ("hard_deadline" if overview.status == "skipped_deadline" else
                                str(exc) if isinstance(exc, BudgetExceeded) else

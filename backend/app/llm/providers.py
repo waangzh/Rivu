@@ -2,9 +2,8 @@
 
 from abc import ABC, abstractmethod
 
-from langchain_openai import ChatOpenAI
-
 from app.llm.deepseek import DeepSeekChatModel
+from app.llm.receipts import ObservedChatOpenAI
 
 
 class LLMProviderError(RuntimeError):
@@ -43,7 +42,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 options.update(temperature=None,
                                reasoning_effort=reasoning_effort or self._reasoning_effort or "high")
             return DeepSeekChatModel(**options)
-        return ChatOpenAI(**options)
+        return ObservedChatOpenAI(**options)
 
 
 def build_provider(provider_name, api_key, base_url, default_model):

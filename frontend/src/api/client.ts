@@ -3,6 +3,7 @@ import type {
   FileContext,
   Finding,
   FindingGroup,
+  FindingDeduplication,
   Report,
   Run,
   ReviewCreateRequest,
@@ -194,6 +195,7 @@ export const getFindings = (id: string, signal?: AbortSignal) =>
     findings: Finding[];
     candidates: Candidate[];
     finding_groups: FindingGroup[];
+    finding_deduplication: FindingDeduplication | null;
     report_version: string | null;
   }>(reviewPath(id, '/findings'), { signal });
 export const getReport = (id: string, signal?: AbortSignal) =>

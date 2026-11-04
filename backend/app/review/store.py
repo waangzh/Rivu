@@ -228,6 +228,7 @@ class ReviewStore:
             work.visible_source_ids = []
             work.context_archive_uri = None
             work.material_delivery, work.error_code = "not_started", None
+            work.error_diagnostic = None
             row.payload = work.model_dump(mode="json")
             run_row.current_phase, run_row.updated_at = work.kind, utcnow()
             return work
@@ -297,7 +298,8 @@ class ReviewStore:
             saved.context_archive_uri = uri
             row.payload = saved.model_dump(mode="json")
 
-    def finish_work(self, run_id, work, status, result, error, lease, *, candidate=None, tool_calls=0):
+    def finish_work(self, run_id, work, status, result, error, lease, *, candidate=None, tool_calls=0,
+                    diagnostic=None):
         with self.sessions.begin() as session:
             run_row = self._guard(session, run_id, lease)
             if status == "completed" and utcnow() >= self._run(run_row).hard_deadline:
@@ -305,6 +307,7 @@ class ReviewStore:
             row = self._attempt(session, run_id, work.id, work.attempt_id)
             saved = WorkItem.model_validate(row.payload)
             saved.status, saved.result, saved.error_code = status, result, error
+            saved.error_diagnostic = diagnostic
             saved.tool_calls = tool_calls
             row.payload = saved.model_dump(mode="json")
             if candidate is not None:
@@ -366,7 +369,7 @@ class ReviewStore:
             return self._usage(session, run_id)[1]
 
     def _initial_estimate(self, run, work):
-        if work.kind != "review":
+        if work is None or work.kind != "review":
             return None
         unit = next(unit for unit in run.plan.units if unit.id == work.unit_id)
         return review_input_estimate(unit, run.configuration.options.limits)
@@ -527,6 +530,21 @@ class ReviewStore:
             run.status = "running"
             run.started_at = run.started_at or utcnow()
             self._save(row, run)
+            return ticket
+
+    def reserve_deduplication(self, run_id, estimate, lease):
+        with self.sessions.begin() as session:
+            row = self._guard(session, run_id, lease)
+            run = self._run(row)
+            if session.scalar(select(ReviewRequestOrm.id).where(
+                    ReviewRequestOrm.run_id == run_id, ReviewRequestOrm.kind == "deduplication")):
+                return None
+            self._admit_request(session, run, None, estimate, False, kind_override="deduplication")
+            ticket = uuid4().hex
+            session.add(ReviewRequestOrm(id=ticket, run_id=run_id, kind="deduplication",
+                reserved_input_tokens=estimate,
+                reserved_output_tokens=run.configuration.options.limits.output_tokens,
+                state="reserved", lease_fence=lease))
             return ticket
 
     def freeze_grouping(self, run_id, plan, lease):

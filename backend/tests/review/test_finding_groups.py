@@ -187,3 +187,213 @@ async def test_reviewer_inventory_includes_other_units_without_granting_their_so
     assert "source_refs" not in entry
     assert not fresh.visible
     assert all(source.path != "second.py" for source in fresh.pending.values())
+
+
+def semantic_comparison(candidates, verdict="same"):
+    from app.review.domain import FindingComparison
+
+    return FindingComparison(
+        candidate_ids=tuple(item.id for item in candidates),
+        admission_digests=tuple(item.finding.admission_digest for item in candidates),
+        verdict=verdict, reason="同一个缺失的零值保护导致两个入口失败。",
+        source_ids=list({source.id for item in candidates for source in item.verification_sources}))
+
+
+async def test_semantic_comparison_merges_paraphrases_and_preserves_severity_disagreement(occurrences):
+    from app.review.deduplication import apply_deduplication
+    from app.review.domain import FindingDeduplication
+
+    run, store, context, candidates = occurrences
+    second = candidates[1]
+    output = second.verification.model_copy(deep=True)
+    output.root_cause.claim = "零输入的分母保护被移除"
+    output.root_cause.trigger = "调用 ratio 时传入 0"
+    output.root_cause.impact = "调用方收到除零错误"
+    output.severity = "medium"
+    admit_verification(second, output, context)
+    assert len(aggregate(candidates)) == 2
+    before = deepcopy(candidates)
+    result = FindingDeduplication(status="ready", comparisons=[semantic_comparison(candidates)])
+    report = build_report(run, store.work_items(run.id), candidates, {})
+    apply_deduplication(report, result)
+    assert len(report.findings) == 1
+    assert len(report.finding_groups[0].member_candidate_ids) == 2
+    assert {item.finding.severity for item in report.candidates} == {"high", "medium"}
+    assert report.candidates == before
+    reopened = type(report).model_validate_json(report.model_dump_json())
+    assert aggregate(reopened.candidates, reopened.finding_deduplication) == report.findings
+
+
+@pytest.mark.parametrize("difference", [
+    "uncertain", "distinct", "digest", "source", "location", "snapshot", "eligibility", "repeated",
+])
+async def test_semantic_comparison_does_not_hide_unproved_or_changed_members(occurrences, difference):
+    from app.review.domain import FindingDeduplication
+
+    _, _, _, candidates = occurrences
+    candidates[1].verification.root_cause.claim = "独立描述"
+    comparison = semantic_comparison(candidates)
+    if difference in {"uncertain", "distinct"}:
+        comparison.verdict = difference
+    elif difference == "digest":
+        comparison.admission_digests = ("stale", comparison.admission_digests[1])
+    elif difference == "source":
+        comparison.source_ids = ["f" * 64]
+    elif difference == "location":
+        comparison.source_ids = [ref.id for ref in candidates[0].verification_sources]
+    elif difference == "snapshot":
+        candidates[1].verification_sources = [
+            source.model_copy(update={"commit_sha": "f" * 40})
+            for source in candidates[1].verification_sources]
+    elif difference == "eligibility":
+        candidates[1].finding.publishable = False
+    result = FindingDeduplication(status="ready", comparisons=[
+        comparison, *([comparison] if difference == "repeated" else [])])
+    assert len(aggregate(candidates, result)) == 2
+
+
+async def test_semantic_groups_require_pairwise_agreement_without_transitive_closure(occurrences):
+    from app.review.domain import FindingDeduplication
+
+    _, _, _, candidates = occurrences
+    third = candidates[1].model_copy(deep=True)
+    third.id, third.finding.id, third.finding.candidate_id = "third", "finding-third", "third"
+    candidates.append(third)
+    for index, item in enumerate(candidates):
+        item.verification.root_cause.claim = f"表述 {index}"
+    result = FindingDeduplication(status="ready", comparisons=[
+        semantic_comparison(candidates[:2]), semantic_comparison(candidates[1:]),
+        semantic_comparison([candidates[0], third], "distinct")])
+    groups = group_findings(candidates, result)
+    assert [len(item.member_candidate_ids) for item in groups] == [2, 1]
+
+
+class ComparisonModel:
+    def __init__(self, *, fail=False, invalid=False):
+        self.calls = 0
+        self.fail, self.invalid = fail, invalid
+
+    def bind_tools(self, tools, **kwargs):
+        assert len(tools) == 1 and tools[0].__name__ == "FindingComparisonOutput"
+        return self
+
+    async def ainvoke(self, messages):
+        import json
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.fail:
+            raise ValueError("PRIVATE_PROVIDER_BODY")
+        packet = json.loads(messages[1].content)
+        assessments = [{
+            "pair_index": item["pair_index"], "verdict": "same", "reason": "同一根因和修复。",
+            "source_refs": ["S999"] if self.invalid else [
+                source["source_ref"] for source in packet["source_materials"]],
+        } for item in packet["pairs"]]
+        return AIMessage(content="", tool_calls=[{
+            "id": "comparison", "name": "FindingComparisonOutput", "args": {"assessments": assessments}}],
+            usage_metadata={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150})
+
+
+@pytest.mark.parametrize("outcome", [
+    "same", "invalid", "failed", "budget", "deadline", "cancelled", "lease", "timeout",
+])
+async def test_bounded_comparison_uses_existing_sources_and_original_request_ledger(
+    occurrences, outcome, monkeypatch,
+):
+    import asyncio
+    from datetime import timedelta
+
+    from app.models.orm import ReviewTaskOrm
+    from app.review.deduplication import deduplicate_findings
+    from app.review.domain import utcnow
+
+    run, store, context, candidates = occurrences
+    candidates[1].verification.root_cause.claim = "同一除零机制的另一个描述"
+    candidates[1].finding.admission_digest = finding_digest(candidates[1], run.snapshot)
+    report = build_report(run, store.work_items(run.id), candidates, {})
+    model = ComparisonModel(fail=outcome == "failed", invalid=outcome == "invalid")
+    if outcome in {"lease", "timeout"}:
+        from app.review.store import LeaseLost
+
+        async def interrupted(messages):
+            model.calls += 1
+            raise LeaseLost("fixture") if outcome == "lease" else TimeoutError
+        monkeypatch.setattr(model, "ainvoke", interrupted)
+        if outcome == "lease":
+            with pytest.raises(LeaseLost):
+                await deduplicate_findings(report, context.provider, context.budget, model)
+            return
+    if outcome in {"budget", "deadline"}:
+        if outcome == "budget":
+            run.configuration.options.limits.total_model_calls = 3
+        else:
+            run.hard_deadline = utcnow() - timedelta(seconds=1)
+        with store.sessions.begin() as session:
+            session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    if outcome == "cancelled":
+        async def cancelled(messages):
+            raise asyncio.CancelledError
+        monkeypatch.setattr(model, "ainvoke", cancelled)
+        with pytest.raises(asyncio.CancelledError):
+            await deduplicate_findings(report, context.provider, context.budget, model)
+        return
+    result = await deduplicate_findings(report, context.provider, context.budget, model)
+    assert len(aggregate(candidates, result)) == (1 if outcome == "same" else 2)
+    assert model.calls == (0 if outcome in {"budget", "deadline"} else 1)
+    assert store.usage(run.id)["model_calls"] == model.calls
+    assert store.usage(run.id)["unknown_calls"] == (1 if outcome in {"failed", "timeout"} else 0)
+    if outcome in {"budget", "deadline"}:
+        assert result.status == "skipped"
+    if outcome == "same":
+        report.finding_deduplication = result
+        await asyncio.to_thread(store.save_report, run.id, report, context.provider.lease)
+        context.provider.run = store.get(run.id)
+        reused = await deduplicate_findings(report, context.provider, context.budget, model)
+        assert reused == result and model.calls == 1
+
+
+async def test_started_comparison_is_not_replayed_after_worker_recovery(occurrences):
+    from app.review.deduplication import deduplicate_findings
+
+    run, store, context, candidates = occurrences
+    candidates[1].verification.root_cause.claim = "改写的相同根因"
+    candidates[1].finding.admission_digest = finding_digest(candidates[1], run.snapshot)
+    report = build_report(run, store.work_items(run.id), candidates, {})
+    ticket = store.reserve_deduplication(run.id, 100, context.provider.lease)
+    assert ticket
+    model = ComparisonModel()
+    result = await deduplicate_findings(report, context.provider, context.budget, model)
+    assert result.status == "skipped" and result.error_code == "deduplication_not_replayed"
+    assert model.calls == 0 and store.usage(run.id)["unknown_calls"] == 1
+
+
+async def test_insufficient_comparison_material_does_not_consume_a_request(occurrences, monkeypatch):
+    from app.review import deduplication
+
+    run, store, context, candidates = occurrences
+    candidates[1].verification.root_cause.claim = "根因的不同表述"
+    candidates[1].finding.admission_digest = finding_digest(candidates[1], run.snapshot)
+    monkeypatch.setattr(deduplication, "MAX_INPUT", 1)
+    model = ComparisonModel()
+    report = build_report(run, store.work_items(run.id), candidates, {})
+    result = await deduplication.deduplicate_findings(report, context.provider, context.budget, model)
+    assert result.status == "skipped" and result.omitted_pairs == 1
+    assert model.calls == store.usage(run.id)["model_calls"] == 0
+    assert len(aggregate(candidates, result)) == 2
+
+
+async def test_duplicate_assessment_indices_cannot_suppress_members(occurrences):
+    from langchain_core.messages import AIMessage
+    from app.review.deduplication import admit_comparisons, comparison_material
+
+    run, store, context, candidates = occurrences
+    candidates[1].verification.root_cause.claim = "改写根因"
+    candidates[1].finding.admission_digest = finding_digest(candidates[1], run.snapshot)
+    report = build_report(run, store.work_items(run.id), candidates, {})
+    packet, refs, pairs, _ = comparison_material(report, context.provider)
+    assessment = {"pair_index": 0, "verdict": "same", "reason": "重复的判断。",
+                  "source_refs": [item["source_ref"] for item in packet["source_materials"]]}
+    raw = AIMessage(content="", tool_calls=[{"id": "comparison", "name": "FindingComparisonOutput",
+        "args": {"assessments": [assessment, assessment]}}])
+    assert admit_comparisons(raw, pairs, refs) == []

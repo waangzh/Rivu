@@ -100,35 +100,93 @@ def admit_verification(candidate, output, context):
     return candidate
 
 
-def group_findings(candidates):
-    grouped = {}
-    for candidate in candidates:
-        finding = candidate.finding
-        if (finding is None or candidate.admission_reason or candidate.verification is None
-                or candidate.verification.verdict != "confirmed"):
-            continue
-        output = candidate.verification
-        root = output.root_cause
-        if (root and location_sourced(root.location, candidate.verification_sources)
-                and (finding.location is None
-                     or location_sourced(finding.location, candidate.verification_sources))):
-            origins = sorted({(ref.review_id, ref.commit_sha) for ref in candidate.verification_sources
-                              if location_sourced(root.location, [ref])})
-            key = identity(["root_cause", root.model_dump(), origins, finding.severity,
-                            finding.attribution, finding.publishable])
+def confirmed_candidate(candidate):
+    return (candidate.finding is not None and not candidate.admission_reason
+            and candidate.verification is not None
+            and candidate.verification.verdict == "confirmed")
+
+
+def exact_group_key(candidate):
+    finding = candidate.finding
+    root = candidate.verification.root_cause
+    if (root and location_sourced(root.location, candidate.verification_sources)
+            and (finding.location is None
+                 or location_sourced(finding.location, candidate.verification_sources))):
+        origins = sorted({(ref.review_id, ref.commit_sha) for ref in candidate.verification_sources
+                          if location_sourced(root.location, [ref])})
+        return identity(["root_cause", root.model_dump(), origins, finding.severity,
+                         finding.attribution, finding.publishable])
+    return identity(["exact", finding.claim, finding.trigger, finding.impact, finding.severity,
+                     finding.attribution, finding.author_comment,
+                     finding.location.model_dump() if finding.location else None,
+                     sorted(ref.id for ref in finding.sources)])
+
+
+def comparison_valid(comparison, candidates):
+    if len(set(comparison.candidate_ids)) != 2:
+        return False
+    members = [candidates.get(key) for key in comparison.candidate_ids]
+    if any(item is None or not confirmed_candidate(item) for item in members):
+        return False
+    if tuple(item.finding.admission_digest for item in members) != comparison.admission_digests:
+        return False
+    if len({(item.finding.attribution, item.finding.publishable) for item in members}) != 1:
+        return False
+    refs = [ref for item in members for ref in item.verification_sources]
+    if (len({ref.review_id for ref in refs}) != 1
+            or any(len({ref.commit_sha for ref in refs if ref.side == side}) > 1
+                   for side in ("base", "head"))):
+        return False
+    cited = set(comparison.source_ids)
+    if not cited or not cited <= {ref.id for ref in refs}:
+        return False
+    for item in members:
+        sources = [ref for ref in item.verification_sources if ref.id in cited]
+        locations = [item.finding.location]
+        if item.verification.root_cause:
+            locations.append(item.verification.root_cause.location)
+        if not sources or any(location and not location_sourced(location, sources)
+                              for location in locations):
+            return False
+    return True
+
+
+def group_findings(candidates, deduplication=None):
+    eligible = [item for item in candidates if confirmed_candidate(item)]
+    by_id = {item.id: item for item in eligible}
+    decisions, conflicts = {}, set()
+    if deduplication and deduplication.status == "ready":
+        for comparison in deduplication.comparisons:
+            if comparison_valid(comparison, by_id):
+                pair = frozenset(comparison.candidate_ids)
+                if pair in decisions:
+                    conflicts.add(pair)
+                decisions[pair] = comparison.verdict
+    keys = {item.id: exact_group_key(item) for item in eligible}
+
+    def equivalent(left, right):
+        pair = frozenset((left.id, right.id))
+        if pair in conflicts:
+            return False
+        if pair in decisions:
+            return decisions[pair] == "same"
+        return keys[left.id] == keys[right.id]
+
+    groups = []
+    for candidate in eligible:
+        group = next((items for items in groups
+                      if all(equivalent(candidate, member) for member in items)), None)
+        if group is None:
+            groups.append([candidate])
         else:
-            key = identity(["exact", finding.claim, finding.trigger, finding.impact, finding.severity,
-                            finding.attribution, finding.author_comment,
-                            finding.location.model_dump() if finding.location else None,
-                            sorted(ref.id for ref in finding.sources)])
-        grouped.setdefault(key, []).append(finding)
-    groups = list(grouped.values())
+            group.append(candidate)
     return [FindingGroup(
-        representative_id=next((item.id for item in items
-                                if item.location and item.location.side == "head"), items[0].id),
-        member_candidate_ids=[item.candidate_id for item in items]) for items in groups]
+        representative_id=next((item.finding.id for item in items
+                                if item.finding.location and item.finding.location.side == "head"),
+                               items[0].finding.id),
+        member_candidate_ids=[item.id for item in items]) for items in groups]
 
 
-def aggregate(candidates):
+def aggregate(candidates, deduplication=None):
     by_id = {item.finding.id: item.finding for item in candidates if item.finding}
-    return [by_id[group.representative_id] for group in group_findings(candidates)]
+    return [by_id[group.representative_id] for group in group_findings(candidates, deduplication)]

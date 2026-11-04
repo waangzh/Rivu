@@ -288,6 +288,7 @@ test('同根因显示一个问题组，保留各位置独立主张、归因与�
     });
     const first = finding('first', 'first.py', '第一处入口失败');
     const second = finding('second', 'second.py', '<script>第二处入口失败</script>');
+    second.severity = 'medium';
     const candidates = [first, second].map(item => ({
       id: item.candidate_id, finding: item, admission_reason: null,
       proposal: { claim: item.claim, location: item.location }, sources: item.sources,
@@ -302,6 +303,7 @@ test('同根因显示一个问题组，保留各位置独立主张、归因与�
     const html = await renderToString(createSSRApp(Component, {
       task: task('completed'), findings: [first], candidates,
       findingGroups: [{ representative_id: first.id, member_candidate_ids: ['first', 'second'] }],
+      deduplication: { status: 'ready', omitted_pairs: 1 },
     }));
     assert.match(html, /1 个问题组 · 2 条已确认记录/);
     assert.equal((html.match(/\brg-finding-row\b/g) || []).length, 1);
@@ -314,6 +316,36 @@ test('同根因显示一个问题组，保留各位置独立主张、归因与�
     assert.match(html, /source-second/);
     assert.match(html, /&lt;script&gt;第二处入口失败&lt;\/script&gt;/);
     assert.match(html, /第三处尚未确定/);
+    assert.match(html, /成员严重度存在分歧/);
+    assert.match(html, /严重度：medium/);
+    assert.match(html, /部分疑似重复尚未完成根因比较/);
+    assert.doesNotMatch(html, /<script>/);
+  } finally { await server.close(); }
+});
+
+test('HTTP 响应已收到时分别展示本地处理失败与已保留用量', async () => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [], include: [] },
+    appType: 'custom',
+  });
+  try {
+    const { default: Component } = await server.ssrLoadModule('/src/components/pages/ReviewActivityPage.vue');
+    const unit = { id: 'work', kind: 'review', unit_id: 'unit', status: 'failed',
+      attempt: 1, material_delivery: 'complete', tool_calls: 0,
+      error_code: 'agent_execution_failed', missing_material_reasons: {}, result: null,
+      error_diagnostic: { stage: 'agent_processing', error_type: 'ValidationError',
+        response_received: true, usage_known: true, ticket: 'request-ticket',
+        request_id: '<script>untrusted-id</script>', code: null, http_status: null },
+    };
+    const html = await renderToString(createSSRApp(Component, {
+      task: task('failed'), units: [unit], report: null,
+    }));
+    assert.match(html, /Agent 结构化处理/);
+    assert.match(html, /已收到模型响应；用量已保留/);
+    assert.match(html, /响应到达不代表核验成功/);
+    assert.match(html, /request-ticket/);
+    assert.match(html, /&lt;script&gt;untrusted-id&lt;\/script&gt;/);
     assert.doesNotMatch(html, /<script>/);
   } finally { await server.close(); }
 });

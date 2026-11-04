@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { Candidate, Finding, FindingGroup, Run } from '../../types/review';
+import type { Candidate, Finding, FindingDeduplication, FindingGroup, Run } from '../../types/review';
 import AppIcon from '../common/AppIcon.vue';
 import EmptyState from '../common/EmptyState.vue';
 import StatusBadge from '../common/StatusBadge.vue';
@@ -10,6 +10,7 @@ const props = defineProps<{
   findings: Finding[];
   candidates: Candidate[];
   findingGroups?: FindingGroup[];
+  deduplication?: FindingDeduplication;
   loading?: boolean;
 }>();
 
@@ -29,6 +30,7 @@ const unresolvedCandidates = computed(() => props.candidates.filter(
 ));
 const current = computed(() => visible.value.find(item => item.id === selected.value) || visible.value[0]);
 const currentMembers = computed(() => current.value ? membersOf(current.value) : []);
+const severityConflict = computed(() => new Set(currentMembers.value.map(item => item.severity)).size > 1);
 const currentRoot = computed(() => props.candidates.find(
   item => item.id === current.value?.candidate_id,
 )?.verification?.root_cause);
@@ -57,6 +59,9 @@ watch(() => props.task.id, () => { selected.value = ''; });
     <input v-model="query" class="input" placeholder="搜索问题或文件" aria-label="搜索问题" />
     <span class="muted small">疑似问题记录 {{ candidates.length }} 条</span>
   </div>
+  <p v-if="deduplication && (deduplication.status === 'failed' || deduplication.status === 'skipped' || deduplication.omitted_pairs)" class="notice small space-top">
+    部分疑似重复尚未完成根因比较，保留各条记录；问题组数不代表已经识别全部独立根因。
+  </p>
 
   <section v-if="unresolvedCandidates.length" class="card card-pad space-top">
     <div class="card-header">
@@ -140,17 +145,19 @@ watch(() => props.task.id, () => { selected.value = ''; });
       <section v-if="currentMembers.length > 1" class="card card-pad">
         <h2>同根因的各位置记录</h2>
         <p class="muted small">各记录分别通过独立核验，列表展示一个代表问题；每个位置的主张、归因与来源证据均保留。</p>
+        <p v-if="severityConflict" class="notice warn small">成员严重度存在分歧，保留各自评级；列表显示代表记录的评级，未重新裁定组严重度。</p>
         <dl v-if="currentRoot" class="rg-finding-facts">
-          <div><dt>共同根因</dt><dd>{{ currentRoot.claim }}</dd></div>
+          <div><dt>代表记录的根因</dt><dd>{{ currentRoot.claim }}</dd></div>
           <div><dt>根因位置</dt><dd><code>{{ currentRoot.location.path }}:{{ currentRoot.location.line }} · {{ currentRoot.location.side.toUpperCase() }}</code></dd></div>
-          <div><dt>共同触发条件</dt><dd>{{ currentRoot.trigger }}</dd></div>
-          <div><dt>共同影响</dt><dd>{{ currentRoot.impact }}</dd></div>
+          <div><dt>代表触发条件</dt><dd>{{ currentRoot.trigger }}</dd></div>
+          <div><dt>代表影响</dt><dd>{{ currentRoot.impact }}</dd></div>
         </dl>
         <details v-for="member in currentMembers" :key="member.id" class="space-top">
           <summary class="link">
             {{ member.location ? `${member.location.path}:${member.location.line} · ${member.location.side.toUpperCase()}` : '位置尚未确定' }}
           </summary>
           <p>{{ member.claim }}</p>
+          <p>严重度：{{ member.severity }}</p>
           <p>触发条件：{{ member.trigger }}</p>
           <p>影响：{{ member.impact }}</p>
           <p class="rg-preserve-lines">审查意见：{{ member.author_comment }}</p>
