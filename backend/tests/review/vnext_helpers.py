@@ -21,6 +21,7 @@ def completion_gap(missing_premise="尚未确定调用方允许的输入。", so
         "missing_premise": missing_premise,
         "why_required": "此契约决定变更后的计算路径是否允许被调用，现有源码未能确定。",
         "source_refs": ["S1"] if source_refs is None else source_refs,
+        "dependency_refs": [],
     }
 
 

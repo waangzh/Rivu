@@ -52,7 +52,7 @@ def _repository(url: str) -> str:
     return "/".join(quote(part, safe="") for part in parts)
 
 
-async def _lines(client: httpx.AsyncClient, repo: str, sha: str, path: str) -> list[str]:
+async def _text(client: httpx.AsyncClient, repo: str, sha: str, path: str) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
         raise FileContextError("任务缺少有效的固定提交版本")
     commit = await _get(client, f"/repos/{repo}/git/commits/{sha}", 256 * 1024)
@@ -88,6 +88,14 @@ async def _lines(client: httpx.AsyncClient, repo: str, sha: str, path: str) -> l
         lines.pop()
     if len(lines) > 50_000:
         raise FileContextError("文件超过 50000 行上下文预览限制")
+    return text
+
+
+async def _lines(client: httpx.AsyncClient, repo: str, sha: str, path: str) -> list[str]:
+    text = await _text(client, repo, sha, path)
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
     return lines
 
 

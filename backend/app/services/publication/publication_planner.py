@@ -61,6 +61,10 @@ class PublicationPlanner:
             or (candidate.verification.verdict == "refuted" and candidate.id not in refuted)
             or (candidate.verification.verdict == "confirmed" and candidate.finding is None)
             for candidate in (report.candidates if report else []))
+        if report:
+            from app.review.report import build_report
+            current = build_report(run, report.units, report.candidates, report.usage)
+            unresolved += current.unresolved_unit_count
         complete = bool(report and run.status == report.status == "completed")
         reasons = [*blockers, *(report.reasons if report else [])]
         history_unchecked = bool(report and any(
@@ -72,7 +76,8 @@ class PublicationPlanner:
                   else "cancelled" if "cancelled" in {run.status, report.status if report else None}
                   else "findings" if selected else "inconclusive" if unresolved or withheld
                     or not complete or reasons or history_unchecked else "clean"),
-            coverage="complete" if complete and not reasons and not history_unchecked else "partial",
+            coverage=(report.coverage if report and report.coverage != "unknown" else
+                      "complete" if complete and not reasons and not history_unchecked else "partial"),
             confirmed_count=len([candidate for candidate in (report.candidates if report else [])
                                  if candidate.verification and candidate.verification.verdict == "confirmed"]),
             publishable_count=len(selected), unresolved_count=unresolved,

@@ -19,6 +19,25 @@ def _valid_sources(archive, refs):
     return True
 
 
+def _valid_dependencies(archive, candidate, run):
+    from app.review.dependencies import read_dependency
+    from app.review.evidence import digest
+    import json
+    for handles, sources in ((candidate.proposal.dependency_refs, candidate.dependency_sources),
+                             (candidate.verification.dependency_refs, candidate.verification_dependency_sources)):
+        if len(set(handles)) != len(handles) or len(handles) != len(sources) or len({ref.id for ref in sources}) != len(sources):
+            return False
+    if ((candidate.dependency_sources or candidate.verification_dependency_sources)
+            and candidate.decision_digest != finding_digest(candidate, run.snapshot)):
+        return False
+    for source in [*candidate.dependency_sources, *candidate.verification_dependency_sources]:
+        read_dependency(archive, source)
+        key = digest(json.dumps([source.manifest_source.id, source.package, source.version]))
+        if run.dependency_pins.get(key) != source.binding:
+            return False
+    return True
+
+
 def _valid_finding(run, candidate, finding, archive):
     verification = candidate.verification
     if candidate.admission_reason:
@@ -45,7 +64,8 @@ def _valid_finding(run, candidate, finding, archive):
         return "finding_digest_mismatch"
     if not (_valid_sources(archive, candidate.sources)
             and _valid_sources(archive, candidate.verification_sources)
-            and _valid_sources(archive, finding.sources)):
+            and _valid_sources(archive, finding.sources)
+            and _valid_dependencies(archive, candidate, run)):
         return "publication_evidence_invalid"
     return None
 
@@ -91,7 +111,8 @@ def validated_questions(run, artifacts=None):
                     for ref in sources) for sources in (candidate.sources, refs)))):
             continue
         try:
-            if _valid_sources(archive, candidate.sources) and _valid_sources(archive, refs):
+            if (_valid_sources(archive, candidate.sources) and _valid_sources(archive, refs)
+                    and _valid_dependencies(archive, candidate, run)):
                 selected.append(candidate)
         except (OSError, ValueError, TypeError):
             continue
@@ -112,7 +133,8 @@ def validated_refutations(run, artifacts=None):
             continue
         try:
             if (_valid_sources(archive, candidate.sources)
-                    and _valid_sources(archive, candidate.verification_sources)):
+                    and _valid_sources(archive, candidate.verification_sources)
+                    and _valid_dependencies(archive, candidate, run)):
                 valid.add(candidate.id)
         except (OSError, ValueError, TypeError):
             continue

@@ -29,7 +29,7 @@ async def stream_review(task_id: str, request: Request):
             signature = identity([run.updated_at, [item.model_dump() for item in units]])
             if signature != last:
                 yield {"event": "task", "data": run.model_dump_json()}
-                yield {"event": "progress", "data": json.dumps([item.model_dump() for item in units])}
+                yield {"event": "progress", "data": json.dumps([item.model_dump(mode="json") for item in units])}
                 last = signature
             if run.status in TERMINAL:
                 yield {"event": "done", "data": run.model_dump_json()}

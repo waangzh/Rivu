@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.llm.receipts import observe_response, safe_request_id
 from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
 from app.review.domain import AgentErrorDiagnostic, UnitCompletion, VerificationOutput, utcnow
+from app.review.evidence import digest
 from app.review.findings import admit_verification
 from app.review.planner import tokens
 from app.review.observability import event, message_content, review_trace, stage
@@ -130,7 +131,10 @@ class RequestGate(AgentMiddleware):
         result = await handler(request)
         # Schema and unknown-tool errors happen before @bounded executes.
         if isinstance(result, ToolMessage) and result.status == "error":
-            context.tool_calls += 1
+            limit = context.provider.run.configuration.options.limits.tool_calls
+            reserve = min(3, max(0, limit // 4)) if context.work.kind != "verification" else 0
+            if context.tool_calls < limit - reserve:
+                context.tool_calls += 1
             fields = request.tool.tool_call_schema.model_fields if request.tool else {}
             error = ("tool_call_limit"
                      if context.tool_calls > context.provider.run.configuration.options.limits.tool_calls
@@ -224,7 +228,8 @@ class RequestGate(AgentMiddleware):
         remaining = available["agent_model_calls"]
         call_remaining = min(remaining, available["model_calls"]) if available["model_calls"] is not None else remaining
         run = context.provider.run
-        deadline = run.review_cutoff if context.work.kind == "review" else run.hard_deadline
+        deadline = (min(run.review_cutoff, context.work.investigation_deadline or run.review_cutoff)
+                    if context.work.kind in {"review", "supplement"} else run.hard_deadline)
         seconds = max(0, (deadline - utcnow()).total_seconds())
         closing_reasons = []
         if repeated >= TOOL_LOOP_LIMIT or context.loop_closing_calls:
@@ -235,11 +240,12 @@ class RequestGate(AgentMiddleware):
         if (available["output_tokens"] is not None
                 and available["output_tokens"] < 2 * limits.output_tokens):
             closing_reasons.append("output_tokens")
-        if seconds <= settings.rivu_model_request_timeout_seconds:
+        if seconds <= min(30, settings.rivu_model_request_timeout_seconds / 2):
             closing_reasons.append("time")
         if call_remaining <= 1:
             closing_reasons.append("call_fuse")
-        if context.tool_calls >= limits.tool_calls:
+        submission_reserve = min(3, max(0, limits.tool_calls // 4)) if context.work.kind != "verification" else 0
+        if context.tool_calls >= limits.tool_calls - submission_reserve:
             closing_reasons.append("tool_limit")
         if context.structured_output_retry:
             closing_reasons.append("format_correction")
@@ -330,7 +336,7 @@ class RequestGate(AgentMiddleware):
                 instruction += (
                     " Finish with unresolved=null if the necessary checks are complete; "
                     "otherwise identify the specific unanswered question."
-                    if context.work.kind == "review" else
+                    if context.work.kind != "verification" else
                     " Confirm or refute only with the required supporting evidence; "
                     "otherwise return insufficient and identify the missing premise."
                 )
@@ -357,6 +363,10 @@ class RequestGate(AgentMiddleware):
             context.window.metrics["pressure_reason"] or "-",
             context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"])
         pending, hunks = dict(context.pending), dict(context.pending_hunks)
+        bodies = context.dependency_bodies(messages)
+        dependencies = {handle: ref for handle, ref in context.pending_dependencies.items()
+                        if handle in bodies and bodies[handle].get("dependency") == ref.model_dump()
+                        and digest(bodies[handle]["content"]) == ref.content_hash}
         context.error_diagnostic = None
         receipt = None
         try:
@@ -414,7 +424,7 @@ class RequestGate(AgentMiddleware):
             len(message.tool_calls) if message else 0, ",".join(tool_names) or "-")
         await context.check_active()
         # A successful response proves the model received the full request packet.
-        await context.acknowledge(pending, hunks)
+        await context.acknowledge(pending, hunks, dependencies)
         await context.persist()
         # Keep any guidance at its original position in the append-only history.
         return ModelResponse(result=[*([guidance] if guidance else []), *response.result],
@@ -429,6 +439,7 @@ class AgentRunner:
         try:
             if output.unresolved:
                 context.resolve(output.unresolved.source_refs)
+                context.resolve_dependencies(output.unresolved.dependency_refs)
             return output
         except ValueError:
             message = HumanMessage(content=completion_correction(context))
@@ -442,6 +453,7 @@ class AgentRunner:
         if revised.unresolved:
             try:
                 context.resolve(revised.unresolved.source_refs)
+                context.resolve_dependencies(revised.unresolved.dependency_refs)
             except ValueError as exc:
                 raise MissingStructuredResult from exc
         return revised
@@ -509,8 +521,9 @@ class AgentRunner:
         logger.info("Agent开始 review_id=%.8s work_id=%.8s unit_id=%.8s kind=%s attempt=%d attempt_id=%.8s",
                     provider.run.id, work.id, work.unit_id, work.kind, work.attempt, work.attempt_id)
         try:
-            role = "reviewer" if work.kind == "review" else "verifier"
-            tools = [*READ_TOOLS, record_investigation, recall_context]
+            role = "verifier" if work.kind == "verification" else "reviewer"
+            from app.review.tools import read_dependency_source, recall_dependency
+            tools = [*READ_TOOLS, record_investigation, recall_context, read_dependency_source, recall_dependency]
             if role == "reviewer":
                 tools.append(submit_candidate)
             if provider.run.configuration.options.include_pr_discussions and provider.discussions:
@@ -557,8 +570,14 @@ class AgentRunner:
             else:
                 output = await self._admit_completion(agent, result, output, context)
             # ainvoke only returns after all tool tasks and their DB receipts finish.
+            saved_output = output.model_dump()
+            if isinstance(output, UnitCompletion) and output.unresolved:
+                saved_output["unresolved_sources"] = [ref.model_dump() for ref in
+                    context.resolve(output.unresolved.source_refs)]
+                saved_output["unresolved_dependency_sources"] = [ref.model_dump() for ref in
+                    context.resolve_dependencies(output.unresolved.dependency_refs)]
             await asyncio.to_thread(provider.store.finish_work, provider.run.id, work,
-                "completed", output.model_dump(), None, provider.lease,
+                "completed", saved_output, None, provider.lease,
                 candidate=candidate, tool_calls=context.tool_calls)
             if candidate:
                 event("candidate.verified", candidate_id=candidate.id, model_verdict=output.verdict,

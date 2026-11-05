@@ -41,6 +41,7 @@ class Options(Model):
         min_length=1, max_length=4)
     include_pr_discussions: bool = False
     generate_overview: bool = True
+    gap_followups: int = Field(default=2, ge=0, le=3)
     limits: Limits = Field(default_factory=Limits)
 
     @field_validator("paths")
@@ -56,7 +57,7 @@ class Configuration(Model):
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] | None = None
     options: Options
-    prompt_version: str = "review-vnext-13"
+    prompt_version: str = "review-vnext-14"
 
 
 class Snapshot(Model):
@@ -89,6 +90,26 @@ class Location(Model):
     path: str
     line: int = Field(ge=1)
     side: Literal["base", "head"] = "head"
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value):
+        return validate_repo_relative_path(value)
+
+
+class DependencyRef(Model):
+    id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_id: str
+    package: str
+    version: str
+    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    path: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_source: SourceRef
+    binding: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("path")
     @classmethod
@@ -133,6 +154,7 @@ class CandidateInput(FailureDescription):
     source_refs: list[str] = Field(min_length=1, max_length=32)
     location: Location | None = None
     root_cause: RootCause | None = None
+    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
 
 
 class VerificationQuestion(Model):
@@ -151,6 +173,7 @@ class VerificationOutput(Model):
     verified_claim: FailureDescription | None = None
     question: VerificationQuestion | None = None
     root_cause: RootCause | None = None
+    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
 
 
 class CompletionGap(Model):
@@ -159,6 +182,7 @@ class CompletionGap(Model):
     missing_premise: str = Field(min_length=1, max_length=1000)
     why_required: str = Field(min_length=1, max_length=1000)
     source_refs: list[str] = Field(min_length=1, max_length=32)
+    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
 
 
 class UnitCompletion(Model):
@@ -198,8 +222,11 @@ class Candidate(Model):
     verification_sources: list[SourceRef] = Field(default_factory=list)
     admission_reason: str | None = None
     question_digest: str | None = None
+    decision_digest: str | None = None
     finding: Finding | None = None
     previous_candidate_id: str | None = None
+    dependency_sources: list[DependencyRef] = Field(default_factory=list)
+    verification_dependency_sources: list[DependencyRef] = Field(default_factory=list)
 
 
 class FindingGroup(Model):
@@ -240,7 +267,7 @@ class AgentErrorDiagnostic(Model):
 
 class WorkItem(Model):
     id: str
-    kind: Literal["review", "verification"]
+    kind: Literal["review", "verification", "supplement"]
     unit_id: str
     candidate_id: str | None = None
     status: Literal["queued", "running", "completed", "interrupted", "failed", "skipped"] = "queued"
@@ -257,6 +284,10 @@ class WorkItem(Model):
     result: dict | None = None
     tool_calls: int = 0
     reused_from: str | None = None
+    followup_of: str | None = None
+    followup_number: int = 0
+    followup_gap: dict | None = None
+    investigation_deadline: datetime | None = None
 
     @property
     def has_unresolved_investigation(self):
@@ -322,6 +353,10 @@ class Report(Model):
     overview: Overview = Field(default_factory=Overview)
     usage: dict = Field(default_factory=dict)
     reasons: list[str] = Field(default_factory=list)
+    coverage: Literal["complete", "partial", "unknown"] = "unknown"
+    coverage_reasons: list[str] = Field(default_factory=list)
+    unresolved_unit_count: int = 0
+    unresolved_candidate_count: int = 0
 
 
 class LocalGitSource(Model):
@@ -353,6 +388,7 @@ class Run(Model):
     completed_at: datetime | None = None
     error_code: str | None = None
     discussion_uri: str | None = None
+    dependency_pins: dict[str, dict[str, str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def valid_source_identity(self):

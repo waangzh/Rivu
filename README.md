@@ -160,8 +160,10 @@ Publisher 独立复验规范化 Finding、核验准入、固定快照、来源�
 - `RIVU_MODEL_CONTEXT_TOKENS` 限制请求上下文容量；预估包括消息、工具和结构化 Schema。使用分词估算，不能当成所有模型的精确计费上界。
 - Reviewer/Verifier 首轮和单块材料交付不再使用 32K 或分组容量作为输入上限，按模型窗口扣除输出与提示预留，以及剩余整轮预算组织；显式累计预算下仍保留核验与总览保护。200K 和可用空间四分之一仅用于分组容量策略，不限制单元后续输入。源码读取的路径、行数、文件大小与返回字符限制保留；请求放不下时仍明确记录未交付材料，并可通过工具补读。
 - `RIVU_AGENT_MAX_CALLS` 与 `RIVU_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认单 Agent 为 48、整轮不设调用上限。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
-- `RIVU_AGENT_MAX_TOOL_CALLS` 继续限制单次 Agent 的工具调用，扫描量和工具超时约束保留；并发由 `RIVU_REVIEW_CONCURRENCY` 控制。
-- 总时长由 `RIVU_REVIEW_TIMEOUT_SECONDS` 冻结。软截止停止新发现请求；硬截止阻止所有新模型请求，停止在途工作，只做合法的本地事实收尾。
+- `RIVU_AGENT_MAX_TOOL_CALLS` 限制单次 Agent 的工具调用；在总额内最多预留 3 次候选提交，调查工具提前收尾，避免额度耗尽后无法交付。扫描量和工具超时约束保留；并发由 `RIVU_REVIEW_CONCURRENCY` 控制。源码涉及认证、数据、资金等关键路径时优先派发，测试、文档和 changeset 随后处理；候选核验繁忙时仍保留发现任务槽位。
+- 默认总时长以 `RIVU_REVIEW_TIMEOUT_SECONDS` 为起点，每 3 个并发批次增加一倍起点期限，受 `RIVU_REVIEW_SCALED_TIMEOUT_MAX_SECONDS`（默认 7200）限制；明确填写的 `timeout_seconds` 和累计调用/Token 上限不自动放大。最终期限在新任务中冻结。首轮按剩余批次分配调查时间；软截止停止发现和补查，硬截止停止所有在途工作与新请求，保留合法的本地事实收尾。
+- 必要缺口在首轮和候选核验结束后自动补查，默认一次；取得新源码或提交新候选时可再补查一次，由 `RIVU_REVIEW_GAP_FOLLOWUPS=2` 控制，0 可关闭。补查使用独立持久工作项，保留此前结果与证据，共用原期限和累计预算；无进展不反复补查。报告分别显示执行状态、范围材料交付与关键未决，`completed` 不等于审查通过；关键未决继续阻止 clean 结论及自动发布。
+- 依赖工具支持 HEAD `go.mod` 的 GitHub 模块精确标签版本，以及 npm `package-lock.json` 的精确公开版本。版本先解析并冻结到完整 GitHub commit SHA，再复用固定 blob 读取和内容归档；最多 6 个依赖包、每个 Agent 最多 12 段、每段最多 240 行。外部资料用独立 D 引用，不能替代目标 BASE/HEAD 的 S 证据。暂不支持 Go replace、子目录模块、pseudo-version、其他 lockfile 或自由网址；npm 上游源码也不等于发布包的生成产物。缺失资料保留具体待核实项，不能据此确认缺陷。该工具只读取公开静态材料，不发送仓库源码或 GitHub 凭据给依赖服务、不安装或执行目标依赖。
 - 请求前原子预留，未知用量保持未知并占用预留；恢复不清零。实际用量超过估算后如实记录，停止后续超预算请求。
 
 SQLite 与本地 Artifact 是单用户持久化，不是多租户安全隔离。源码读取保留 tracked blob、路径、敏感文件、realpath / symlink、大小和调用预算约束；不向模型暴露 Shell、任意网络或发布权限。日志不输出源码、凭据和供应商异常正文。

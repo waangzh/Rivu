@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from app.review.domain import AgentErrorDiagnostic, Model, Snapshot, SourceRef
+from app.review.domain import AgentErrorDiagnostic, DependencyRef, Model, Snapshot, SourceRef
 from app.review.evidence import digest, source_lines
 from app.review.findings import candidate_summary
 from app.review.planner import identity, members, tokens
@@ -84,6 +84,10 @@ class AgentContext:
     submitted: dict[str, dict] = field(default_factory=dict)
     initial_packet: dict = field(default_factory=dict)
     initial_archive: dict | None = None
+    dependencies: dict[str, DependencyRef] = field(default_factory=dict)
+    pending_dependencies: dict[str, DependencyRef] = field(default_factory=dict)
+    dependency_counter: int = 0
+    dependency_slots: int = 0
     window: Any = None
 
     @property
@@ -173,7 +177,7 @@ class AgentContext:
         )
 
     def small_unit_ready_for_checkpoint(self) -> bool:
-        if self.work.kind != "review":
+        if self.work.kind not in {"review", "supplement"}:
             return False
         unit = next(unit for unit in self.provider.run.plan.units if unit.id == self.work.unit_id)
         changed_lines = sum(
@@ -325,6 +329,7 @@ class AgentContext:
             "investigations": {key: value.model_dump() for key, value in self.investigations.items()},
             "memory_revision": self.memory_revision,
             "sources": {key: value.model_dump() for key, value in self.visible.items()},
+            "dependencies": {key: value.model_dump() for key, value in self.dependencies.items()},
             "receipts": self.receipts, "visible_receipts": sorted(self.visible_receipts),
             "candidates": self.submitted, "cursors": self.cursors,
             "context_metrics": self.window.metrics if self.window else {},
@@ -382,11 +387,47 @@ class AgentContext:
             raise ValueError("source_not_visible_in_this_attempt")
         return [self.visible[handle] for handle in handles]
 
-    async def acknowledge(self, pending, hunks):
+    def resolve_dependencies(self, handles):
+        if len(set(handles)) != len(handles) or any(handle not in self.dependencies for handle in handles):
+            raise ValueError("dependency_reference_not_received")
+        return [self.dependencies[handle] for handle in handles]
+
+    def stage_dependency(self, ref):
+        for handle, known in {**self.dependencies, **self.pending_dependencies}.items():
+            if known.id == ref.id:
+                return handle
+        self.dependency_counter += 1
+        handle = f"D{self.dependency_counter}"
+        self.pending_dependencies[handle] = ref
+        return handle
+
+    @staticmethod
+    def dependency_bodies(messages):
+        bodies = {}
+        def visit(value):
+            if isinstance(value, dict):
+                if value.get("dependency_ref") and isinstance(value.get("content"), str) and not value.get("content_omitted"):
+                    bodies[value["dependency_ref"]] = value
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+        for message in messages:
+            try:
+                visit(json.loads(message.content))
+            except (ValueError, TypeError):
+                continue
+        return bodies
+
+    async def acknowledge(self, pending, hunks, dependencies=None):
         await asyncio.to_thread(self.provider.store.deliver, self.provider.run.id, self.work,
             list(hunks), self.material_failures, self.provider.lease,
             source_ids=[ref.id for ref in pending.values()], digests=hunks)
         self.visible.update(pending)
+        for handle, ref in (dependencies or {}).items():
+            self.dependencies[handle] = ref
+            self.pending_dependencies.pop(handle, None)
         self.delivered_hunks.update(hunks)
         self.visible_receipts.update(self.receipts)
         for ref in pending.values():
@@ -496,7 +537,32 @@ class ContextProvider:
             "candidate": candidate.proposal.model_dump(exclude={"source_refs"}) if candidate else None,
             "candidate_materials": candidate_materials,
             "missing_candidate_materials": missing_candidate_materials,
+            "dependency_materials": [],
         }
+        dependency_refs = candidate.dependency_sources if candidate else [DependencyRef.model_validate(ref)
+            for ref in (context.work.followup_gap or {}).get("unresolved_dependency_sources", [])]
+        if dependency_refs:
+            from app.review.dependencies import read_dependency
+            for ref in dependency_refs:
+                try:
+                    content = await asyncio.to_thread(read_dependency, self.evidence, ref)
+                except (ValueError, OSError):
+                    base["missing_dependency_materials"] = [*base.get("missing_dependency_materials", []),
+                        {"package": ref.package, "version": ref.version, "path": ref.path,
+                         "reason": "dependency_material_unavailable"}]
+                    continue
+                handle = context.stage_dependency(ref)
+                base["dependency_materials"].append({"dependency_ref": handle,
+                    "dependency": ref.model_dump(), "content": content})
+        if context.work.kind == "supplement":
+            base["followup"] = {
+                "previous_gap_untrusted": context.work.followup_gap,
+                "instruction": "Investigate only this remaining required check. Reconcile it with "
+                    "already_submitted decisions, reading their actual sources when relevant. "
+                    "Do not resubmit an existing claim. Prior source handles are not authorized "
+                    "in this attempt: use newly received handles. Finish with unresolved=null "
+                    "only if the necessary check is decided or the gap was unsupported speculation.",
+            }
         def fits_request():
             return request_budget is None or estimate_request(base) <= request_budget
 
@@ -510,13 +576,21 @@ class ContextProvider:
             for key in ("body", "title"):
                 if not fits_request():
                     base["author_statement_untrusted"][key] = ""
+            while base["dependency_materials"] and not fits_request():
+                removed = base["dependency_materials"].pop()
+                context.pending_dependencies.pop(removed["dependency_ref"], None)
 
         trim_background()
         if not fits_request():
             raise BudgetExceeded("input_token_limit")
         spent = 0
-        if candidate:
-            for ref, omission in zip(candidate.sources, omissions):
+        followup_refs = [SourceRef.model_validate(ref) for ref in
+            (context.work.followup_gap or {}).get("unresolved_sources", [])]
+        if candidate or followup_refs:
+            refs = candidate.sources if candidate else followup_refs
+            for index, ref in enumerate(refs):
+                omission = omissions[index] if candidate else {
+                    "path": ref.path, "side": ref.side, "reason": "material_capacity"}
                 before_pending = dict(context.pending)
                 try:
                     item = await context.read(ref.path, ref.start_line, ref.end_line, ref.side)
@@ -525,7 +599,8 @@ class ContextProvider:
                     continue
                 cost = tokens(item)
                 candidate_materials.append(item)
-                missing_candidate_materials.remove(omission)
+                if candidate:
+                    missing_candidate_materials.remove(omission)
                 trim_background()
                 if ((request_budget is None and spent + cost > self.material_capacity())
                         or not fits_request()):

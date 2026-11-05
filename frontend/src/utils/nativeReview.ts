@@ -14,6 +14,7 @@ export const phaseLabel = (phase: string) =>
     planning: '规划审查单元',
     reviewing: '审查中',
     verification: '核验候选',
+    supplement: '补查剩余缺口',
     report: '汇总报告',
     overview: '整理审查结果',
     running: '执行中',
@@ -37,6 +38,7 @@ export const executionErrorLabel = (code: string | null) =>
     tool_call_limit: '达到工具调用上限，调查尚未完成',
     agent_tool_loop: 'Agent 持续重复相同工具调用，未完成结构化收尾',
     review_cutoff: '达到调查截止时间，未完成审查单元保持未知',
+    investigation_deadline: '达到本单元首轮调查期限，剩余检查保持未知',
     hard_deadline: '达到本轮审查总期限',
     TimeoutError: '模型或工具调用超时',
     APITimeoutError: '模型请求超时',
@@ -61,7 +63,7 @@ export const reviewReasonLabel = (reason: string) =>
   })[reason] || reason;
 
 export const hasUnresolvedInvestigation = (item: WorkItem) =>
-  item.kind === 'review' && Boolean(item.result?.unresolved || item.result?.unresolved_reason);
+  item.kind !== 'verification' && Boolean(item.result?.unresolved || item.result?.unresolved_reason);
 
 export function observedUsage(report: Pick<Report, 'usage'> | null) {
   if (!report) return {
@@ -125,6 +127,7 @@ export function defaultPlan(
     focus: ['correctness', 'security', 'performance', 'compatibility'],
     include_pr_discussions: discussions,
     generate_overview: true,
+    gap_followups: 2,
     limits: {
       model_calls: null,
       tool_calls: null,

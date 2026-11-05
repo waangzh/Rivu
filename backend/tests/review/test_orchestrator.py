@@ -525,11 +525,11 @@ async def test_candidate_survives_reviewer_failure_and_is_verified(tmp_path):
     assert report.usage["unknown_calls"] == 1
 
 
-async def test_normal_completion_without_material_is_partial(tmp_path):
+async def test_normal_completion_without_material_keeps_coverage_partial(tmp_path):
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     provider.evidence.max_file_bytes = 1
     report = await ReviewOrchestrator(store, AgentRunner(ReviewModel(empty=True))).run(run.id, provider, lease)
-    assert report.status == "partial"
+    assert report.status == "completed" and report.coverage == "partial"
     assert report.units[0].status == "completed"
     assert report.units[0].material_delivery == "incomplete"
     assert report.findings == []

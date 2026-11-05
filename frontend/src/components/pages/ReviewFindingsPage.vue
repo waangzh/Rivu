@@ -34,6 +34,9 @@ const severityConflict = computed(() => new Set(currentMembers.value.map(item =>
 const currentRoot = computed(() => props.candidates.find(
   item => item.id === current.value?.candidate_id,
 )?.verification?.root_cause);
+const currentDependencies = computed(() => props.candidates.find(
+  item => item.id === current.value?.candidate_id,
+)?.verification_dependency_sources ?? []);
 const confirmedOccurrences = computed(() => props.candidates.filter(item => item.finding).length);
 
 const attribution = {
@@ -97,6 +100,7 @@ watch(() => props.task.id, () => { selected.value = ''; });
           <p class="rg-candidate__reason">
             {{ item.verification ? '核验说明：' + item.verification.reason : '本轮结束时尚未取得核验结果。' }}
           </p>
+          <code v-for="source in item.verification_dependency_sources" :key="source.id" class="rg-evidence-id">依赖参考 · {{ source.package }}@{{ source.version }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.commit_sha.slice(0, 12) }}</code>
         </details>
       </li>
     </ol>
@@ -139,6 +143,7 @@ watch(() => props.task.id, () => { selected.value = ''; });
         <details class="space-top">
           <summary class="link">来源证据</summary>
           <code v-for="source in current.sources" :key="source.id" class="rg-evidence-id">{{ source.side.toUpperCase() }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.id }}</code>
+          <code v-for="source in currentDependencies" :key="source.id" class="rg-evidence-id">依赖参考 · {{ source.package }}@{{ source.version }} · {{ source.path }}:{{ source.start_line }}–{{ source.end_line }} · {{ source.commit_sha }}</code>
         </details>
         <p v-if="!current.publishable" class="notice small">该 Finding 不具备发布资格，发布面板会按服务端计划进一步校验。</p>
       </section>

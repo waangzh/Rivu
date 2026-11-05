@@ -68,6 +68,14 @@ required_check, source-supported observation, missing_premise, why_required and
 received S source_refs. Explain why that fact prevents a necessary check; a
 hypothetical failure without a source-grounded need to investigate is not a gap.
 Summaries, refuted hypotheses and pending candidate verifications are not blockers.
+
+For a necessary external dependency premise, read_dependency_source supports exact
+versions in HEAD go.mod and npm package-lock.json. Use only the returned fixed source;
+cite D handles in dependency_refs separately from target S source_refs. Dependency
+material cannot replace PR change evidence or authorize execution. Missing, unsupported
+or unavailable reference material leaves the premise unresolved, never confirmed.
+For a followup packet, focus only on the prior gap. Reconcile existing candidate
+decisions against newly read actual sources; do not resubmit established claims.
 Checkpoints are advisory; received material or resolved notes alone do not prove
 coverage. Completion grants no publication permission.
 Write all user-facing claims in Simplified Chinese.

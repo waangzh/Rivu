@@ -194,8 +194,11 @@ class WorkingContext:
     def rebuild(self, context, messages, estimate, target, input_limit):
         initial = context.initial_packet
         envelope = {key: value for key, value in initial.items()
-                    if key not in {"materials", "candidate_materials", "already_submitted",
+                    if key not in {"materials", "candidate_materials", "dependency_materials", "already_submitted",
                                    "missing_material", "missing_candidate_materials"}}
+        dependency_bodies = context.dependency_bodies(messages)
+        envelope["dependency_materials"] = [dependency_bodies[handle]
+            for handle in context.pending_dependencies if handle in dependency_bodies]
         catalog = self.source_catalog(context, messages)
         active = self.required_refs(context, catalog)
         closed = {handle for note in context.investigations.values()
@@ -240,6 +243,8 @@ class WorkingContext:
                 note.model_dump(exclude_defaults=True) for note in context.investigations.values()],
             "submitted_candidates": list(context.submitted.values()),
             "source_inventory": inventory, "change_inventory": changes,
+            "dependency_inventory": [{"dependency_ref": handle, "dependency": ref.model_dump()}
+                                     for handle, ref in context.dependencies.items()],
             "retrieval_receipts": receipts,
             "read_history": list(read_history.values()),
             "missing_material": context.material_failures,

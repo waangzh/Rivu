@@ -211,13 +211,66 @@ class ReviewStore:
             return [Candidate.model_validate(row.payload) for row in session.scalars(
                 select(ReviewCandidateOrm).where(ReviewCandidateOrm.run_id == run_id))]
 
-    def claim(self, run_id, work_id, lease, *, check_budget=False):
+    def enqueue_gap_followups(self, run_id, lease):
+        """One gap pass after discovery/verification; another only after actual progress."""
+        with self.sessions.begin() as session:
+            row = self._guard(session, run_id, lease)
+            run = self._run(row)
+            if utcnow() >= run.review_cutoff:
+                return 0
+            items = [WorkItem.model_validate(item.payload) for item in session.scalars(
+                select(ReviewWorkItemOrm).where(ReviewWorkItemOrm.run_id == run_id))]
+            if any(item.status in {"queued", "running"} for item in items):
+                return 0
+            submitted = set(session.scalars(select(ReviewCandidateOrm.attempt_id).where(
+                ReviewCandidateOrm.run_id == run_id)))
+            count = 0
+            for original in (item for item in items if item.kind == "review"):
+                chain = sorted([item for item in items if item.unit_id == original.unit_id
+                                and item.kind == "supplement"], key=lambda item: item.followup_number)
+                previous = chain[-1] if chain else original
+                if (previous.status != "completed" or not previous.has_unresolved_investigation
+                        or previous.followup_number >= run.configuration.options.gap_followups):
+                    continue
+                if chain:
+                    earlier = chain[-2] if len(chain) > 1 else original
+                    dependencies = {ref["id"] for ref in (previous.result or {}).get("unresolved_dependency_sources", [])}
+                    old_dependencies = {ref["id"] for ref in (earlier.result or {}).get("unresolved_dependency_sources", [])}
+                    if (not set(previous.visible_source_ids) - set(earlier.visible_source_ids)
+                            and not dependencies - old_dependencies
+                            and previous.attempt_id not in submitted):
+                        continue
+                number = previous.followup_number + 1
+                work = WorkItem(id=uuid4().hex, kind="supplement", unit_id=original.unit_id,
+                    followup_of=previous.id, followup_number=number,
+                    followup_gap=previous.result)
+                session.add(ReviewWorkItemOrm(id=work.id, run_id=run_id, kind=work.kind,
+                    subject=f"{work.unit_id}:{number}", payload=work.model_dump(mode="json")))
+                count += 1
+            return count
+
+    def freeze_dependency_pin(self, run_id, key, pin, lease):
+        with self.sessions.begin() as session:
+            row = self._guard(session, run_id, lease)
+            run = self._run(row)
+            if utcnow() >= run.hard_deadline:
+                raise BudgetExceeded("hard_deadline")
+            if key not in run.dependency_pins:
+                if len(run.dependency_pins) >= 6:
+                    raise ValueError("dependency_package_limit")
+                run.dependency_pins[key] = pin
+                self._save(row, run)
+            return run.dependency_pins[key]
+
+    def claim(self, run_id, work_id, lease, *, check_budget=False, investigation_deadline=None):
         with self.sessions.begin() as session:
             run_row = self._guard(session, run_id, lease)
             row = session.get(ReviewWorkItemOrm, work_id)
             work = WorkItem.model_validate(row.payload)
             if row.run_id != run_id or work.status != "queued":
                 return None
+            if investigation_deadline is not None and work.investigation_deadline is None:
+                work.investigation_deadline = investigation_deadline
             if check_budget:
                 run = self._run(run_row)
                 self._admit_request(session, run, work, self._initial_estimate(run, work), False)
@@ -250,7 +303,7 @@ class ReviewStore:
             if count >= MAX_CANDIDATES:
                 raise ValueError("candidate_limit")
             if (candidate.attempt_id != work.attempt_id or candidate.unit_id != work.unit_id
-                    or work.kind != "review"):
+                    or work.kind not in {"review", "supplement"}):
                 raise ValueError("candidate_identity_mismatch")
             snapshot = self._run(run_row).snapshot
             if not candidate.sources or any(
@@ -322,7 +375,7 @@ class ReviewStore:
             row = session.get(ReviewWorkItemOrm, work_id)
             work = WorkItem.model_validate(row.payload)
             if row.run_id == run_id and work.status in {"queued", "running"}:
-                work.status, work.error_code = "skipped", reason
+                work.status, work.error_code = ("interrupted" if work.status == "running" else "skipped"), reason
                 row.payload = work.model_dump(mode="json")
 
     def save_report(self, run_id, report, lease, *, finished=False):
@@ -369,7 +422,7 @@ class ReviewStore:
             return self._usage(session, run_id)[1]
 
     def _initial_estimate(self, run, work):
-        if work is None or work.kind != "review":
+        if work is None or work.kind not in {"review", "supplement"}:
             return None
         unit = next(unit for unit in run.plan.units if unit.id == work.unit_id)
         return review_input_estimate(unit, run.configuration.options.limits)
@@ -393,8 +446,8 @@ class ReviewStore:
         if limits.total_model_calls is not None:
             submitted = set(session.scalars(select(ReviewCandidateOrm.attempt_id).where(
                 ReviewCandidateOrm.run_id == run.id)))
-            reviewers = [item for item in items if item.kind == "review" and item.status == "running"]
-            if kind == "review" and all(item.id != work.id for item in reviewers):
+            reviewers = [item for item in items if item.kind in {"review", "supplement"} and item.status == "running"]
+            if kind in {"review", "supplement"} and all(item.id != work.id for item in reviewers):
                 reviewers.append(work)
             # One possible first candidate per active attempt, transferred on submission.
             future = sum(item.status == "queued" or item.attempt_id not in submitted for item in reviewers)
@@ -443,8 +496,10 @@ class ReviewStore:
         kind = kind_override or ("overview" if overview else work.kind)
         if kind == "overview" and not run.configuration.options.generate_overview:
             raise BudgetExceeded("overview_disabled")
-        if kind in {"review", "grouping"} and now >= run.review_cutoff:
+        if kind in {"review", "supplement", "grouping"} and now >= run.review_cutoff:
             raise BudgetExceeded("review_cutoff")
+        if work and work.investigation_deadline and now >= work.investigation_deadline:
+            raise BudgetExceeded("investigation_deadline")
         calls, usage = self._usage(session, run.id)
         if estimate is None:
             estimate = verification_input_limit(

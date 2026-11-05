@@ -26,10 +26,13 @@ def bounded(function):
     async def execute(*args, **kwargs):
         context = kwargs["runtime"].context
         await context.check_active()
-        context.tool_calls += 1
         bound = parameters.bind(*args, **kwargs)
         bound.apply_defaults()
         arguments = {key: value for key, value in bound.arguments.items() if key != "runtime"}
+        limit = context.provider.run.configuration.options.limits.tool_calls
+        reserve = min(3, max(0, limit // 4)) if context.work.kind != "verification" else 0
+        if function.__name__ != "submit_candidate" and context.tool_calls >= limit - reserve:
+            context.investigation_closed = True
         if context.investigation_closed and function.__name__ != "submit_candidate":
             event("tool.rejected", tool=function.__name__, reason="investigation_closed", ok=False)
             result = {"ok": False, "error": "investigation_closed",
@@ -37,6 +40,7 @@ def bounded(function):
                       "state a concrete missing premise if the investigation is unfinished."}
             context.note_tool_result(function.__name__, arguments, result)
             return result
+        context.tool_calls += 1
         if context.tool_calls > context.provider.run.configuration.options.limits.tool_calls:
             event("tool.rejected", tool=function.__name__, reason="tool_call_limit", ok=False)
             logger.warning("工具调用被预算阻止 review_id=%.8s work_id=%.8s tool=%s reason=tool_call_limit",
@@ -117,6 +121,49 @@ async def read_file(path: str, revision: Literal["base", "head"],
     function, prefer read_symbol. Rejected ranges include corrected arguments.
     """
     return await runtime.context.read(path, start, end, revision)
+
+
+@tool
+@bounded
+async def read_dependency_source(manifest_path: str, package: str, path: str,
+                                 start: Annotated[int, Field(ge=1, strict=True)],
+                                 end: Annotated[int, Field(ge=1, strict=True)],
+                                 runtime: ToolRuntime[AgentContext]) -> dict:
+    """Read public GitHub dependency source at an exact version from HEAD go.mod or package-lock.json.
+
+    No ranges, replace directives or arbitrary URLs. path is relative to dependency repository.
+    Cite returned D handles in dependency_refs, together with target S handles in source_refs.
+    Unavailable dependency material leaves the premise unverified; it never proves a defect.
+    """
+    from app.review.dependencies import load_dependency
+    from app.services.review.evidence.file_context import FileContextError
+    import httpx
+    context = runtime.context
+    if len(context.dependencies) + len(context.pending_dependencies) + context.dependency_slots >= 12:
+        return {"ok": False, "error": "dependency_material_limit"}
+    context.dependency_slots += 1
+    try:
+        ref, content = await load_dependency(context, manifest_path, package, path, start, end)
+    except (FileContextError, httpx.HTTPError, TimeoutError):
+        return {"ok": False, "error": "dependency_reference_unavailable",
+                "next_action": "Keep the specific missing dependency premise unresolved. "
+                               "Do not infer a confirmed defect from unavailable reference material."}
+    finally:
+        context.dependency_slots -= 1
+    handle = context.stage_dependency(ref)
+    return {"ok": True, "dependency_ref": handle, "dependency": ref.model_dump(), "content": content,
+            "boundary": "Fixed upstream Git source; npm generated release artifacts may differ."}
+
+
+@tool
+@bounded
+async def recall_dependency(dependency_ref: str, runtime: ToolRuntime[AgentContext]) -> dict:
+    """Restore an already received D dependency source body after context compaction."""
+    from app.review.dependencies import read_dependency
+    context = runtime.context
+    ref = context.resolve_dependencies([dependency_ref])[0]
+    content = await asyncio.to_thread(read_dependency, context.evidence, ref)
+    return {"ok": True, "dependency_ref": dependency_ref, "dependency": ref.model_dump(), "content": content}
 
 
 @tool

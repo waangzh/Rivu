@@ -19,6 +19,7 @@ export interface ReviewOptions {
   focus: ('correctness' | 'security' | 'performance' | 'compatibility')[];
   include_pr_discussions: boolean;
   generate_overview: boolean;
+  gap_followups: number;
   limits: ReviewLimits;
 }
 
@@ -41,6 +42,21 @@ export interface SourceRef {
   start_line: number;
   end_line: number;
   content_hash: string;
+}
+
+export interface DependencyRef {
+  id: string;
+  review_id: string;
+  package: string;
+  version: string;
+  repository: string;
+  commit_sha: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+  content_hash: string;
+  manifest_source: SourceRef;
+  binding: Record<string, string>;
 }
 
 export interface Location {
@@ -79,6 +95,7 @@ export interface CandidateInput {
   source_refs: string[];
   location: Location | null;
   root_cause: RootCause | null;
+  dependency_refs: string[];
 }
 
 export interface RootCause {
@@ -97,6 +114,7 @@ export interface VerificationOutput {
   author_comment: string | null;
   verified_claim: Pick<CandidateInput, 'claim' | 'trigger' | 'impact'> | null;
   root_cause: RootCause | null;
+  dependency_refs: string[];
   question: {
     observation: string;
     missing_premise: string;
@@ -130,8 +148,11 @@ export interface Candidate {
   verification_sources: SourceRef[];
   admission_reason: string | null;
   question_digest: string | null;
+  decision_digest: string | null;
   finding: Finding | null;
   previous_candidate_id: string | null;
+  dependency_sources: DependencyRef[];
+  verification_dependency_sources: DependencyRef[];
 }
 
 export interface FindingGroup {
@@ -159,6 +180,7 @@ export interface CompletionGap {
   missing_premise: string;
   why_required: string;
   source_refs: string[];
+  dependency_refs: string[];
 }
 
 export interface WorkItemResult {
@@ -169,7 +191,11 @@ export interface WorkItemResult {
 
 export interface WorkItem {
   id: string;
-  kind: 'review' | 'verification';
+  kind: 'review' | 'verification' | 'supplement';
+  followup_of: string | null;
+  followup_number: number;
+  followup_gap: WorkItemResult | null;
+  investigation_deadline: string | null;
   unit_id: string;
   candidate_id: string | null;
   status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed' | 'skipped';
@@ -266,6 +292,10 @@ export interface ReviewProgress {
 export interface Report {
   version: string;
   status: RunStatus;
+  coverage: 'complete' | 'partial' | 'unknown';
+  coverage_reasons: string[];
+  unresolved_unit_count: number;
+  unresolved_candidate_count: number;
   findings: Finding[];
   candidates: Candidate[];
   finding_groups: FindingGroup[];
@@ -332,6 +362,7 @@ export interface LocalGitSource {
 }
 
 export interface Run {
+  dependency_pins: Record<string, Record<string, string>>;
   id: string;
   status: RunStatus;
   phase: string;
@@ -383,6 +414,7 @@ export interface ReviewCreateRequest {
 }
 
 export interface ReviewPreviewResponse {
+  limits: ReviewLimits;
   source?: LocalGitSource | null;
   snapshot: Snapshot;
   plan: Plan;

@@ -265,6 +265,7 @@ onMounted(async () => {
         depth: pending.input.depth, paths: pending.input.paths, focus: pending.input.focus,
         include_pr_discussions: pending.input.include_pr_discussions ?? false,
         generate_overview: pending.input.generate_overview ?? true,
+        gap_followups: defaultPlan().gap_followups,
         limits: { ...defaultPlan().limits, ...pending.input.limits },
       };
       section.value = 'activity';

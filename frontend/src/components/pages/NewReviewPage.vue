@@ -94,6 +94,7 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <p class="muted small">读取服务器上的已注册仓库，仅审查已提交内容；暂存、未暂存和未跟踪文件不会纳入。以唯一 merge base 比较，不执行目标代码。</p>
 <p v-if="previewError" class="input-error" role="alert">{{ previewError }}</p>
 <p v-if="preview" class="notice" role="status">快照已固定：<code>{{ preview.snapshot.base_sha.slice(0, 8) }} → {{ preview.snapshot.head_sha.slice(0, 8) }}</code> · {{ preview.changed_files.length }} 个变更文件 · {{ preview.plan.units.length }} 个规划单元。启动将使用此快照。</p>
+<p v-if="preview?.limits" class="muted small">本轮总期限 {{ preview.limits.timeout_seconds }} 秒，包含补查和核验；未明确填写期限时按规划规模计算。</p>
 <div class="source-switch">
 <button type="button" class="btn secondary" :disabled="!valid || busy || previewBusy" @click="freezePreview">{{ previewBusy ? '正在准备…' : '固定并预览快照' }}</button>
 <button class="btn primary" :disabled="!valid || !options.focus.length || busy || previewBusy"><AppIcon name="arrow-right" />{{ busy ? '正在提交…' : '开始审查' }}</button>

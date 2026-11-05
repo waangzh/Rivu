@@ -13,7 +13,16 @@ from app.review.domain import utcnow
 from app.review.orchestrator import ReviewOrchestrator
 from app.review.planner import tokens
 from app.review.store import OVERVIEW_INPUT
-from tests.review.vnext_helpers import completion_gap, setup_source_run
+from tests.review.vnext_helpers import completion_gap, setup_source_run as source_run
+
+
+def setup_source_run(*args, **kwargs):
+    # These transports describe an attempt's replay/closure, not a new followup conversation.
+    store, run, lease, provider, sessions = source_run(*args, **kwargs)
+    run.configuration.options.gap_followups = 0
+    with sessions.begin() as session:
+        session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
+    return store, run, lease, provider, sessions
 
 
 @pytest.mark.parametrize(("line_count", "minimum_input"), [(150, 32_000), (650, 200_000)])
@@ -196,7 +205,7 @@ async def test_short_investigation_notes_preserve_cache_prefix_and_unresolved_re
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
     assert len(reviews) == 5
     assert report.usage["model_calls"] == 6
-    assert report.status == "partial"
+    assert report.status == "completed" and report.unresolved_unit_count == 1
     assert "unresolved_investigation" in report.reasons[0]
     assert report.findings == []
     assert report.units[0].tool_calls == 4
@@ -310,7 +319,7 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
     assert restored == ["query", "source"]
     assert checkpoint_calls >= 1
     assert len(reviews) == 8 + checkpoint_calls
-    assert report.status == "partial"
+    assert report.status == "completed" and report.unresolved_unit_count == 1
     state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
     assert state["context_metrics"]["epoch"] >= 1
     assert len(state["receipts"]) == 7 + checkpoint_calls
@@ -370,7 +379,7 @@ async def test_small_unit_checkpoint_keeps_tools_for_concrete_followup(tmp_path,
                           max_retries=0)
         model.root_async_client, model.async_client = sdk, sdk.chat.completions
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
-    assert report.status == ("partial" if unfinished else "completed")
+    assert report.status == "completed" and report.unresolved_unit_count == int(unfinished)
     assert len(reviews) == 5
     assert report.units[0].status == "completed"
     assert report.units[0].error_code is None
@@ -420,7 +429,7 @@ async def test_last_allowed_request_finishes_instead_of_starting_more_tools(
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
     assert len(finalizations) == 1
     assert "Close now because of call_fuse" in finalizations[0]["messages"][-1]["content"]
-    assert report.status == ("partial" if unfinished else "completed")
+    assert report.status == "completed" and report.unresolved_unit_count == int(unfinished)
     assert report.units[0].status == "completed"
     assert report.units[0].error_code is None
     assert report.units[0].tool_calls == call_limit - 1
@@ -808,7 +817,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                           max_retries=0)
         model.root_async_client, model.async_client = sdk, sdk.chat.completions
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
-    assert report.status == ("partial" if boundary in {"loop_unresolved", "loop_refuses"}
+    assert report.status == ("partial" if boundary == "loop_refuses"
                             else "completed"), report.reasons
     assert len({payload["messages"][0]["content"] for payload in review_requests}) == 1
     for previous, current in zip(review_requests, review_requests[1:]):
@@ -851,7 +860,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
     elif boundary.startswith("loop"):
         assert len(review_requests) == (7 if boundary in {"loop_refuses", "loop_corrects"} else 6)
         assert report.units[0].status == ("interrupted" if boundary == "loop_refuses" else "completed")
-        assert report.units[0].tool_calls == (7 if boundary == "loop_refuses" else 5)
+        assert report.units[0].tool_calls == 5
         assert "last 3 tool rounds repeated identical calls" in review_requests[3]["messages"][-1]["content"]
         for payload in review_requests[3:5]:
             assert "read_file" in {tool["function"]["name"] for tool in payload["tools"]}

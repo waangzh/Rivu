@@ -137,6 +137,8 @@ class ReviewService:
                                run_id, type(exc).__name__)
                 relations = []
             plan = await asyncio.to_thread(plan_review, changed, snapshot, config.options, relations)
+            from app.review.configuration import scale_for_plan
+            scale_for_plan(config, plan, request.limits)
             now = utcnow()
             seconds = config.options.limits.timeout_seconds
             run = Run(id=run_id, pr_url=str(request.pr_url) if pr else None, pr=pr,
@@ -176,7 +178,7 @@ class ReviewService:
     async def preview(self, request):
         run = await self._inputs(request, execute=False)
         return {"snapshot": run.snapshot, "plan": run.plan, "changed_files": run.changed_files,
-                "source": run.source}
+                "source": run.source, "limits": run.configuration.options.limits}
 
     async def create(self, request, key, *, caller_id="installation", expected_snapshot=None,
                      automatic_policy=None):

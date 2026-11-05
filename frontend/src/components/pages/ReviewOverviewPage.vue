@@ -18,9 +18,11 @@ defineEmits<{ navigate: [section: ReviewSection]; 'retry-overview': [] }>();
 const unresolved = computed(() => props.report?.candidates.filter(
   item => !item.verification || item.verification.verdict === 'insufficient',
 ).length ?? 0);
+const unresolvedChecks = computed(() => props.report?.unresolved_unit_count ?? 0);
 const tone = computed(() => {
   if (props.task.status === 'failed' || props.findings.length) return 'danger';
-  if (props.task.status === 'partial' || unresolved.value || props.report?.reasons.includes('scope_empty')) return 'warning';
+  if (props.task.status === 'partial' || unresolved.value || unresolvedChecks.value
+    || props.report?.coverage === 'partial' || props.report?.reasons.includes('scope_empty')) return 'warning';
   return props.task.status === 'completed' ? 'success' : 'info';
 });
 const title = computed(() => {
@@ -29,6 +31,7 @@ const title = computed(() => {
   if (props.task.status === 'partial') return props.findings.length ? '发现问题，审查结论仍不完整' : '审查结论不完整';
   if (props.findings.length) return '发现需要处理的已确认问题';
   if (unresolved.value) return '存在尚未解决的疑似问题';
+  if (unresolvedChecks.value) return '执行已结束，关键检查仍待核实';
   return terminal(props.task.status) ? '在本轮已处理审查单元中未记录已确认问题' : '审查正在进行';
 });
 const overviewLabel = computed(() => ({
@@ -67,6 +70,8 @@ const omissionLabel = {
         <h2>{{ title }}</h2>
         <p class="ov-verdict__description">已确认问题经过源码证据检查与独立核验；零问题不代表代码没有缺陷。</p>
         <p v-if="unresolved" class="notice warn small">仍有 {{ unresolved }} 个疑似问题尚未解决，请查看缺失的证据或前提。</p>
+        <p v-if="unresolvedChecks" class="notice warn small">仍有 {{ unresolvedChecks }} 个单元的关键检查待核实；执行完成不代表代码已通过审查。</p>
+        <p v-if="report" class="muted small">范围材料：{{ report.coverage === 'complete' ? '已完整交付' : report.coverage === 'partial' ? '部分缺失' : '尚未确定' }}</p>
         <div class="ov-verdict__bottom">
           <div class="ov-verdict__meta">
             <span><AppIcon name="activity" />{{ phaseLabel(task.phase) }}</span>

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import timedelta
 from time import perf_counter
 
 from app.review.budget import BudgetGate
@@ -12,6 +13,18 @@ from app.review.report import build_report, generate_overview
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped
 
 logger = logging.getLogger("Rivu.Review")
+
+
+def discovery_priority(unit, index):
+    """Keep risk ordering, but put executable changes ahead of supporting material."""
+    from app.review.risk import DOCUMENTATION_SUFFIXES, RISK_PATH_GROUPS
+    import re
+    parts = set(part for path in unit.paths for part in re.split(r"[^a-z0-9]+", path.lower()))
+    sensitive = bool(parts & set().union(*(RISK_PATH_GROUPS[key] for key in
+        ("auth", "crypto", "money", "data", "concurrency"))))
+    supporting = all(path.endswith(DOCUMENTATION_SUFFIXES) or any(part in path.lower().split("/")
+        for part in ("test", "tests", "__tests__", ".changeset")) for path in unit.paths)
+    return (supporting, not sensitive, {"high": 0, "medium": 1, "low": 2}[unit.risk], index)
 
 
 class ReviewOrchestrator:
@@ -30,6 +43,7 @@ class ReviewOrchestrator:
         provider.run = run
         budget = BudgetGate(self.store, run, lease)
         running = {}
+        last_dispatched = None
         limits = run.configuration.options.limits
         logger.info(
             "审查开始 review_id=%.8s units=%d concurrency=%d agent_call_limit=%d "
@@ -54,19 +68,36 @@ class ReviewOrchestrator:
                             event("work.skipped", work_id=item.id, kind=item.kind, reason="hard_deadline")
                     break
                 for item in list(queued):
-                    if item.kind == "review" and utcnow() >= run.review_cutoff:
+                    if item.kind in {"review", "supplement"} and utcnow() >= run.review_cutoff:
                         await asyncio.to_thread(self.store.skip, run_id, item.id, "review_cutoff", lease)
                         event("work.skipped", work_id=item.id, kind=item.kind, reason="review_cutoff")
                         logger.warning("工作项未启动 review_id=%.8s work_id=%.8s kind=%s reason=review_cutoff",
                                        run_id, item.id, item.kind)
                         queued.remove(item)
-                priority = {unit.id: index for index, unit in enumerate(run.plan.units)}
-                queued.sort(key=lambda item: (item.kind != "verification", priority[item.unit_id]))
+                priority = {unit.id: discovery_priority(unit, index)
+                            for index, unit in enumerate(run.plan.units)}
+                queued.sort(key=lambda item: priority[item.unit_id])
                 while queued and len(running) < run.configuration.options.limits.concurrency:
-                    item = queued.pop(0)
+                    discoveries = [item for item in queued if item.kind == "review"]
+                    checks = [item for item in queued if item.kind == "verification"]
+                    # Retain a discovery slot while verifiers are busy, including concurrency=1.
+                    active_discovery = any(item.kind == "review" for item in running.values())
+                    discovery_turn = (not active_discovery and (limits.concurrency > 1
+                        or last_dispatched != "review" or not checks))
+                    pool = discoveries if discoveries and discovery_turn else checks or discoveries or queued
+                    item = pool[0]
+                    queued.remove(item)
+                    investigation_deadline = None
+                    if item.kind == "review" and discoveries:
+                        waves = max(1, (len(discoveries) + limits.concurrency - 1) // limits.concurrency)
+                        seconds = max(0, (run.review_cutoff - utcnow()).total_seconds())
+                        # A bounded first pass prevents one unit consuming every dispatch wave.
+                        investigation_deadline = min(run.review_cutoff,
+                            utcnow() + timedelta(seconds=max(180, seconds / waves)))
                     try:
                         claimed = await asyncio.to_thread(
-                            self.store.claim, run_id, item.id, lease, check_budget=True)
+                            self.store.claim, run_id, item.id, lease, check_budget=True,
+                            investigation_deadline=investigation_deadline)
                         reason = None
                     except BudgetExceeded as exc:
                         reason = str(exc)
@@ -78,9 +109,12 @@ class ReviewOrchestrator:
                                            run_id, item.id, item.kind, reason)
                         continue
                     if claimed:
+                        last_dispatched = claimed.kind
                         task = asyncio.create_task(self.runner.run(claimed, provider, budget))
                         running[task] = claimed
                 if not running:
+                    if await asyncio.to_thread(self.store.enqueue_gap_followups, run_id, lease):
+                        continue
                     break
                 done, _ = await asyncio.wait(running, timeout=min(0.2,
                     max(0, (run.hard_deadline - utcnow()).total_seconds())),

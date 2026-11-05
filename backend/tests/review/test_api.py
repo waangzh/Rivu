@@ -117,6 +117,7 @@ async def test_optional_preview_does_not_create_a_run_or_call_model(service_pipe
     before = service.store.list_runs()["total"]
     preview = await service.preview(ReviewRequest(pr_url="https://github.com/o/r/pull/1"))
     assert preview["plan"].units
+    assert preview["limits"].timeout_seconds > 0
     assert service.store.list_runs()["total"] == before
 
 

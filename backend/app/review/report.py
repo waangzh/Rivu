@@ -73,19 +73,29 @@ def overview_correction(raw, code):
 
 def build_report(run, work_items, candidates, usage):
     reasons = []
+    coverage_reasons = []
     reviews = [item for item in work_items if item.kind == "review"]
     reviewed_units = {item.unit_id for item in reviews}
     if run.plan.grouping_status == "pending":
-        reasons.append("grouping_incomplete")
-    reasons.extend(f"{unit.id}:not_started" for unit in run.plan.units
+        coverage_reasons.append("grouping_incomplete")
+    coverage_reasons.extend(f"{unit.id}:not_started" for unit in run.plan.units
                    if unit.id not in reviewed_units)
+    reasons.extend(coverage_reasons)
     for item in reviews:
         if item.status != "completed":
             reasons.append(f"{item.unit_id}:{item.error_code or item.status}")
-        if item.material_delivery != "complete":
-            reasons.append(f"{item.unit_id}:material_incomplete")
-        if item.has_unresolved_investigation:
-            reasons.append(f"{item.unit_id}:unresolved_investigation")
+    unresolved_units = []
+    for item in reviews:
+        followups = sorted([work for work in work_items if work.kind == "supplement"
+                            and work.unit_id == item.unit_id], key=lambda work: work.followup_number)
+        finished = [work for work in followups if work.status == "completed"]
+        current = finished[-1] if finished else item
+        if not any(work.material_delivery == "complete" for work in [item, *finished]):
+            coverage_reasons.append(f"{item.unit_id}:material_incomplete")
+        if current.has_unresolved_investigation:
+            unresolved_units.append(item.unit_id)
+    if any(item.kind == "supplement" and item.status != "completed" for item in work_items):
+        reasons.append("followup_incomplete")
     if any(candidate.verification is None for candidate in candidates):
         reasons.append("unverified_candidates")
     checked_history = {candidate.previous_candidate_id for candidate in candidates
@@ -96,11 +106,18 @@ def build_report(run, work_items, candidates, usage):
     if reviews and all(item.status == "failed" for item in reviews) and not candidates:
         status = "failed"
     if not reviews and run.plan.grouping_status != "pending":
-        reasons.append("scope_empty")
+        coverage_reasons.append("scope_empty")
+    unresolved_candidates = sum(candidate.verification is None or candidate.admission_reason is not None
+        or candidate.verification.verdict == "insufficient" for candidate in candidates)
+    reasons.extend(coverage_reasons)
+    reasons.extend(f"{unit_id}:unresolved_investigation" for unit_id in unresolved_units)
     findings = aggregate(candidates)
     facts = {"findings": findings, "finding_groups": group_findings(candidates),
              "candidates": candidates, "units": work_items,
-             "excluded": run.plan.excluded, "status": status, "reasons": reasons, "usage": usage}
+             "excluded": run.plan.excluded, "status": status, "reasons": list(dict.fromkeys(reasons)), "usage": usage,
+             "coverage": "partial" if coverage_reasons else "complete",
+             "coverage_reasons": coverage_reasons, "unresolved_unit_count": len(unresolved_units),
+             "unresolved_candidate_count": unresolved_candidates}
     return Report(version=identity(facts), **facts)
 
 

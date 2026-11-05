@@ -25,10 +25,13 @@ export function formatElapsed(start: string, end: string | number) {
 export function progressSummary(task: Run, units: WorkItem[], candidates: Candidate[]) {
   const review = units.filter(item => item.kind === 'review');
   const completed = new Set(review.filter(item =>
-    item.status === 'completed' && !hasUnresolvedInvestigation(item)).map(item => item.unit_id));
+    item.status === 'completed').map(item => item.unit_id));
   const unavailable = new Set(review.filter(item =>
-    ['failed', 'interrupted', 'skipped'].includes(item.status) || hasUnresolvedInvestigation(item),
+    ['failed', 'interrupted', 'skipped'].includes(item.status),
   ).map(item => item.unit_id));
+  const latest = new Map(review.map(item => [item.unit_id, item]));
+  for (const item of units.filter(item => item.kind === 'supplement' && item.status === 'completed')
+    .sort((a, b) => a.followup_number - b.followup_number)) latest.set(item.unit_id, item);
   const pending = candidates.filter(item => !item.verification).length;
   const insufficient = candidates.filter(item => item.verification?.verdict === 'insufficient').length;
   return {
@@ -39,6 +42,8 @@ export function progressSummary(task: Run, units: WorkItem[], candidates: Candid
     verifying: units.filter(item => item.kind === 'verification' && item.status === 'running').length,
     pending,
     insufficient,
+    unresolved: [...latest.values()].filter(hasUnresolvedInvestigation).length,
+    supplementing: units.filter(item => item.kind === 'supplement' && item.status === 'running').length,
   };
 }
 

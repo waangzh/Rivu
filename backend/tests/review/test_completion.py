@@ -52,6 +52,8 @@ async def run_completion_fixture(tmp_path, *, initial=None, corrected=None, stop
                                  call_limit=48, thinking=False, resource=None):
     store, run, lease, provider, sessions = setup_source_run(tmp_path)
     run.configuration.options.limits.model_calls = call_limit
+    # This fixture exercises one attempt's schema correction, not orchestration followups.
+    run.configuration.options.gap_followups = 0
     if resource == "calls":
         run.configuration.options.limits.total_model_calls = 3
     elif resource == "output":
@@ -158,13 +160,15 @@ async def test_completion_correction_preserves_thinking_roundtrip(tmp_path):
 
 
 @pytest.mark.parametrize("corrected", [False, True])
-async def test_a_sourced_necessary_gap_stays_partial_without_additional_semantic_calls(tmp_path, corrected):
+async def test_a_sourced_gap_is_separate_from_execution_completion(tmp_path, corrected):
     gap = {"unresolved": completion_gap()}
     _, _, _, report, reviews, _, error = await run_completion_fixture(
         tmp_path, initial=invalid_completion("legacy") if corrected else gap, corrected=gap)
     assert error is None
-    assert report.status == "partial"
-    assert report.units[0].result == gap
+    assert report.status == "completed" and report.coverage == "complete"
+    assert report.unresolved_unit_count == 1
+    assert report.units[0].result["unresolved"] == gap["unresolved"]
+    assert report.units[0].result["unresolved_sources"]
     assert report.units[0].has_unresolved_investigation
     assert report.reasons == [f"{report.units[0].unit_id}:unresolved_investigation"]
     assert len(reviews) == (2 if corrected else 1)
@@ -233,7 +237,7 @@ async def test_structured_and_archived_gaps_remain_partial_and_cannot_be_reused(
     saved = store.work_items(run.id)[0]
     assert saved.result == result
     report = build_report(run, [saved], [], store.usage(run.id))
-    assert report.status == "partial" and report.reasons
+    assert report.status == "completed" and report.unresolved_unit_count == 1 and report.reasons
     previous = run.model_copy(deep=True)
     previous.snapshot.head_sha = "c" * 40
     previous.report = report

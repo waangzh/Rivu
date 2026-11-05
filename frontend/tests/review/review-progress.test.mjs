@@ -40,7 +40,7 @@ test('运行记录进入进度页，终态进入概览；审查单元计数不�
     for (const status of ['completed', 'partial', 'failed', 'cancelled']) assert.equal(initialReviewSection(status), 'overview');
     const task = run();
     const summary = progressSummary(task, units(), [{ verification: null }, { verification: { verdict: 'insufficient' } }]);
-    assert.deepEqual(summary, { total: 2, completed: 1, unavailable: 0, reviewing: 1, verifying: 1, pending: 1, insufficient: 1 });
+    assert.deepEqual(summary, { total: 2, completed: 1, unavailable: 0, reviewing: 1, verifying: 1, pending: 1, insufficient: 1, unresolved: 0, supplementing: 0 });
     task.plan.grouping_status = 'pending';
     assert.equal(progressSummary(task, units(), []).total, null);
     assert.equal(formatElapsed('2026-11-01T00:00:00Z', '2026-11-01T00:02:18Z'), '2 分 18 秒');

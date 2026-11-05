@@ -92,7 +92,9 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
         <div class="progress-counts">
           <div v-if="!ended"><strong>{{ summary.reviewing }}</strong><span>正在分析</span></div>
           <div v-if="!ended"><strong>{{ summary.verifying }}</strong><span>正在核验</span></div>
+          <div v-if="summary.supplementing"><strong>{{ summary.supplementing }}</strong><span>正在补查</span></div>
           <div><strong>{{ summary.unavailable }}</strong><span>未完成审查单元</span></div>
+          <div><strong>{{ summary.unresolved }}</strong><span>关键检查仍待核实</span></div>
         </div>
         <p v-if="summary.unavailable" class="notice warn space-top">部分审查单元未完成，相关代码不能视为已通过审查。可在下方执行记录中查看原因。</p>
       </template>
@@ -126,7 +128,7 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
     <div class="card-header"><h3>当前处理</h3><span class="muted small">可同时处理多个审查单元</span></div>
     <p v-if="!loaded" class="muted" role="status">正在读取执行记录…</p>
     <ul v-else-if="active.length" class="progress-current">
-      <li v-for="item in active" :key="item.id"><AppIcon :name="item.kind === 'review' ? 'code' : 'shield'" /><div><strong>{{ workDescription(item) }}</strong><p v-if="workPaths(item)">{{ workPaths(item) }}</p></div><span>{{ item.kind === 'review' ? '分析中' : '核验疑似问题中' }}</span></li>
+      <li v-for="item in active" :key="item.id"><AppIcon :name="item.kind === 'verification' ? 'shield' : 'code'" /><div><strong>{{ workDescription(item) }}</strong><p v-if="workPaths(item)">{{ workPaths(item) }}</p></div><span>{{ item.kind === 'supplement' ? '补查缺口中' : item.kind === 'review' ? '分析中' : '核验疑似问题中' }}</span></li>
     </ul>
     <p v-else class="muted">{{ reporting ? '正在整理结果，暂时没有分析或核验任务。' : preparing ? '尚在准备环境或组织审查单元，分析记录将在开始处理后显示。' : '暂未记录正在处理的审查单元，系统会继续同步后台状态。' }}</p>
   </section>
@@ -137,14 +139,15 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
     <p v-else-if="!ordered.length" class="muted space-top">{{ ended ? '本轮没有执行记录，请结合审查单元和结束原因查看结果。' : '准备期间尚无执行记录，开始分析后会在此显示。' }}</p>
     <ol v-else class="rg-stage-list">
       <li v-for="item in ordered" :key="item.id">
-        <StatusBadge :status="hasUnresolvedInvestigation(item) ? 'partial' : item.status" :label="hasUnresolvedInvestigation(item) ? '存在未完成检查' : workLabel[item.status]" />
+        <StatusBadge :status="item.status" :label="workLabel[item.status]" />
+        <span v-if="hasUnresolvedInvestigation(item)" class="notice warn small">关键检查待核实</span>
         <div class="min0">
-          <strong>{{ item.kind === 'review' ? '分析代码' : '核验疑似问题' }} · {{ workDescription(item) }}</strong>
+          <strong>{{ item.kind === 'supplement' ? '补查缺口' : item.kind === 'review' ? '分析代码' : '核验疑似问题' }} · {{ workDescription(item) }}</strong>
           <p v-if="workPaths(item)" class="muted small">{{ workPaths(item) }}</p>
           <p class="rg-activity-meta"><span>{{ materialLabel[item.material_delivery] }}</span><span>尝试 {{ item.attempt }} 次</span><span>工具调用 {{ item.tool_calls }} 次</span></p>
           <p v-if="item.reused_from" class="notice small">复用了此前已完成且源码一致的审查单元。历史问题仍由本轮独立核验。</p>
           <p v-if="item.error_code" class="notice warn small">{{ executionErrorLabel(item.error_code) }}</p>
-          <div v-if="item.kind === 'review' && item.result?.unresolved" class="notice warn small">
+          <div v-if="item.kind !== 'verification' && item.result?.unresolved" class="notice warn small">
             <p>必要检查：{{ item.result.unresolved.required_check }}</p>
             <p>源码观察：{{ item.result.unresolved.observation }}</p>
             <p>缺失事实：{{ item.result.unresolved.missing_premise }}</p>
