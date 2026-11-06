@@ -232,12 +232,11 @@ class ReviewStore:
                 if (previous.status != "completed" or not previous.has_unresolved_investigation
                         or previous.followup_number >= run.configuration.options.gap_followups):
                     continue
+                if (previous.result.get("unresolved") or {}).get("resolution_scope") == "external":
+                    continue
                 if chain:
                     earlier = chain[-2] if len(chain) > 1 else original
-                    dependencies = {ref["id"] for ref in (previous.result or {}).get("unresolved_dependency_sources", [])}
-                    old_dependencies = {ref["id"] for ref in (earlier.result or {}).get("unresolved_dependency_sources", [])}
                     if (not set(previous.visible_source_ids) - set(earlier.visible_source_ids)
-                            and not dependencies - old_dependencies
                             and previous.attempt_id not in submitted):
                         continue
                 number = previous.followup_number + 1
@@ -248,19 +247,6 @@ class ReviewStore:
                     subject=f"{work.unit_id}:{number}", payload=work.model_dump(mode="json")))
                 count += 1
             return count
-
-    def freeze_dependency_pin(self, run_id, key, pin, lease):
-        with self.sessions.begin() as session:
-            row = self._guard(session, run_id, lease)
-            run = self._run(row)
-            if utcnow() >= run.hard_deadline:
-                raise BudgetExceeded("hard_deadline")
-            if key not in run.dependency_pins:
-                if len(run.dependency_pins) >= 6:
-                    raise ValueError("dependency_package_limit")
-                run.dependency_pins[key] = pin
-                self._save(row, run)
-            return run.dependency_pins[key]
 
     def claim(self, run_id, work_id, lease, *, check_budget=False, investigation_deadline=None):
         with self.sessions.begin() as session:
@@ -317,7 +303,7 @@ class ReviewStore:
                 attempt_id=work.attempt_id, tool_call_id=candidate.tool_call_id,
                 payload=candidate.model_dump(mode="json")))
             check = WorkItem(id=uuid4().hex, kind="verification", unit_id=work.unit_id,
-                             candidate_id=candidate.id)
+                             candidate_id=candidate.id, followup_number=work.followup_number)
             session.add(ReviewWorkItemOrm(id=check.id, run_id=run_id, kind="verification",
                                          subject=candidate.id, payload=check.model_dump(mode="json")))
             return candidate.id
@@ -443,7 +429,8 @@ class ReviewStore:
                    and (item.status == "queued" or (
                        item.status == "running" and (item.id, item.attempt_id) not in requested))]
         verifier_input = verification_input_limit(limits, overview=run.configuration.options.generate_overview)
-        if limits.total_model_calls is not None:
+        if limits.total_model_calls is not None or (run.first_pass_deadline is not None
+                and (limits.total_input_tokens is not None or limits.total_output_tokens is not None)):
             submitted = set(session.scalars(select(ReviewCandidateOrm.attempt_id).where(
                 ReviewCandidateOrm.run_id == run.id)))
             reviewers = [item for item in items if item.kind in {"review", "supplement"} and item.status == "running"]
@@ -489,6 +476,35 @@ class ReviewStore:
         protected_tokens += len(pending) * verifier_input
         return protected_calls, protected_tokens
 
+    def _followup_protection(self, session, run, work, kind):
+        """Keep a small shared tail for gaps; first requests and tiny budgets still fit."""
+        options, limits = run.configuration.options, run.configuration.options.limits
+        if (not options.gap_followups or run.first_pass_deadline is None
+                or kind not in {"review", "verification", "grouping"}
+                or (work and work.followup_number)):
+            return 0, 0, 0
+        # Once no first-pass work remains, the tail belongs to supplements and their verifiers.
+        active = session.scalar(select(ReviewWorkItemOrm.id).where(
+            ReviewWorkItemOrm.run_id == run.id, ReviewWorkItemOrm.kind.in_(["review", "verification"]),
+            ReviewWorkItemOrm.payload["status"].as_string().in_(["queued", "running"])).limit(1))
+        if active is None and kind != "grouping":
+            return 0, 0, 0
+        # No extra reserve for a budget that can barely cover review, verification and overview.
+        if limits.total_model_calls is not None and limits.total_model_calls < 6:
+            return 0, 0, 0
+        editor = int(options.generate_overview)
+        minimum_input = min((review_input_estimate(unit, limits) for unit in run.plan.units), default=0)
+        minimum_input += verification_input_limit(limits, overview=options.generate_overview)
+        return (
+            (limits.total_model_calls - editor) // 5 if limits.total_model_calls is not None else 0,
+            max(0, limits.total_input_tokens - editor * OVERVIEW_INPUT) // 5
+                if limits.total_input_tokens is not None
+                and limits.total_input_tokens - editor * OVERVIEW_INPUT >= 2 * minimum_input else 0,
+            max(0, limits.total_output_tokens - editor * limits.output_tokens) // 5
+                if limits.total_output_tokens is not None
+                and limits.total_output_tokens >= (editor + 4) * limits.output_tokens else 0,
+        )
+
     def _admit_request(self, session, run, work, estimate, overview, *, kind_override=None):
         now, limits = utcnow(), run.configuration.options.limits
         if now >= run.hard_deadline:
@@ -496,10 +512,11 @@ class ReviewStore:
         kind = kind_override or ("overview" if overview else work.kind)
         if kind == "overview" and not run.configuration.options.generate_overview:
             raise BudgetExceeded("overview_disabled")
-        if kind in {"review", "supplement", "grouping"} and now >= run.review_cutoff:
+        if kind == "grouping" and now >= run.first_pass_cutoff:
             raise BudgetExceeded("review_cutoff")
-        if work and work.investigation_deadline and now >= work.investigation_deadline:
-            raise BudgetExceeded("investigation_deadline")
+        if work and now >= run.work_deadline(work):
+            raise BudgetExceeded("review_cutoff" if kind in {"review", "supplement"}
+                                 else "investigation_deadline")
         calls, usage = self._usage(session, run.id)
         if estimate is None:
             estimate = verification_input_limit(
@@ -508,6 +525,38 @@ class ReviewStore:
             session, run, work, calls, usage, kind, estimate)
         agent_calls = sum(call.work_item_id == work.id and call.attempt_id == work.attempt_id
                           for call in calls) if work is not None and work.status == "running" else 0
+        tail_calls, tail_input, tail_output = self._followup_protection(session, run, work, kind)
+        protected_calls += tail_calls
+        protected_tokens += tail_input
+        # Give affordable queued units a first request before this attempt continues.
+        if run.first_pass_deadline is not None and kind in {"review", "verification"} and not work.followup_number:
+            queued_reviews = [WorkItem.model_validate(row.payload) for row in session.scalars(
+                select(ReviewWorkItemOrm).where(ReviewWorkItemOrm.run_id == run.id,
+                    ReviewWorkItemOrm.kind == "review",
+                    ReviewWorkItemOrm.payload["status"].as_string() == "queued"))
+                if row.id != work.id]
+            input_left = (limits.total_input_tokens - usage["committed_input_tokens"]
+                          - (estimate if not agent_calls else 0) - protected_tokens
+                          if limits.total_input_tokens is not None else None)
+            call_left = limits.total_model_calls - len(calls) - int(not agent_calls) - protected_calls if limits.total_model_calls is not None else None
+            output_left = (limits.total_output_tokens - usage["committed_output_tokens"]
+                           - (int(not agent_calls) + protected_calls - tail_calls) * limits.output_tokens - tail_output
+                           if limits.total_output_tokens is not None else None)
+            for queued in queued_reviews:
+                cost = self._initial_estimate(run, queued) + verification_input_limit(
+                    limits, overview=run.configuration.options.generate_overview)
+                if ((call_left is not None and call_left < 2)
+                        or (input_left is not None and input_left < cost)
+                        or (output_left is not None and output_left < 2 * limits.output_tokens)):
+                    break
+                protected_calls += 2
+                protected_tokens += cost
+                if call_left is not None:
+                    call_left -= 2
+                if input_left is not None:
+                    input_left -= cost
+                if output_left is not None:
+                    output_left -= 2 * limits.output_tokens
         if work is not None and agent_calls >= limits.model_calls:
             raise BudgetExceeded("agent_model_limit")
         if (limits.total_model_calls is not None
@@ -519,13 +568,14 @@ class ReviewStore:
         if estimate + limits.output_tokens > limits.context_tokens:
             raise BudgetExceeded("context_capacity")
         if (limits.total_output_tokens is not None and usage["committed_output_tokens"]
-                + (1 + protected_calls) * limits.output_tokens > limits.total_output_tokens):
+                + (1 + protected_calls - tail_calls) * limits.output_tokens + tail_output
+                > limits.total_output_tokens):
             raise BudgetExceeded("output_token_limit")
         return {
             "input_tokens": (limits.total_input_tokens - usage["committed_input_tokens"] - protected_tokens
                              if limits.total_input_tokens is not None else None),
             "output_tokens": (limits.total_output_tokens - usage["committed_output_tokens"]
-                              - protected_calls * limits.output_tokens
+                              - (protected_calls - tail_calls) * limits.output_tokens - tail_output
                               if limits.total_output_tokens is not None else None),
             "model_calls": (limits.total_model_calls - len(calls) - protected_calls
                             if limits.total_model_calls is not None else None),

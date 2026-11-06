@@ -83,9 +83,8 @@ class Settings(BaseSettings):
     rivu_incremental_review_webhook_repositories: str = ""
     rivu_incremental_review_max_runs_per_hour: int = Field(default=4, ge=1, le=100)
     rivu_review_timeout_seconds: float = Field(default=1800, ge=1, le=86_400)
-    rivu_review_scaled_timeout_max_seconds: int = Field(default=7200, ge=1, le=86_400)
     rivu_review_gap_followups: int = Field(default=2, ge=0, le=3)
-    # 调用次数只作熔断；调查以整轮 Token 和期限为主，深度不再覆盖此值。
+    # 调查、补查和核验共用单 Agent 熔断及整轮预算。
     rivu_agent_max_calls: int = Field(default=48, ge=1, le=100)
     rivu_agent_max_tool_calls: int = Field(default=80, ge=1, le=500)
     rivu_agent_output_tokens: int = Field(default=4096, ge=256, le=125_000)

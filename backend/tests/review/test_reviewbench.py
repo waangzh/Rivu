@@ -64,12 +64,38 @@ def test_judge_accepts_zero_findings_without_rerunning_review(tmp_path, monkeypa
     assert ("--allow-empty" in arguments) == (not findings)
 
 
-def test_judge_only_cannot_retroactively_skip_overview(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("option", ["--skip-overview", "--with-overview"])
+def test_judge_only_cannot_change_overview(tmp_path, monkeypatch, capsys, option):
     monkeypatch.setattr("sys.argv", [
         "reviewbench", "--benchmark-dir", str(tmp_path), "--run-dir", str(tmp_path),
-        "--judge-only", "--skip-overview", "--judge-provider", "fixture", "--judge-model", "fixture",
+        "--judge-only", option, "--judge-provider", "fixture", "--judge-model", "fixture",
     ])
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2
-    assert "--skip-overview" in capsys.readouterr().err
+    assert "总览选项" in capsys.readouterr().err
+
+
+def test_judge_only_with_default_overview(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.argv", [
+        "reviewbench", "--benchmark-dir", str(tmp_path), "--run-dir", str(tmp_path),
+        "--judge-only", "--judge-provider", "fixture", "--judge-model", "fixture",
+    ])
+    monkeypatch.setattr("app.evaluation.reviewbench.judge", lambda args, directory: 0)
+    assert main() == 0
+
+
+@pytest.mark.parametrize(("option", "expected"), [([], True), (["--with-overview"], False)])
+def test_reviewbench_overview_default(tmp_path, monkeypatch, option, expected):
+    write_json(tmp_path / "corpus/test/test.json", [{"pr_number": 1}])
+    monkeypatch.setattr("sys.argv", [
+        "reviewbench", "--benchmark-dir", str(tmp_path), "--run-dir", str(tmp_path / "run"),
+        "--no-judge", *option,
+    ])
+
+    async def run_reviews(args, entries, directory):
+        assert args.skip_overview is expected
+        return {"counts": {"completed": 1}, "scored_inputs": 1}
+
+    monkeypatch.setattr("app.evaluation.reviewbench.run_reviews", run_reviews)
+    assert main() == 0

@@ -94,9 +94,9 @@ def test_short_context_notes_do_not_rewrite_a_cached_prefix():
 
 
 def test_large_closed_branches_do_not_compact_a_low_pressure_history():
-    context, messages = scenario(count=72)
+    context, messages = scenario(count=144)
     first = context.window.project(context, messages, estimate, 1_000_000)
-    assert estimate(first) > 64_000
+    assert estimate(first) > 128_000
     for index in range(1, 9):
         note = InvestigationState(
             question_id=f"q{index}", question=f"Does caller {index} introduce a failure?",
@@ -246,12 +246,12 @@ def test_admission_failure_can_force_compaction_below_capacity_pressure():
 
 
 def test_sustained_slow_short_responses_can_trigger_substantial_compaction():
-    context, messages = scenario(count=72)
+    context, messages = scenario(count=144)
     window = context.window
-    window.observe_response(80_000, 64, 31, 60)
+    window.observe_response(128_000, 64, 31, 60)
     window.project(context, messages, estimate, 1_000_000)
     assert window.metrics["pressure_reason"] is None
-    window.observe_response(90_000, 64, 32, 60)
+    window.observe_response(140_000, 64, 32, 60)
     before = window.project(context, messages, estimate, 1_000_000)
     assert window.metrics["pressure_reason"] == "latency"
     assert window.checkpoint_pending
@@ -266,7 +266,7 @@ def test_sustained_slow_short_responses_can_trigger_substantial_compaction():
 
 
 @pytest.mark.parametrize(("input_tokens", "output_tokens"), [
-    (10_000, 64), (90_000, 2000), (None, None),
+    (10_000, 64), (127_999, 64), (140_000, 2000), (None, None),
 ])
 def test_small_long_output_or_unknown_requests_do_not_establish_latency_pressure(input_tokens, output_tokens):
     window = WorkingContext()
@@ -275,15 +275,17 @@ def test_small_long_output_or_unknown_requests_do_not_establish_latency_pressure
     assert window.slow_responses == 0
 
 
-def test_repeated_investigation_with_recorded_branches_can_request_a_checkpoint():
-    context, messages = scenario(count=72)
+@pytest.mark.parametrize(("count", "expected_pressure"), [(72, False), (144, True)])
+def test_repeated_investigation_with_recorded_branches_can_request_a_checkpoint(count, expected_pressure):
+    context, messages = scenario(count=count)
+    assert (estimate(messages) >= 128_000) is expected_pressure
     context.investigations["q"] = InvestigationState(
         question_id="q", question="Is caller one relevant?", status="resolved",
         source_refs=["S1"], conclusion="This branch was ruled out.")
     context.repeated_tool_rounds = 3
     context.window.project(context, messages, estimate, 1_000_000)
-    assert context.window.metrics["pressure_reason"] == "investigation"
-    assert context.window.checkpoint_pending
+    assert context.window.metrics["pressure_reason"] == ("investigation" if expected_pressure else None)
+    assert context.window.checkpoint_pending is expected_pressure
     assert context.repeated_tool_rounds == 3
 
 

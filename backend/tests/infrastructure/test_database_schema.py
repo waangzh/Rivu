@@ -69,3 +69,23 @@ def test_current_vnext_database_upgrades_without_rebuilding_review_tables(tmp_pa
         assert "input_id" in {column["name"] for column in inspect(connection).get_columns("review_tasks")}
         assert "local_review_inputs" in inspect(connection).get_table_names()
     engine.dispose()
+
+
+def test_retained_runs_keep_deadlines_and_dependency_evidence(tmp_path):
+    import json
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'retained.db'}")
+    snapshot = {"status": "cancelled", "hard_deadline": "2026-11-06T00:00:00Z",
+        "dependency_pins": {"old-pin": {"version": "1.2.3"}},
+        "configuration": {"options": {"limits": {"model_calls": 9}}}}
+    with engine.connect() as connection:
+        command.upgrade(config_for(connection), "20261103_0002")
+        connection.execute(text("INSERT INTO review_tasks (id, repository, pr_url, status, current_phase, model, provider, "
+            "task_snapshot, created_at, updated_at, retention_until) VALUES ('retained', 'o/r', '', 'cancelled', 'cancelled', 'fake', 'test', "
+            ":snapshot, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"), {"snapshot": json.dumps(snapshot)})
+        connection.commit()
+        command.upgrade(config_for(connection), "head")
+        connection.commit()
+        actual = json.loads(connection.scalar(text("SELECT task_snapshot FROM review_tasks WHERE id='retained'")))
+        assert actual == {**snapshot, "first_pass_deadline": None, "first_verification_deadline": None}
+    engine.dispose()

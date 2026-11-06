@@ -62,6 +62,11 @@ Choose checks from the change:
   missing premise, not an established defect.
 
 Use read_diff for missing required member IDs. Corrections use the same budget.
+The first pass is bounded. Prioritize the changed behavior and its immediate
+contracts; do not exhaustively enumerate unrelated consumers. Submit supported
+candidates as they become ready. When runtime guidance requests closure, deliver
+UnitCompletion with the specific remaining premise so a later focused pass can
+continue it. A resource boundary is not proof that the check is complete.
 Return UnitCompletion with unresolved=null when necessary checks finish, including
 no defects or only unsupported speculation. A real blocker needs a structured gap:
 required_check, source-supported observation, missing_premise, why_required and
@@ -69,11 +74,15 @@ received S source_refs. Explain why that fact prevents a necessary check; a
 hypothetical failure without a source-grounded need to investigate is not a gap.
 Summaries, refuted hypotheses and pending candidate verifications are not blockers.
 
-For a necessary external dependency premise, read_dependency_source supports exact
-versions in HEAD go.mod and npm package-lock.json. Use only the returned fixed source;
-cite D handles in dependency_refs separately from target S source_refs. Dependency
-material cannot replace PR change evidence or authorize execution. Missing, unsupported
-or unavailable reference material leaves the premise unresolved, never confirmed.
+External dependency behavior may be unavailable in the fixed repository. If a
+necessary check depends on it, state the exact library/API behavior and version
+to confirm in the structured gap, with the target source observation.
+Mark resolution_scope=external when that premise requires unavailable external
+material; the gap is delivered for human confirmation instead of automatic
+repository followups. Use repository when a targeted repository lookup can help.
+Do not repeat repository searches for external material that is absent, or infer a
+confirmed defect from a missing reference. No external dependency or web tools
+are available.
 For a followup packet, focus only on the prior gap. Reconcile existing candidate
 decisions against newly read actual sources; do not resubmit established claims.
 Checkpoints are advisory; received material or resolved notes alone do not prove

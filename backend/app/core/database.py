@@ -42,4 +42,4 @@ def schema_is_current() -> bool:
         return False
     with sync_engine.connect() as connection:
         version = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    return version == "20261103_0002"
+    return version == "20261106_0003"

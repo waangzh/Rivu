@@ -70,7 +70,7 @@ def prepare_repository(entry, directory, git):
 
 
 async def review_sample(service, entry, repository, *, model=None, depth="standard", timeout=None,
-                        skip_overview=False):
+                        skip_overview=True):
     from app.core.config import settings
     from app.review.contracts import ReviewRequest
     from app.review.domain import TERMINAL, utcnow
@@ -204,7 +204,11 @@ def main():
     parser.add_argument("--depth", choices=("quick", "standard", "deep"), default="standard")
     parser.add_argument("--timeout", type=int, help="每 PR 审查秒数，受现有服务上限约束")
     parser.add_argument("--no-judge", action="store_true", help="仅生成 findings")
-    parser.add_argument("--skip-overview", action="store_true", help="不生成总览，专注发现质量与调查成本")
+    overview = parser.add_mutually_exclusive_group()
+    overview.add_argument("--skip-overview", action="store_true", default=None,
+                          help="不生成总览（默认）")
+    overview.add_argument("--with-overview", action="store_false", dest="skip_overview",
+                          help="生成总览")
     parser.add_argument("--judge-only", action="store_true", help="仅为已有运行执行 judge")
     parser.add_argument("--judge-provider", help="官方 judge 的 provider 名称")
     parser.add_argument("--judge-model", help="官方 judge 的模型 ID")
@@ -216,9 +220,11 @@ def main():
         parser.error("--limit 至少为 1，--pr 从 0 开始")
     args.benchmark_dir = args.benchmark_dir.resolve()
     if args.judge_only:
-        if args.run_dir is None or args.no_judge or args.skip_overview:
-            parser.error("--judge-only 需要 --run-dir，且不能与 --no-judge 或 --skip-overview 同用")
+        if args.run_dir is None or args.no_judge or args.skip_overview is not None:
+            parser.error("--judge-only 需要 --run-dir，且不能与 --no-judge 或总览选项同用")
         return judge(args, args.run_dir.resolve())
+    if args.skip_overview is None:
+        args.skip_overview = True
     manifest = args.benchmark_dir / ("corpus/test/test.json" if args.set == "test"
                                      else "corpus/manifest.json")
     entries = json.loads(manifest.read_text(encoding="utf-8"))

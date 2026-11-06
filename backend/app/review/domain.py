@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from typing import Literal
 
+from pydantic.json_schema import SkipJsonSchema
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.paths import validate_repo_relative_path
@@ -57,7 +59,7 @@ class Configuration(Model):
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] | None = None
     options: Options
-    prompt_version: str = "review-vnext-14"
+    prompt_version: str = "review-vnext-15"
 
 
 class Snapshot(Model):
@@ -154,7 +156,7 @@ class CandidateInput(FailureDescription):
     source_refs: list[str] = Field(min_length=1, max_length=32)
     location: Location | None = None
     root_cause: RootCause | None = None
-    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
+    dependency_refs: SkipJsonSchema[list[str]] = Field(default_factory=list, max_length=16)
 
 
 class VerificationQuestion(Model):
@@ -173,7 +175,7 @@ class VerificationOutput(Model):
     verified_claim: FailureDescription | None = None
     question: VerificationQuestion | None = None
     root_cause: RootCause | None = None
-    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
+    dependency_refs: SkipJsonSchema[list[str]] = Field(default_factory=list, max_length=16)
 
 
 class CompletionGap(Model):
@@ -182,7 +184,10 @@ class CompletionGap(Model):
     missing_premise: str = Field(min_length=1, max_length=1000)
     why_required: str = Field(min_length=1, max_length=1000)
     source_refs: list[str] = Field(min_length=1, max_length=32)
-    dependency_refs: list[str] = Field(default_factory=list, max_length=16)
+    resolution_scope: Literal["repository", "external"] = Field(default="repository", description=(
+        "Use external only when resolving the premise requires dependency behavior or other "
+        "material absent from the fixed repository. Such gaps are delivered for human confirmation."
+    ))
 
 
 class UnitCompletion(Model):
@@ -382,6 +387,8 @@ class Run(Model):
     report: Report | None = None
     review_cutoff: datetime
     hard_deadline: datetime
+    first_pass_deadline: datetime | None = None
+    first_verification_deadline: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
@@ -389,6 +396,23 @@ class Run(Model):
     error_code: str | None = None
     discussion_uri: str | None = None
     dependency_pins: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+    @property
+    def first_pass_cutoff(self):
+        return min(self.review_cutoff, self.first_pass_deadline or self.review_cutoff)
+
+    @property
+    def first_verification_cutoff(self):
+        return min(self.hard_deadline, self.first_verification_deadline or self.hard_deadline)
+
+    def work_deadline(self, work):
+        if work.kind == "review":
+            deadline = self.first_pass_cutoff
+        elif work.kind == "supplement":
+            deadline = self.review_cutoff
+        else:
+            deadline = self.first_verification_cutoff if work.followup_number == 0 else self.hard_deadline
+        return min(deadline, work.investigation_deadline or deadline)
 
     @model_validator(mode="after")
     def valid_source_identity(self):

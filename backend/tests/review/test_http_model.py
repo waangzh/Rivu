@@ -35,6 +35,8 @@ async def test_reviewer_and_verifier_receive_initial_source_packets_beyond_group
     store, run, lease, provider, sessions = setup_source_run(
         tmp_path, base_source=large_source(0), head_source=large_source(1))
     run.configuration.options.limits.total_input_tokens = None
+    run.first_pass_deadline = utcnow() + timedelta(minutes=10)
+    run.first_verification_deadline = utcnow() + timedelta(minutes=15)
     with sessions.begin() as session:
         session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
     requests = []
@@ -528,8 +530,8 @@ async def test_verifier_final_request_preserves_admission_and_hard_limit(tmp_pat
         assert sum(ticket.kind == "verification" for ticket in tickets) == verifier_calls
 
 
-@pytest.mark.parametrize("mode", ["recover", "repeat", "exhausted", "budget"])
-async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_path, mode, caplog):
+@pytest.mark.parametrize("mode", ["recover", "repeat", "invalid_schema", "exhausted", "budget"])
+async def test_verifier_structured_output_recovery_is_bounded_and_usage_settled(tmp_path, mode, caplog):
     store, run, lease, provider, sessions = setup_source_run(tmp_path)
     run.configuration.options.limits.model_calls = 1 if mode == "exhausted" else 12
     if mode == "budget":
@@ -563,7 +565,9 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
                 "source_refs": [source["source_ref"] for material in packet["materials"]
                                 for source in material["sources"]],
                 "author_comment": "零输入会触发除零，请恢复回退或显式处理。"}
-            if len(verifier_requests) == 1 or mode == "repeat":
+            if mode == "invalid_schema":
+                results = [("VerificationOutput", {"verdict": "confirmed"})]
+            elif len(verifier_requests) == 1 or mode == "repeat":
                 # Valid-looking prose/JSON is still not an admitted tool result.
                 content = "PRIVATE_MODEL_FREE_TEXT\n" + json.dumps(result)
                 results = []
@@ -603,6 +607,13 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
         assert check.error_code == "agent_structured_output_missing"
         assert report.candidates[0].verification is None
         assert report.findings == []
+        if mode == "invalid_schema":
+            diagnostic = check.error_diagnostic
+            assert diagnostic.stage == "agent_processing"
+            assert diagnostic.response_received and diagnostic.usage_known
+            assert diagnostic.finish_reason == "tool_calls"
+            assert diagnostic.tool_calls == 1
+            assert diagnostic.ticket
     assert "PRIVATE_MODEL_FREE_TEXT" not in caplog.text
     assert report.usage["unknown_calls"] == 0
     assert report.usage["model_calls"] == len(requests)
@@ -610,6 +621,10 @@ async def test_plain_text_verifier_requires_bounded_structured_correction(tmp_pa
         tickets = list(session.scalars(select(ReviewRequestOrm)))
         assert sum(ticket.kind == "verification" for ticket in tickets) == len(verifier_requests)
         assert all(ticket.state == "settled" for ticket in tickets)
+        if mode == "invalid_schema":
+            failed_ticket = next(ticket for ticket in tickets if ticket.id == diagnostic.ticket)
+            assert failed_ticket.usage["input_tokens"] == 10
+            assert failed_ticket.usage["output_tokens"] == 5
 
 
 @pytest.mark.parametrize("mode", [

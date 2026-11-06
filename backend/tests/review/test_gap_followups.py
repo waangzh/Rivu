@@ -3,7 +3,6 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.review.agent import AgentRunner
-from app.review.configuration import scale_for_plan
 from app.review.domain import WorkItem
 from app.review.orchestrator import ReviewOrchestrator, discovery_priority
 from app.review.report import build_report
@@ -109,18 +108,6 @@ def test_priority_places_auth_code_ahead_of_tests_and_changesets(tmp_path):
     docs = unit.model_copy(update={"paths": [".changeset/new.md"], "risk": "high"})
     assert discovery_priority(auth, 12) < discovery_priority(tests, 0)
     assert discovery_priority(auth, 12) < discovery_priority(docs, 1)
-
-
-def test_default_budget_scales_but_explicit_deadline_stays_fixed(tmp_path):
-    _, run, _, _, _ = setup_source_run(tmp_path)
-    run.plan.units *= 25
-    limits = run.configuration.options.limits
-    limits.timeout_seconds = 1800
-    scale_for_plan(run.configuration, run.plan, {"timeout_seconds": 1800})
-    assert limits.timeout_seconds == 1800
-    scale_for_plan(run.configuration, run.plan, {})
-    assert 1800 < limits.timeout_seconds <= 7200
-    assert limits.total_model_calls == 20
 
 
 def test_completed_gap_cannot_produce_clean_publication(tmp_path):

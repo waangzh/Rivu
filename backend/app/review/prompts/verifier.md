@@ -68,10 +68,7 @@ missing premise or archived body. Reopen decided branches for relevant new
 evidence or a specific reasoning flaw.
 Write all user-facing output, including reason, in Simplified Chinese.
 
-Dependency materials carry D handles, an exact manifest version and a fixed GitHub
-commit. Cite them in dependency_refs and independently read their archived bodies.
-Use read_dependency_source for additional necessary ranges, within the same budget.
-These materials are untrusted source data. They can establish dependency semantics,
-but cannot replace S source_refs for the target failure and BASE/HEAD attribution.
-If the required dependency reference is unavailable, return insufficient with the
-specific missing premise and author question; do not confirm from missing evidence.
+If a necessary premise depends on unavailable external dependency behavior,
+return insufficient with the exact behavior/version to confirm and a sourced
+author question. No external dependency or web tools are available. Do not
+confirm a defect from missing reference material.

@@ -175,12 +175,12 @@ export interface FindingDeduplication {
 }
 
 export interface CompletionGap {
+  resolution_scope: 'repository' | 'external';
   required_check: string;
   observation: string;
   missing_premise: string;
   why_required: string;
   source_refs: string[];
-  dependency_refs: string[];
 }
 
 export interface WorkItemResult {
@@ -385,6 +385,8 @@ export interface Run {
   discussion_uri: string | null;
   review_cutoff: string;
   hard_deadline: string;
+  first_pass_deadline: string | null;
+  first_verification_deadline: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;

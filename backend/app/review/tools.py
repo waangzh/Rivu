@@ -125,49 +125,6 @@ async def read_file(path: str, revision: Literal["base", "head"],
 
 @tool
 @bounded
-async def read_dependency_source(manifest_path: str, package: str, path: str,
-                                 start: Annotated[int, Field(ge=1, strict=True)],
-                                 end: Annotated[int, Field(ge=1, strict=True)],
-                                 runtime: ToolRuntime[AgentContext]) -> dict:
-    """Read public GitHub dependency source at an exact version from HEAD go.mod or package-lock.json.
-
-    No ranges, replace directives or arbitrary URLs. path is relative to dependency repository.
-    Cite returned D handles in dependency_refs, together with target S handles in source_refs.
-    Unavailable dependency material leaves the premise unverified; it never proves a defect.
-    """
-    from app.review.dependencies import load_dependency
-    from app.services.review.evidence.file_context import FileContextError
-    import httpx
-    context = runtime.context
-    if len(context.dependencies) + len(context.pending_dependencies) + context.dependency_slots >= 12:
-        return {"ok": False, "error": "dependency_material_limit"}
-    context.dependency_slots += 1
-    try:
-        ref, content = await load_dependency(context, manifest_path, package, path, start, end)
-    except (FileContextError, httpx.HTTPError, TimeoutError):
-        return {"ok": False, "error": "dependency_reference_unavailable",
-                "next_action": "Keep the specific missing dependency premise unresolved. "
-                               "Do not infer a confirmed defect from unavailable reference material."}
-    finally:
-        context.dependency_slots -= 1
-    handle = context.stage_dependency(ref)
-    return {"ok": True, "dependency_ref": handle, "dependency": ref.model_dump(), "content": content,
-            "boundary": "Fixed upstream Git source; npm generated release artifacts may differ."}
-
-
-@tool
-@bounded
-async def recall_dependency(dependency_ref: str, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Restore an already received D dependency source body after context compaction."""
-    from app.review.dependencies import read_dependency
-    context = runtime.context
-    ref = context.resolve_dependencies([dependency_ref])[0]
-    content = await asyncio.to_thread(read_dependency, context.evidence, ref)
-    return {"ok": True, "dependency_ref": dependency_ref, "dependency": ref.model_dump(), "content": content}
-
-
-@tool
-@bounded
 async def read_diff(hunk_id: str, runtime: ToolRuntime[AgentContext]) -> dict:
     """Deliver a missing required hunk member, using an ID from the frozen unit."""
     unit = next(unit for unit in runtime.context.provider.run.plan.units

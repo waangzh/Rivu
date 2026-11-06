@@ -137,8 +137,6 @@ class ReviewService:
                                run_id, type(exc).__name__)
                 relations = []
             plan = await asyncio.to_thread(plan_review, changed, snapshot, config.options, relations)
-            from app.review.configuration import scale_for_plan
-            scale_for_plan(config, plan, request.limits)
             now = utcnow()
             seconds = config.options.limits.timeout_seconds
             run = Run(id=run_id, pr_url=str(request.pr_url) if pr else None, pr=pr,
@@ -146,6 +144,8 @@ class ReviewService:
                 configuration=config, changed_files=changed, plan=plan,
                 created_at=observed_at,
                 review_cutoff=now + timedelta(seconds=seconds * 0.8),
+                first_pass_deadline=now + timedelta(seconds=seconds * 0.6),
+                first_verification_deadline=now + timedelta(seconds=seconds * 0.7),
                 hard_deadline=now + timedelta(seconds=seconds))
             previous = await asyncio.to_thread(self.store.previous, snapshot)
             history = await asyncio.to_thread(self.store.history, previous)

@@ -7,6 +7,8 @@ from app.review.planner import identity
 
 
 def admit_candidate(proposal, context, tool_call_id):
+    if proposal.dependency_refs:
+        raise ValueError("source_not_visible_in_this_attempt")
     refs = context.resolve(proposal.source_refs)
     snapshot = context.provider.run.snapshot
     if any(ref.review_id != snapshot.review_id or ref.commit_sha != (
@@ -18,8 +20,7 @@ def admit_candidate(proposal, context, tool_call_id):
         raise ValueError("root_cause_not_sourced")
     return Candidate(id=uuid4().hex, unit_id=context.work.unit_id,
         attempt_id=context.work.attempt_id, tool_call_id=tool_call_id,
-        proposal=proposal, sources=refs,
-        dependency_sources=context.resolve_dependencies(proposal.dependency_refs))
+        proposal=proposal, sources=refs)
 
 
 def finding_digest(candidate, snapshot):
@@ -81,19 +82,19 @@ def verification_problem(output, refs, changed_files):
 def admit_verification(candidate, output, context):
     run = context.provider.run
     try:
+        if output.dependency_refs:
+            raise ValueError("source_not_visible_in_this_attempt")
         refs = context.resolve(output.source_refs)
-        dependencies = context.resolve_dependencies(output.dependency_refs)
     except ValueError:
         # A model-supplied handle is untrusted; keep the verification as an
         # admission failure instead of letting it abort the whole work item.
-        refs, dependencies, problem = [], [], "invalid_source_refs"
+        refs, problem = [], "invalid_source_refs"
     else:
         problem = verification_problem(output, refs, run.changed_files)
     candidate.verification = output.model_copy(update={
         "verdict": "insufficient", "severity": None, "author_comment": None,
         "reason": f"{problem}: {output.reason}"} if problem else {})
     candidate.verification_sources = refs
-    candidate.verification_dependency_sources = dependencies
     candidate.admission_reason = problem
     candidate.decision_digest = finding_digest(candidate, run.snapshot) if not problem else None
     candidate.question_digest = (finding_digest(candidate, run.snapshot)

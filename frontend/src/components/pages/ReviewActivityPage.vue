@@ -152,6 +152,7 @@ const findingsCount = computed(() => props.findingsCount ?? props.report?.findin
             <p>源码观察：{{ item.result.unresolved.observation }}</p>
             <p>缺失事实：{{ item.result.unresolved.missing_premise }}</p>
             <p>阻塞原因：{{ item.result.unresolved.why_required }}</p>
+            <p v-if="item.result.unresolved.resolution_scope === 'external'">此项需要仓库外材料，请人工确认依赖行为；不会自动反复补查。</p>
           </div>
           <p v-else-if="item.kind === 'review' && item.result?.unresolved_reason" class="notice warn small">{{ item.result.unresolved_reason }}</p>
           <details v-if="item.error_code || item.reused_from || Object.keys(item.missing_material_reasons).length" class="space-top">

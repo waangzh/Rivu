@@ -1,4 +1,4 @@
-"""Freeze user options within server resource policy, without role quotas."""
+"""Freeze user options within server resource limits."""
 
 from app.core.config import settings
 from app.review.domain import Configuration, Limits, Options
@@ -43,17 +43,6 @@ def freeze_configuration(request, provider):
                          if thinking else None)
 
 
-def scale_for_plan(configuration, plan, explicit_limits):
-    """Scale the default deadline by dispatch waves; explicit budgets stay fixed."""
-    if "timeout_seconds" in explicit_limits:
-        return
-    limits = configuration.options.limits
-    waves = (len(plan.units) + limits.concurrency - 1) // limits.concurrency
-    factor = max(1, (waves + 2) // 3)
-    limits.timeout_seconds = max(limits.timeout_seconds, min(
-        int(limits.timeout_seconds * factor), settings.rivu_review_scaled_timeout_max_seconds))
-
-
 def capabilities():
     return {
         "depth_presets": [{"id": key, "label": value, "limits": maxima()}
@@ -62,7 +51,6 @@ def capabilities():
         "scope_selection_supported": True,
         "context_boundary": "固定提交的普通源码；不会执行目标仓库代码",
         "limits": {"defaults": maxima(), "maxima": maxima()},
-        "scaled_timeout_max_seconds": settings.rivu_review_scaled_timeout_max_seconds,
         "gap_followups": settings.rivu_review_gap_followups,
         "pr_discussions_available": settings.rivu_pr_discussions_enabled,
         "pr_discussions_default": settings.rivu_pr_discussions_enabled,

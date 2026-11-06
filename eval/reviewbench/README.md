@@ -43,7 +43,7 @@ uv run python -m app.evaluation.reviewbench \
 
 Judge 使用自己的 provider、模型 ID 和对应环境变量；Reviewer 的 `.env` 不会自动成为 Node 评分器的凭据。可以使用已有的可用模型，不要求与官方榜单一致。模型需要支持工具调用。
 
-例如配置好 `DEEPSEEK_API_KEY` 后，使用项目提供的 DeepSeek judge 配置（仍在 `backend/` 执行）：
+例如先按官方 `docs/OFFLINE_EVAL.md` 在本地准备 DeepSeek judge 的 `models.json`，再配置 `DEEPSEEK_API_KEY`（仍在 `backend/` 执行）：
 
 ```sh
 export PI_CODING_AGENT_DIR="$(pwd)/../eval/reviewbench/deepseek-judge"
@@ -55,7 +55,7 @@ uv run python -m app.evaluation.reviewbench \
   --judge-model deepseek-v4-pro
 ```
 
-此配置启用推理，使用 1,000,000 tokens 上下文和 64,000 tokens 最大输出；后者参考 ReviewBench 离线文档的 Claude 示例，是本地选择，并非官方对 DeepSeek 的指定值。评分器为 matcher 和 classifier 分别请求 low 和 medium 推理，DeepSeek 将 medium 映射为 high。DeepSeek 模型及服务可能变化，比较结果时应记录具体配置；本地 DeepSeek 评分与官方榜单 Claude 评分不能直接等同。
+`eval/reviewbench/deepseek-judge/models.json` 与凭据只保存在本地，不随仓库分发。此前本地评测启用推理，使用 1,000,000 tokens 上下文和 64,000 tokens 最大输出；后者参考 ReviewBench 离线文档的 Claude 示例，是本地选择，并非官方对 DeepSeek 的指定值。评分器为 matcher 和 classifier 分别请求 low 和 medium 推理，DeepSeek 将 medium 映射为 high。DeepSeek 模型及服务可能变化，比较结果时应记录具体配置；本地 DeepSeek 评分与官方榜单 Claude 评分不能直接等同。
 
 参考：[ReviewBench 离线评测](https://github.com/review-bench/ReviewBench/blob/228f2a8d662c9c1c12d25757e23c52c9a6170d5a/docs/OFFLINE_EVAL.md)、[DeepSeek 模型规格](https://api-docs.deepseek.com/quick_start/pricing/)、[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)。
 
@@ -72,9 +72,9 @@ Review 和 judge 都会产生模型调用费用。Judge 失败后用相同 `--ju
 - `--set full --limit 219`：选择完整集；个人试跑不需要全量。
 - `--model ...` / `--depth quick|standard|deep`：覆盖 Reviewer 模型和深度。
 - `--timeout 300`：设置审查期限，沿用现有服务的资源上限。
-- `--skip-overview`：跳过总览，专注比较发现质量和调查成本；默认仍生成总览。不能与 `--judge-only` 同用。
+- 默认跳过总览；`--with-overview` 可按需生成，`--skip-overview` 显式跳过。总览选项不能与 `--judge-only` 同用。
 
-例如在前面的审查命令中追加 `--skip-overview`。选项随任务配置冻结；总览记为
+默认选项随任务配置冻结；总览记为
 `skipped_disabled`，不会准备总览材料或调用总览模型，也不再为总览保护输入、输出和请求次数。
 Reviewer 提前停止线与总期限保持原有规则，仍为独立核验留出时间。`summary.json` 保存
 `skip_overview`，并逐样本记录总览状态、错误码和安全的响应形状诊断。

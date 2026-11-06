@@ -1,24 +1,36 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="pic/logo/rivu-logo-horizontal-dark.svg">
+    <img src="pic/logo/rivu-logo-horizontal.svg" alt="Rivu" width="280">
+  </picture>
+</p>
+
 # Rivu
 
-> 基于固定源码证据、理解仓库上下文、严格只读的 AI 代码变更审查 Agent。
+基于固定源码证据、理解仓库上下文的只读 AI 代码变更审查 Agent。输入 GitHub PR 或本地 Git 的 Base / Head，即可获得变更总览、经过独立核验的问题及对应源码证据。
 
-输入 GitHub PR URL，或选择已注册本地 Git 仓库的 Base/Head 提交，设置范围和资源上限，即可启动审查。Reviewer 按需调查并即时保存候选，独立 Verifier 寻找反证、判断归因，最终提供问题、证据、运行范围和默认 LLM 变更总览。
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat)](backend/pyproject.toml)
+[![Node.js 21+](https://img.shields.io/badge/Node.js-21%2B-07866F?style=flat)](frontend/package.json)
 
-**Rivu Server 不执行目标仓库代码。** 不安装目标依赖，不运行目标测试、构建或脚本，不触发目标 CI，也不自动修复或写回补丁。
+[快速开始](#快速开始) · [本地 Git 审查](#本地-git-审查) · [配置说明](#配置与数据边界) · [ReviewBench 评测](eval/reviewbench/README.md)
 
 ## 项目特点
 
-- **确定性外层编排**：`ReviewOrchestrator` 管理有限工作项、并发、截止时间和恢复；LangChain `create_agent` 管理 Reviewer / Verifier 内部工具循环。
-- **即时保留成果**：`submit_candidate` 在同一事务中保存候选和待核验工作项。后续 Reviewer 失败不会删除已经提交的候选。
-- **来源与判断分离**：完整 Diff 行核对固定 Git blob 后可直接引用；搜索、关系索引、作者声明与讨论只是调查线索。`confirmed` 仍须经过服务端条件准入。
-- **一个请求预算门禁**：模型调用前持久化预留，返回后幂等结算。并发 Reviewer 不能侵占已排队候选的最低核验机会；未知用量保守占用，默认总览单独保护一笔资源。
-- **事实与表达分离**：先保存事实报告，再进行一次默认 LLM 总览。总览失败独立显示，不丢失问题、不改变事实终态，也不额外运行一致性 Agent。
+- 🔍 **两种审查入口**：审查 GitHub PR，或已注册本地仓库中的提交变更。
+- 🧠 **按需理解上下文**：结合固定 Diff，调查调用者、相关测试源码和 Base / Head 行为差异。
+- 🧾 **证据与独立核验**：Reviewer 提交候选，Verifier 检查支持与反证；证据不足的问题保持未决。
+- ⏱️ **可控运行**：支持并发、资源上限、进度查看、取消与恢复，已保存的候选不因后续失败丢失。
+- 📬 **GitHub 交付**：复制审查评论，或通过独立 Publisher 手动发布、授权本次任务完成后自动发布；发布默认关闭。
 
-支持 Python、TypeScript/JavaScript、Java、Go 和 Rust 的静态解析。Parser 按查询启动并复用已有隔离、缓存与降级能力；索引关系不等于编译器绑定，也不证明运行时路径。
+支持 Python、TypeScript / JavaScript、Java、Go、Rust 的静态解析。
+
+> **只读边界**：Rivu 不执行被审查仓库的代码，不安装目标依赖，不运行目标测试、构建或脚本，不触发目标 CI，也不自动修复或写回补丁。源码会发送到你配置的模型服务。
 
 ## 快速开始
 
-需要 Git、uv、Python 3.12+、Node.js 21+、npm，以及支持原生工具调用的模型服务。
+准备 Git、Python 3.12+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 21+ 和 npm，以及支持原生 Tool Calling 与结构化提交的模型服务。
+
+### 1. 安装后端
 
 ```sh
 git clone https://github.com/waangzh/Rivu.git
@@ -28,25 +40,36 @@ cd backend
 uv sync --extra test
 ```
 
-在 `backend/.env` 配置模型：
+编辑 `backend/.env`，填入 DeepSeek 模型配置：
 
-```env
-RIVU_PROVIDER=openai
-OPENAI_API_KEY=your-api-key
-OPENAI_BASE_URL=https://api.openai.com/v1
-RIVU_MODEL=gpt-4.1-mini
+```dotenv
+RIVU_PROVIDER=deepseek
+OPENAI_API_KEY=your-deepseek-api-key
+OPENAI_BASE_URL=https://api.deepseek.com
+RIVU_MODEL=deepseek-flash
 ```
 
-在 `backend/` 初始化**新的空数据库**并启动：
+使用其他 Provider 时，按[环境变量示例](.env.example)调整端点和模型；`RIVU_MODEL_CONTEXT_TOKENS` 应与实际模型能力匹配。
+
+### 2. 初始化数据库并启动
+
+首次使用时初始化新的空数据库，默认路径为 `backend/.rivu/reviews.db`。已有当前架构数据库可执行增量迁移。
 
 ```sh
 uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app
 ```
 
-默认数据库为 `backend/.rivu/reviews.db`，Schema 基线为 `20261031_0001`，不再使用独立 Checkpointer。若曾运行旧架构，先停止旧 Worker 与 Publisher，保存旧数据库、Checkpoint 和 Artifact，并核对所有 `uncertain` 发布；自定义数据库路径必须改到新的空库。旧数据库不会自动转换或删除，旧 Alembic 版本会被拒绝。不要用 `stamp` 伪装完成切换。
+访问[健康检查](http://127.0.0.1:8000/health)，应返回 `{"status":"ok"}`；[API 文档](http://127.0.0.1:8000/docs)可查看接口。
 
-API 默认位于 `http://127.0.0.1:8000`；[健康检查](http://127.0.0.1:8000/health) 返回 `{"status":"ok"}`，[接口文档](http://127.0.0.1:8000/docs) 列出当前契约。
+<details>
+<summary>从旧审查架构迁移时的数据保护</summary>
+
+旧架构数据库不能原地转换。先停止旧 Worker 与 Publisher，备份数据库、Checkpoint 和 Artifact，并对账状态为 `uncertain` 的发布，再为新架构选择空数据库；自定义路径通过 `RIVU_DB_PATH` 设置。旧数据不会自动转换或删除，不要用 `alembic stamp` 跳过迁移。
+
+</details>
+
+### 3. 启动前端
 
 另开终端，在仓库根目录执行：
 
@@ -60,117 +83,76 @@ npm run dev
 
 ## 如何使用
 
-1. 输入 PR 地址，选择 Quick / Standard / Deep、调查重点、文件范围及资源上限，直接创建审查。`POST /api/reviews/preview` 可选，不再强制预览确认。
-2. 服务端固定数字仓库身份、声明 Base、唯一 merge base、Head 和计划成员；Reviewer 先处理高风险基础范围，并按需读取调用者、测试源码和相关 BASE 行为。
-3. 候选保存后即可独立核验，不必等待所有 Reviewer 结束。核验结果为 `confirmed`、`refuted` 或 `insufficient`；缺失来源、必要字段或归因证据的确认不能成为可发布 Finding。
-4. 在 **Overview / Changes / Findings / Activity / Publish** 查看总览、固定 Diff、来源、未决问题、工作项、材料缺口、用量和发布预览。
+1. 输入 GitHub PR 地址，选择 Quick / Standard / Deep、调查重点、文件范围和资源上限，开始审查。本地提交审查见下节。
+2. 在 **Overview / Changes / Findings / Activity / Publish** 查看总览、固定 Diff、问题证据、进度、材料缺口、用量与发布预览。
+3. 按需取消或重试。恢复复用已完成工作，重试仍沿用原预算与硬截止时间；总览可单独重试。中断的模型请求可能再次计费。
+4. 复制评论交由人工处理；需要直接写入 GitHub 时，先完成[发布配置](#交付到-github)与授权。
 
-核验完成后，系统会按位置和证据重叠筛选疑似重复，最多使用原预算中的一次模型请求比较 12 对，只引用既有固定源码。只有明确属于同一缺陷的记录才折叠，各位置的独立结论和来源保留；不同评级会标明分歧，不自动改为组评级。比较失败、超预算或不确定时继续分别展示，问题组数不代表已穷尽独立缺陷。Activity 中的请求诊断也区分上游响应到达与本地交付失败；已取得的有效用量不会因为后续解析或结构化校验失败而归为未知。
-5. 完成工作项在恢复时复用，中断项从头重跑。重试沿用原预算和硬截止时间；总览可单独重试。中断的外部请求可能再次计费，不承诺模型执行 exactly-once。
-
-创建请求必须带客户端生成的 `Idempotency-Key`。当前是本地单用户应用，键作用域为同一安装实例；相同键和规范化请求返回同一 Run，不重复创建收费任务。相同键但不同请求会冲突。主动重审必须使用新键。
-
-执行状态为 `queued / running / completed / partial / failed / cancelled`。`completed` 表示计划所需材料已交付、调查正常结束且已准入候选都取得核验终态，**不表示穷尽所有缺陷**。`insufficient` 仍是未决问题；部分范围、失败、取消和未知用量不会显示成完整成功或零成本。
-
-Reviewer 结束时使用 `UnitCompletion.unresolved`：正常完成（包括没有发现缺陷、只剩无依据的猜测）填 `null`；真正阻塞必要检查的缺口须给出检查事项、源码观察、缺失事实、阻塞原因和已收到的源码引用。格式或来源不合要求时，最多在原预算内纠正一次，无法纠正则保持未完成，不按自然语言关键词清空。历史 `unresolved_reason` 记录仍按原语义展示，不回写为成功；新旧未决项都不进入增量复用。
+`confirmed` 表示通过证据准入与独立核验，`refuted` 表示被反证，`insufficient` 表示必要证据不足。**`completed` 只表示计划内审查完成，不代表穷尽缺陷或允许合并**；部分范围、失败、取消和未知用量不会显示成完整成功或零成本。Rivu 不能替代项目测试、CI 与人工审批。
 
 ## 本地 Git 审查
 
-在 `backend/.env` 注册服务器可访问的仓库，然后重启服务：
+在 `backend/.env` 注册服务器可访问的仓库，然后重启后端：
 
 ```dotenv
 RIVU_LOCAL_REPOSITORIES={"project":"/absolute/path/to/project"}
 ```
 
-Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。注册键会显示在页面上，绝对路径不会出现在任务或模型材料中。首次启用新版本前，在 `backend/` 执行 `uv run alembic upgrade head`；新增本地输入表和可空的任务引用列，保留已有审查、预算与发布记录。
+Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。在新建审查页选择 **本地 Git**、仓库、Base 与 Head；可直接开始，也可先点击 **固定并预览快照**，预览不调用审查模型。
 
-在新建审查页选择 **本地 Git**、仓库、Base 与 Head。可先点击 **固定并预览快照**，启动时沿用该输入；也可直接开始审查。只纳入已提交内容，工作区中的暂存、未暂存和未跟踪文件不会进入审查。比较基准沿用唯一 merge base，缺失或不唯一时拒绝准备。
+只审查已提交内容，忽略暂存、未暂存与未跟踪文件。内容比较采用唯一 merge base，准备后保存独立固定输入，原仓库后续移动或修改不影响审查与恢复。
 
-本地输入独立保存在 artifact 目录下的 `_local_inputs/`，不借用原仓库对象，也不复制其配置、hooks 或索引。原仓库后续移动、删除或修改不影响已冻结输入；任务执行、恢复和源码展开不请求 GitHub。未关联任务的预览保留 24 小时，已关联输入保留至任务删除或保留期清理后回收。单次导入默认最多读取 1 GiB Git 元数据/对象、100000 个文件与目录，可通过 `RIVU_LOCAL_INPUT_MAX_BYTES`、`RIVU_LOCAL_INPUT_MAX_FILES` 调整。
-
-支持使用默认 SHA-1 对象格式、具有普通 `.git/` 目录的 Git 仓库，包括 shallow、partial clone 和借用 alternates 的仓库。准备阶段可从 remote 补取缺失对象；shallow 缺少共同祖先时尝试加深 256 层，仍无法确定唯一 merge base 时报告失败。冻结后保存独立对象，执行和恢复不再依赖原仓库或 remote。不支持 linked worktree、bare 和未提交改动快照。输入仍会发送给配置的模型 Provider。报告、进度、取消和重试共用现有审查运行时；本地任务独立运行，不进行跨任务增量复用或自动取消其他 Head 的任务，也不支持 PR 讨论和 GitHub 发布。
-
-## ReviewBench 评测
-
-提供本地脚本读取官方样本、调用现有审查服务并导出标准 findings，再复用官方 judge 评分。默认只跑 1 个 PR，支持部分结果、失败记录和单独重试评分，不需要容器或榜单注册。准备和命令见 [评测说明](eval/reviewbench/README.md)。
-
-## 架构与运行边界
-
-```text
-固定快照 → 文件过滤 / 确定性初始规划
-         → 正式任务按需语义分组 → 冻结 Unit / Hunk 成员
-         → ReviewOrchestrator 有界派发
-         → Reviewer + 按需 Context → 即时 Candidate
-         → 独立 Verifier → 条件准入 Finding
-         → 保存事实 → 默认一次 LLM 总览
-         → 人工选择 / 预检 / 确认 → 独立 Publisher / Outbox / 对账
-```
-
-`app/review/` 中的 `domain.py`、`planner.py`、`context.py`、`agent.py`、`budget.py`、`store.py`、`findings.py`、`report.py` 和 `orchestrator.py` 是核心。现有 Git、DiffParser、Parser、源码安全读取、准备仓库、WorkerJob Lease、GitHub API 和 Publisher 继续复用。主 LangGraph 工作流、Goal / Assignment、固定角色份额、最终大提交和历史 Checkpoint 协议已经移除；LangChain 内部依赖的 LangGraph 仍由其依赖树提供。
-
-Unit 以文件为完整性边界：1–3 个文件的小变更确定性分组；纳入文件达到 4 个且没有复用完成范围时，正式任务使用一次只含文件元数据和静态关系提示的 LLM 分组。预览不调用分组模型，因此不代表最终语义分组。结果经服务端去重、补齐遗漏、10 文件上限和上下文容量校验后，与工作项一起事务冻结；失败或恢复时已有请求状态不明，回退逐文件审查，不盲目重发收费请求。超大单文件保留一个 Unit，其材料继续分页交付，不因此丢弃变更。
-
-累计输入/输出 Token 与整轮模型调用上限默认不设门禁；仍持久化每次请求的预留、实际用量和未知用量。可通过 `.env.example` 中的 `RIVU_REVIEW_MAX_*` 显式设置成本上限，已有运行保持创建时冻结的配置。单次上下文窗口默认 1M，须按实际执行模型能力配置；它不是建议填满的目标。单 Agent 调用/工具熔断、扫描量和总期限仍有效。连续工具轮次没有新信息时先警告，再关闭调查工具，最多允许两次受原预算约束的结构化收尾请求；仍不能交付结果时中断为未完成，实际证据缺口继续保留。已收到源码范围的重叠读取不算新进展；合法分页、BASE/HEAD 对照和新源码仍可推进调查。
-
-Agent 保持 System Prompt 固定，预算、时间和收尾提示作为独立消息追加并保留在历史中，便于复用稳定的请求前缀。工具结果使用确定性压缩：首次源码正文保留，重复源码和检索结果引用此前收到的内容，证据句柄、侧别、行范围和分页控制信息仍可使用；完整来源继续归档。小 Unit 在收到全部变更材料、相关测试源码、搜索关联的消费者源码后会收到收尾提醒，仍可针对具体缺失前提继续补查。
-
-活动页分别显示总输入、命中缓存输入、未命中缓存输入、输出和缓存命中率。缓存明细由供应商返回的用量计算；未返回明细或存在未知请求时，相应合计保持未知。命中缓存的输入仍计入整轮输入预算；Token 数量不等同于货币费用。
-
-材料交付与工作项执行分别记录。只收到部分 Hunk、读取失败或未启动的范围保持不完整。结构性变更使用固定树条目作为变更材料，不把元数据当成缺陷源码证据；必要消费者仍由 Agent 调查。
-
-总览只组织已经提供的固定来源与最终 Findings，不能新增裁决、改写严重程度或宣称执行过目标测试。引用有效不保证自然语言完全忠实；材料省略、失败和降级独立展示，发布预览保留人工检查。
-
-总览材料优先取冻结计划中的实际 Diff 与对应 BASE/HEAD 原文，按审查单元分配容量后再补充相邻背景，不按调查来源 ID 的顺序截取。材料最多约 4500 个预估 Token，并扣除提示词和 Schema 开销以适配原有总览请求预留；具体省略范围保存在报告中。正文按“行为变化、直接效果、必要边界”组织，测试变化优先另段概括；段数和篇幅是写作目标，不是失败门槛。提示词、策略版本与材料共同决定复用身份；页面和发布正文支持安全行内代码与自然段。
-
-对外报告先展示基于完整审查事实生成的结论，再展示变更总览。完整且无未决项、未发布问题或已确认问题时，建议进入正常合并评估，但仍须满足项目测试、CI 和审批；其他状态明确说明当前限制，不给出 clean 或无条件合并许可。选择发布哪些评论不改变总体审查结论。逐文件增删统计置于折叠详情。
-
-## 增量审查
-
-可启用签名校验的 `POST /api/webhooks/github`，仅处理 allowlist 中仓库自身分支的 `pull_request.synchronize`。Delivery 与同一 PR Base/Head 事件分别幂等，每个 PR 默认每小时最多自动创建 4 个 Run，限制原因会返回给调用方。新 Head 会停止旧运行，已提交事实继续保留，旧结果不能对新 Head 发布。
-
-历史问题只是线索，进入本轮后要重新取得当前来源和独立核验。旧行号的内容不匹配时不把它重新包装为当前证据，不凭位置消失宣称已修复。
-
-范围复用采用保守策略：相同基线与配置、可比较的 Head 历史、仅文档更新、完整 Hunk 成员一致且相关源码 blob 相同，才复用已完成范围，并显示来源 Run。源码、配置或测试变化优先调查变化单元并回退全量；基线变化、不可比较的历史和显式同快照重审也不复用。没有建设跨 Commit 语义依赖缓存。重新核验的历史主张进入总结，不猜测新的 Inline 行号。
-
-## 交付到 GitHub
-
-发布默认关闭，仅支持可信的本地单用户部署。Review Agent 没有 GitHub 写工具，Publisher 使用独立 PAT，绝不回退使用只读 `GITHUB_TOKEN`。
-
-1. 配置独立 `RIVU_GITHUB_PUBLISH_TOKEN`、数字仓库 ID allowlist、PAT 用户数字 ID 和至少 32 字符的 `RIVU_PUBLICATION_API_TOKEN`。
-2. 在 GitHub 核对 PAT 的 **Pull requests: write** grant 后，设置 `RIVU_GITHUB_PUBLISH_PULL_REQUESTS_WRITE_CONFIRMED=true`，再启用发布。完整字段见 [环境变量示例](.env.example)。
-3. 在 Publish 页输入操作口令、选择 Finding 并预检，再查看实际 Summary / Inline、报告版本和部分发布提示，最后明确确认。操作口令只保留在页面内存，不是 GitHub PAT。
-4. `uncertain` 必须先对账，不盲目重发 POST。Sticky Summary 不覆盖更新审查或人工编辑；精确 LEFT / RIGHT 映射失败时转入 Summary。
-
-也可以在新建审查时勾选 **本次审查完成后自动发布到 GitHub PR**，输入同一个发布操作口令后开始审查。授权只绑定本次任务的仓库、PR、固定 Base/Head 与发布身份；完整且无未决项的结果会自动更新摘要并发布已核验的代码意见，零问题结果只更新摘要，不自动批准 PR。不完整、无法准确定位或超出评论数量上限的结果转为人工确认，失败或取消的审查不自动发布。
-
-授权与待办随审查创建一起持久化，关闭页面或重启服务不会丢失；授权有效至本次审查硬截止后 24 小时，过期后须人工重新确认。页面展示独立的自动发布状态。创建请求尚未确认时刷新页面，需重新输入操作口令，并沿用原请求标识继续确认；口令不会写入浏览器存储。显式重试审查或删除记录会撤销确定尚未发送的自动发布，已开始发送或结果未知的投递仍须先处理。此功能只处理手动启动的本次审查，不需要启用 Webhook。
-
-Publisher 独立复验规范化 Finding、核验准入、固定快照、来源内容和报告版本，不重跑审查。显式重生成总览会形成新的报告版本，已有预检与确认失效。发布状态与审查结论独立；远端短暂竞态和跨系统故障仍可能发生，不承诺 exactly-once。
+支持 SHA-1 对象格式、普通 `.git/` 目录的仓库，包括 shallow、partial clone 和 alternates；准备时可能从 remote 补取对象。暂不支持 linked worktree、bare 仓库或未提交改动快照。本地任务也会将源码发送给模型，不支持 PR 讨论、跨任务增量复用或 GitHub 发布。
 
 ## 配置与数据边界
 
-[环境变量示例](.env.example) 是配置清单。模型端点、默认模型和记录保留天数可在设置页修改；已有 Run 的配置保持冻结。源码会发送到所配置的模型服务，使用前确认数据边界；LangSmith 默认关闭。
+完整配置见[环境变量示例](.env.example)，常用项如下：
 
-- `RIVU_PROVIDER=deepseek` 默认开启 thinking，使用 `RIVU_DEEPSEEK_THINKING` 和 `RIVU_DEEPSEEK_REASONING_EFFORT=low|high|max` 配置；新任务冻结实际模式和强度，已有缺少此字段的任务保持原来的非推理模式。专用消息适配保留工具轮次中的 `reasoning_content`，不会以关闭推理来掩盖字段丢失。`RIVU_AGENT_OUTPUT_TOKENS` 同时约束推理与最终输出；不会自动扩大预算，若观察到长度截断可在服务端和请求资源策略内显式调整。
-- DeepSeek 大推理预算可设置 `RIVU_AGENT_OUTPUT_TOKENS=125000`（125K），也是服务端配置与请求 Schema 允许的最大值；通用默认仍为 `4096`，其他模型须先核对最大输出能力。此值是每次生成上限，不是固定用量；增大它会提高预算预留、减少可用输入容量，也可能增加延迟和实际输出费用。已有任务继续使用冻结值；新配置须重启后端进程后用于新任务，且不会自动延长单次请求超时或整轮期限。
-- 搜索工具的 `*`/`?` 不跨路径层级，`**` 跨目录；不含 `/` 的模式匹配任意目录下的文件名。排除测试使用 `exclude_globs=["**/__tests__/**"]`，不支持的前导 `!` 会明确拒绝；游标绑定包含排除项的全部过滤条件，返回实际范围和 `scope_empty`。源码读取仍是 1-based inclusive 的 `start`/`end`，单次最多 240 行，错误会提供可纠正的范围或参数名提示。
-- 成功的模型分组不能在容量允许时拆开已解析的直接导入和强 source/test 关系；`.js` 导入可解析到 TypeScript 源文件，歧义保持未解析。分组失败仍回退单文件。调查循环除连续重复外，也检测 2–4 轮交替重复；仅相同调用和结果构成熔断信号，缺少新源码、笔记或候选自述都不能自动证明完成。
-- 发现阶段按改动检查 BASE/HEAD 合法输入与行为变化，以及安全保护仍允许的具体失败路径；核验独立评估支持与反证，缺失前提保持 `insufficient`。已被源码反证的假设应结束，只有相关新证据或具体推理错误才重新打开。换范围后仍完全落在此前读取区间内的重复读取会收到软提醒；恢复归档源码、必要补查和候选提交仍受原有规则处理，笔记不成为新的判定门禁。
-- 整轮成本主要由 `RIVU_REVIEW_MAX_INPUT_TOKENS`、`RIVU_REVIEW_MAX_OUTPUT_TOKENS` 和总期限控制；模型每次请求会获知扣除核验、总览保护份额后的共享余额，并在余额或时间接近边界时收尾。
-- `RIVU_MODEL_CONTEXT_TOKENS` 限制请求上下文容量；预估包括消息、工具和结构化 Schema。使用分词估算，不能当成所有模型的精确计费上界。
-- Reviewer/Verifier 首轮和单块材料交付不再使用 32K 或分组容量作为输入上限，按模型窗口扣除输出与提示预留，以及剩余整轮预算组织；显式累计预算下仍保留核验与总览保护。200K 和可用空间四分之一仅用于分组容量策略，不限制单元后续输入。源码读取的路径、行数、文件大小与返回字符限制保留；请求放不下时仍明确记录未交付材料，并可通过工具补读。
-- `RIVU_AGENT_MAX_CALLS` 与 `RIVU_REVIEW_MAX_MODEL_CALLS` 是调用次数熔断，默认单 Agent 为 48、整轮不设调用上限。quick/standard/deep 不再额外设置 6/12/20 次配额，深度只影响调查策略；显式配置更低上限仍会生效。
-- `RIVU_AGENT_MAX_TOOL_CALLS` 限制单次 Agent 的工具调用；在总额内最多预留 3 次候选提交，调查工具提前收尾，避免额度耗尽后无法交付。扫描量和工具超时约束保留；并发由 `RIVU_REVIEW_CONCURRENCY` 控制。源码涉及认证、数据、资金等关键路径时优先派发，测试、文档和 changeset 随后处理；候选核验繁忙时仍保留发现任务槽位。
-- 默认总时长以 `RIVU_REVIEW_TIMEOUT_SECONDS` 为起点，每 3 个并发批次增加一倍起点期限，受 `RIVU_REVIEW_SCALED_TIMEOUT_MAX_SECONDS`（默认 7200）限制；明确填写的 `timeout_seconds` 和累计调用/Token 上限不自动放大。最终期限在新任务中冻结。首轮按剩余批次分配调查时间；软截止停止发现和补查，硬截止停止所有在途工作与新请求，保留合法的本地事实收尾。
-- 必要缺口在首轮和候选核验结束后自动补查，默认一次；取得新源码或提交新候选时可再补查一次，由 `RIVU_REVIEW_GAP_FOLLOWUPS=2` 控制，0 可关闭。补查使用独立持久工作项，保留此前结果与证据，共用原期限和累计预算；无进展不反复补查。报告分别显示执行状态、范围材料交付与关键未决，`completed` 不等于审查通过；关键未决继续阻止 clean 结论及自动发布。
-- 依赖工具支持 HEAD `go.mod` 的 GitHub 模块精确标签版本，以及 npm `package-lock.json` 的精确公开版本。版本先解析并冻结到完整 GitHub commit SHA，再复用固定 blob 读取和内容归档；最多 6 个依赖包、每个 Agent 最多 12 段、每段最多 240 行。外部资料用独立 D 引用，不能替代目标 BASE/HEAD 的 S 证据。暂不支持 Go replace、子目录模块、pseudo-version、其他 lockfile 或自由网址；npm 上游源码也不等于发布包的生成产物。缺失资料保留具体待核实项，不能据此确认缺陷。该工具只读取公开静态材料，不发送仓库源码或 GitHub 凭据给依赖服务、不安装或执行目标依赖。
-- 请求前原子预留，未知用量保持未知并占用预留；恢复不清零。实际用量超过估算后如实记录，停止后续超预算请求。
+| 用途 | 配置 |
+| --- | --- |
+| 模型服务 | `RIVU_PROVIDER`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`RIVU_MODEL` |
+| GitHub 读取 | `GITHUB_TOKEN`：按仓库访问需求配置，不用作发布凭据 |
+| 成本与容量 | `RIVU_REVIEW_MAX_INPUT_TOKENS`、`RIVU_REVIEW_MAX_OUTPUT_TOKENS`、`RIVU_MODEL_CONTEXT_TOKENS` |
+| 并发与期限 | `RIVU_REVIEW_CONCURRENCY`、`RIVU_REVIEW_TIMEOUT_SECONDS` |
+| 数据与保留 | `RIVU_DB_PATH`、`RIVU_ARTIFACT_DIR`、`RIVU_RETENTION_DAYS` |
 
-SQLite 与本地 Artifact 是单用户持久化，不是多租户安全隔离。源码读取保留 tracked blob、路径、敏感文件、realpath / symlink、大小和调用预算约束；不向模型暴露 Shell、任意网络或发布权限。日志不输出源码、凭据和供应商异常正文。
+- **成本**：整轮累计 Token 与模型调用上限默认不设门禁；按需显式设置。工具、单 Agent 调用和总期限仍有限制，未知用量保留预留，恢复不清零。
+- **首轮与补查**：调查、补查和核验使用单 Agent 调用熔断（默认 48 次）与模型上下文容量；正常追加历史以复用前缀缓存，仅在容量、持续慢响应或重复调查等压力下整理上下文。总期限不随 PR 规模自动延长；首轮在期限的 60% 前收尾，首轮核验最晚到 70%，补查可到 80%，其新候选核验使用剩余期限。有限累计预算在首轮阶段为补查保留约 20%（小预算按可用容量缩减），补查继续共用原账本和硬截止时间。首轮及其核验结束后才补查具体缺口，无进展不反复补查；未覆盖与未决仍如实交付。
+- **外部依赖疑点**：当前不提供依赖源码查询或外部搜索。需要仓库外依赖行为才能判断的疑点，交付具体版本、缺失前提和待确认问题，不因资料缺失确认缺陷，也不对明确的外部缺口反复执行仓库补查。历史报告已归档的依赖证据继续保留校验。
+- **数据**：当前为可信本地单用户应用，SQLite 与 Artifact 不提供多租户安全隔离。使用前确认源码外发边界；LangSmith 默认关闭，不要将 `.env`、凭据或运行产物提交到仓库。
+- **配置生效**：模型端点、默认模型和保留天数可在设置页修改；其他环境配置修改后重启后端。已有任务继续使用创建时冻结的审查配置。
+
+### 交付到 GitHub
+
+发布默认关闭，仅支持可信的本地单用户部署。Review Agent 永远只读，Publisher 使用独立 PAT，绝不回退使用 `GITHUB_TOKEN`。
+
+1. 配置 `RIVU_GITHUB_PUBLISH_TOKEN`、数字仓库 ID allowlist、PAT 用户数字 ID，以及至少 32 字符的 `RIVU_PUBLICATION_API_TOKEN`；字段见[环境变量示例](.env.example)。
+2. 在 GitHub 核对 PAT 的 **Pull requests: write** grant，设置 `RIVU_GITHUB_PUBLISH_PULL_REQUESTS_WRITE_CONFIRMED=true`，再启用 `RIVU_GITHUB_PUBLISH_ENABLED=true`。
+3. 在 Publish 页输入操作口令、选择问题、预检并检查实际 Summary / Inline，最后明确确认。操作口令不是 GitHub PAT，只保留在页面内存。
+
+也可在创建任务时勾选 **本次审查完成后自动发布到 GitHub PR**，输入操作口令授权。授权仅绑定本次任务和固定快照；完整且无未决项的结果可自动发布，零问题只更新摘要，不自动批准 PR。不完整或无法准确定位的结果转为人工确认，失败与取消不自动发布。
+
+发布前重新校验 PR 状态、固定 Base / Head 与报告版本。发布状态独立于审查结论；遇到 `uncertain` 先对账，不盲目重发，也不承诺跨系统 exactly-once。
+
+<details>
+<summary>可选：Webhook 增量审查</summary>
+
+配置签名密钥、仓库 allowlist 并启用 `RIVU_INCREMENTAL_REVIEW_WEBHOOK_ENABLED` 后，`POST /api/webhooks/github` 可处理仓库自身分支的 `pull_request.synchronize`，每个 PR 默认每小时最多自动创建 4 个任务。新 Head 会停止旧运行，历史问题必须取得本轮证据并重新核验；仅符合保守复用条件的已完成范围会复用。
+
+Webhook 自动启动与本次任务的自动发布是两项独立功能，不因开启其中一项而获得另一项授权。
+
+</details>
 
 ## 开发与验证
 
-后端使用 Python / FastAPI，前端使用 Vue 3 / TypeScript / Vite。开发测试可执行 Rivu 自身代码，不能因此为产品增加目标代码执行权限。
+后端采用 **Python / FastAPI / LangChain / SQLite**，前端采用 **Vue 3 / TypeScript / Vite**。核心实现位于[审查模块](backend/app/review/)。
+
+```text
+固定快照 → 规划与上下文调查 → Reviewer 候选 → 独立 Verifier
+         → 事实报告与变更总览 → 人工选择 / 授权 → 独立 Publisher
+```
+
+在仓库根目录执行（已完成依赖安装）：
 
 ```sh
 cd backend
@@ -183,10 +165,10 @@ cd ..
 git diff --check
 ```
 
-单元与集成测试覆盖固定源码、工具循环、预算、Lease、取消、恢复和 HTTP 模拟发布对账。模拟模型验证执行契约，不证明真实模型的误报、召回、成本收益或总览质量。本次未建设离线 Eval 平台；真实模型内容验收、浏览器验收、真实 GitHub 写入和具体数据库切换须单独进行。
+开发测试可执行 Rivu 自身代码，不代表产品可以执行目标代码。模拟测试验证执行契约，不证明真实模型的召回率、误报率或成本收益。真实模型评测与官方 judge 的运行方式见 [ReviewBench 评测说明](eval/reviewbench/README.md)。
 
-反馈问题时，通过 [GitHub Issue](https://github.com/waangzh/Rivu/issues) 提供复现步骤、预期、实际结果和脱敏错误信息；不要提交 `.env`、Token、数据库或运行产物。
+通过 [GitHub Issues](https://github.com/waangzh/Rivu/issues)反馈问题时，请提供复现步骤、预期与实际结果、脱敏错误信息；贡献改动应附相关验证结果，不包含凭据、数据库或运行产物。
 
 ## 许可证
 
-MIT
+许可声明：MIT。仓库尚未附 `LICENSE` 文件，完整许可文本待补充。

@@ -68,11 +68,10 @@ class ReviewOrchestrator:
                             event("work.skipped", work_id=item.id, kind=item.kind, reason="hard_deadline")
                     break
                 for item in list(queued):
-                    if item.kind in {"review", "supplement"} and utcnow() >= run.review_cutoff:
-                        await asyncio.to_thread(self.store.skip, run_id, item.id, "review_cutoff", lease)
-                        event("work.skipped", work_id=item.id, kind=item.kind, reason="review_cutoff")
-                        logger.warning("工作项未启动 review_id=%.8s work_id=%.8s kind=%s reason=review_cutoff",
-                                       run_id, item.id, item.kind)
+                    if utcnow() >= run.work_deadline(item):
+                        reason = "review_cutoff" if item.kind in {"review", "supplement"} else "investigation_deadline"
+                        await asyncio.to_thread(self.store.skip, run_id, item.id, reason, lease)
+                        event("work.skipped", work_id=item.id, kind=item.kind, reason=reason)
                         queued.remove(item)
                 priority = {unit.id: discovery_priority(unit, index)
                             for index, unit in enumerate(run.plan.units)}
@@ -88,12 +87,14 @@ class ReviewOrchestrator:
                     item = pool[0]
                     queued.remove(item)
                     investigation_deadline = None
-                    if item.kind == "review" and discoveries:
-                        waves = max(1, (len(discoveries) + limits.concurrency - 1) // limits.concurrency)
-                        seconds = max(0, (run.review_cutoff - utcnow()).total_seconds())
+                    if item.kind in {"review", "supplement"}:
+                        investigations = [work for work in queued if work.kind == item.kind]
+                        cutoff = run.first_pass_cutoff if item.kind == "review" else run.review_cutoff
+                        waves = max(1, (len(investigations) + limits.concurrency) // limits.concurrency)
+                        seconds = max(0, (cutoff - utcnow()).total_seconds())
                         # A bounded first pass prevents one unit consuming every dispatch wave.
-                        investigation_deadline = min(run.review_cutoff,
-                            utcnow() + timedelta(seconds=max(180, seconds / waves)))
+                        investigation_deadline = min(cutoff,
+                            utcnow() + timedelta(seconds=seconds / waves))
                     try:
                         claimed = await asyncio.to_thread(
                             self.store.claim, run_id, item.id, lease, check_budget=True,
