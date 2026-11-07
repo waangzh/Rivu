@@ -44,7 +44,7 @@ const ordered = computed(() => {
 });
 const materialLabel = { complete: '所需源码材料已提供', incomplete: '部分源码材料缺失', not_started: '尚未提供源码材料' };
 const workLabel = { queued: '等待处理', running: '处理中', completed: '已完成', interrupted: '未完成', failed: '处理失败', skipped: '未执行' };
-const groupingLabel = { pending: '等待正式语义分组', deterministic: '确定性分组', model: '语义分组已冻结', fallback: '分组降级为逐文件审查' };
+const groupingLabel = { pending: '等待正式语义分组', deterministic: '确定性分组', model: '语义分组已冻结', fallback: '语义分组不可用，沿用确定性关系分组' };
 const unitDescription = (id: string) => {
   const unit = props.task.plan.units.find(item => item.id === id);
   return unit?.label || unit?.paths.join('、') || '审查单元';

@@ -107,8 +107,9 @@ def _bundles(path_members, path_cost,
     return sorted(bundles, key=lambda item: (-item[2], item[0]))
 
 def plan_review(changed_files, snapshot, options,
-                relations: list[tuple[int, str, str]] | None = None, *, file_groups=None,
-                preserve_relations=False) -> Plan:
+                relations: list[tuple[int, str, str]] | None = None, *,
+                file_groups: list[list[str]] | None = None,
+                preserve_relations: bool = False) -> Plan:
     excluded = excluded_changes(changed_files, options)
     by_path = {change.file_path: change.model_dump() for change in changed_files}
     known = set(by_path) - {path for path, reason in excluded.items() if reason != "user_excluded"}
@@ -140,7 +141,8 @@ def plan_review(changed_files, snapshot, options,
         else:
             file_groups = [list(paths) for paths, _, _ in
                            _bundles(path_members, path_cost, relations, capacity)]
-    groups, assigned = [], set()
+    groups: list[list[str]] = []
+    assigned: set[str] = set()
     for proposed in file_groups:
         current, size = [], 0
         for path in proposed:

@@ -40,26 +40,35 @@ def grouping_files(run):
                   key=lambda change: change.file_path)
 
 
-def grouped_plan(run, output=None, *, reason=None):
+def grouped_plan(run, output: GroupingOutput | None = None, *, reason: str | None = None):
+    if output is None:
+        # Static relations are trusted and already bounded by the planner, so a
+        # failed or skipped grouping keeps that deterministic partition instead
+        # of degrading to per-file units.
+        return run.plan.model_copy(deep=True, update={
+            "grouping_status": "fallback",
+            "grouping_reason": reason,
+        })
     files = grouping_files(run)
     paths = [change.file_path for change in files]
-    groups, assigned, labels = [], set(), {}
-    if output is not None:
-        for group in output.groups:
-            selected = []
-            for index in group.files:
-                if 0 <= index < len(paths) and index not in assigned:
-                    selected.append(paths[index])
-                    assigned.add(index)
-                    labels[paths[index]] = group.label
-            if selected:
-                groups.append(selected)
+    groups: list[list[str]] = []
+    assigned: set[int] = set()
+    labels: dict[str, str] = {}
+    for group in output.groups:
+        selected: list[str] = []
+        for index in group.files:
+            if 0 <= index < len(paths) and index not in assigned:
+                selected.append(paths[index])
+                assigned.add(index)
+                labels[paths[index]] = group.label
+        if selected:
+            groups.append(selected)
     groups.extend([path] for index, path in enumerate(paths) if index not in assigned)
     plan = plan_review(run.changed_files, run.snapshot, run.configuration.options,
-                       run.plan.relations, file_groups=groups, preserve_relations=output is not None)
+                       run.plan.relations, file_groups=groups, preserve_relations=True)
     for unit in plan.units:
         unit.label = labels.get(unit.paths[0])
-    plan.grouping_status = "model" if output is not None else "fallback"
+    plan.grouping_status = "model"
     plan.grouping_reason = reason
     plan.history = run.plan.history
     plan.incremental_from = run.plan.incremental_from

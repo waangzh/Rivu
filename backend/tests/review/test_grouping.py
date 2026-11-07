@@ -41,15 +41,35 @@ def test_grouping_output_assigns_each_file_once_and_preserves_label(tmp_path):
     assert plan.grouping_status == "model"
 
 
-def test_grouping_failure_falls_back_to_single_file_units(tmp_path):
+def test_grouping_failure_reuses_deterministic_relation_plan(tmp_path):
     _, run, _, _ = setup_run(tmp_path)
-    run.changed_files = changes("a.py", "b.py", "c.py", "d.py")
+    run.changed_files = changes("core/engine.ts", "server/parser.ts",
+                                "tests/engine.test.ts", "unrelated.ts")
+    relations = [(0, "core/engine.ts", "server/parser.ts"),
+                 (1, "core/engine.ts", "tests/engine.test.ts")]
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options, relations)
+    run.plan.grouping_status = "pending"
+
+    plan = grouped_plan(run, reason="grouping_unavailable")
+
+    assert plan.grouping_status == "fallback"
+    assert plan.grouping_reason == "grouping_unavailable"
+    assert any(unit.paths == ["core/engine.ts", "server/parser.ts", "tests/engine.test.ts"]
+               for unit in plan.units)
+    assert any(unit.paths == ["unrelated.ts"] for unit in plan.units)
+    assert plan.units == run.plan.units
+    assert run.plan.grouping_status == "pending"
+
+
+def test_grouping_failure_keeps_small_change_bundle(tmp_path):
+    _, run, _, _ = setup_run(tmp_path)
+    run.changed_files = changes("a.py", "b.py", "c.py")
     run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options)
     run.plan.grouping_status = "pending"
 
     plan = grouped_plan(run, reason="grouping_unavailable")
 
-    assert [unit.paths for unit in plan.units] == [[path] for path in ("a.py", "b.py", "c.py", "d.py")]
+    assert [unit.paths for unit in plan.units] == [["a.py", "b.py", "c.py"]]
     assert plan.grouping_status == "fallback"
     assert plan.grouping_reason == "grouping_unavailable"
 
@@ -89,7 +109,10 @@ def test_model_grouping_cannot_split_strong_relations_when_capacity_allows(tmp_p
     assert sorted(path for unit in plan.units for path in unit.paths) == sorted(
         change.file_path for change in run.changed_files)
     fallback = grouped_plan(run, reason="grouping_unavailable")
-    assert all(len(unit.paths) == 1 for unit in fallback.units)
+    assert fallback.grouping_status == "fallback"
+    assert any(unit.paths == ["core/engine.ts", "server/parser.ts", "tests/engine.test.ts"]
+               for unit in fallback.units)
+    assert any(unit.paths == ["unrelated.ts"] for unit in fallback.units)
 
 
 def test_strong_relations_take_priority_over_large_model_group(tmp_path):
