@@ -64,7 +64,8 @@ def error_diagnostic(exc, *, ticket=None, receipt=None):
         "APIStatusError", "APIResponseValidationError", "TimeoutError", "ReadTimeout",
         "ConnectError", "RemoteProtocolError",
     }
-    codes = {"deepseek_reasoning_content_missing", "deepseek_thinking_forced_tool_unsupported"}
+    codes = {"deepseek_reasoning_content_missing", "deepseek_thinking_forced_tool_unsupported",
+             "thinking_forced_tool_unsupported"}
     code = str(exc) if type(exc) is ValueError and str(exc) in codes else None
     status = getattr(exc, "status_code", None)
     if type(status) is not int or not 100 <= status <= 599:

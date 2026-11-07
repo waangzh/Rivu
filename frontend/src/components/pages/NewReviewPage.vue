@@ -10,7 +10,7 @@ import StatusBadge from '../common/StatusBadge.vue';
 import ReviewPlanControls from '../review/ReviewPlanControls.vue';
 import AutomaticPublicationOptions from '../review/publication/AutomaticPublicationOptions.vue';
 import type { ProviderInfo, ReasoningEffort } from '../../types/operations';
-const props = withDefaults(defineProps<{ prUrl: string; localSource?: LocalGitRequest | null; model: string; models: string[]; providerId?: string; providers?: ProviderInfo[]; thinking?: boolean; reasoningEffort?: ReasoningEffort; options: ReviewPlanOptions; capabilities: ReviewCapabilities | null; busy: boolean; autoPublish?: boolean; publicationToken?: string }>(), { thinking: undefined });
+const props = withDefaults(defineProps<{ prUrl: string; localSource?: LocalGitRequest | null; model: string; models: string[]; providerId?: string; providers?: ProviderInfo[]; providerNames?: Record<string, string>; thinking?: boolean; reasoningEffort?: ReasoningEffort; options: ReviewPlanOptions; capabilities: ReviewCapabilities | null; busy: boolean; autoPublish?: boolean; publicationToken?: string }>(), { thinking: undefined });
 const emit = defineEmits<{ 'update:prUrl': [value: string]; 'update:localSource': [value: LocalGitRequest | null]; 'update:model': [value: string]; 'update:providerId': [value: string]; 'update:thinking': [value: boolean]; 'update:reasoningEffort': [value: ReasoningEffort]; 'update:options': [value: ReviewPlanOptions]; 'update:autoPublish': [value: boolean]; 'update:publicationToken': [value: string]; create: []; open: [id: string]; history: [] }>();
 const provider = computed(() => props.providers?.find(item => item.id === props.providerId));
 const profile = computed(() => provider.value?.config.models.find(item => item.model_id === (props.model || provider.value?.config.default_model)));
@@ -128,8 +128,8 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <ReviewPlanControls :model-value="options" :capabilities="planCapabilities" :disabled="busy" @update:model-value="$emit('update:options', $event)" />
 </details>
 <div class="field-label space-top model-field">
-<label v-if="providers?.length" class="field-label">Provider
-<AppSelect :model-value="providerId || ''" :options="providers.map(item => ({value: item.id, label: item.id}))" :disabled="busy" aria-label="Provider" @update:model-value="$emit('update:providerId', $event)" />
+<label v-if="providers?.length" class="field-label">供应商
+<AppSelect :model-value="providerId || ''" :options="providers.map(item => ({value: item.id, label: providerNames?.[item.id] || '自定义服务'}))" :disabled="busy" aria-label="供应商" @update:model-value="$emit('update:providerId', $event)" />
 </label>
 <span>执行模型</span>
 <AppSelect :model-value="model" :options="modelOptions" :disabled="busy" aria-label="执行模型"

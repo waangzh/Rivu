@@ -116,9 +116,13 @@ class OpenAICompatibleProvider(LLMProvider):
                 options["extra_body"] = ({"enable_thinking": enabled}
                     if profile.reasoning_format == "qwen" else
                     {"chat_template_kwargs": {"enable_thinking": enabled}})
+            elif profile.reasoning_format in {"glm", "kimi"}:
+                thinking_options = {"type": "enabled" if enabled else "disabled"}
+                options["extra_body"] = {"thinking": thinking_options}
             return CompatibleChatModel(**options, max_tokens_parameter=profile.max_tokens_parameter,
                 stream_usage=profile.stream_usage,
-                replay_reasoning=profile.reasoning_format in {"qwen", "chat-template"},
+                replay_reasoning=enabled and profile.reasoning_format in {"qwen", "chat-template", "glm", "kimi"},
+                automatic_tool_choice=enabled and profile.reasoning_format == "kimi",
                 model_provider_id=self._provider_name)
         return ObservedChatOpenAI(**options)
 

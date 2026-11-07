@@ -51,6 +51,8 @@ RIVU_MODEL=deepseek-flash
 
 使用其他 Provider 时，按[环境变量示例](.env.example)调整端点和模型；`RIVU_MODEL_CONTEXT_TOKENS` 应与实际模型能力匹配。
 
+在系统设置中可对已保存的 OpenAI 兼容供应商查询和搜索模型；供应商需提供兼容的模型列表接口。列表只提供模型名称，非内置预设模型需要手动确认原生工具调用能力。
+
 ### 2. 初始化数据库并启动
 
 首次使用时初始化新的空数据库，默认路径为 `backend/.rivu/reviews.db`。已有当前架构数据库可执行增量迁移。
@@ -120,7 +122,8 @@ Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。在新�
 - **首轮与补查**：调查、补查和核验使用单 Agent 调用熔断（默认 48 次）与模型上下文容量；正常追加历史以复用前缀缓存，仅在容量、持续慢响应或重复调查等压力下整理上下文。总期限不随 PR 规模自动延长；首轮在期限的 60% 前收尾，首轮核验最晚到 70%，补查可到 80%，其新候选核验使用剩余期限。有限累计预算在首轮阶段为补查保留约 20%（小预算按可用容量缩减），补查继续共用原账本和硬截止时间。首轮及其核验结束后才补查具体缺口，无进展不反复补查；未覆盖与未决仍如实交付。
 - **外部依赖疑点**：当前不提供依赖源码查询或外部搜索。需要仓库外依赖行为才能判断的疑点，交付具体版本、缺失前提和待确认问题，不因资料缺失确认缺陷，也不对明确的外部缺口反复执行仓库补查。历史报告已归档的依赖证据继续保留校验。
 - **数据**：当前为可信本地单用户应用，SQLite 与 Artifact 不提供多租户安全隔离。使用前确认源码外发边界；LangSmith 默认关闭，不要将 `.env`、凭据或运行产物提交到仓库。
-- **多 Provider**：在设置页维护各 Provider 的协议、模型能力与服务端 Key 环境变量名。OpenAI、DeepSeek、OpenAI 兼容接口、Anthropic Messages 和 Google Gemini 使用 LangChain 对应适配；每个模型单独配置上下文、输出上限、Tool Calling 和 Thinking 格式。API Key 只从服务端环境读取。
+- **多 Provider**：设置页提供 OpenAI、DeepSeek、智谱 GLM 和 Kimi 官方标准 API 预设，默认使用 OpenAI 兼容接口，不预设套餐地址；也可添加自定义 OpenAI 兼容服务。配置服务端 API Key 环境变量后保存，再测试模型的原生工具调用。预设模型的上下文和输出上限受 Rivu 服务端资源上限约束，Kimi 官方建议 Thinking 工具调用使用较大的输出额度；可在服务端资源策略内调整。已有 Anthropic Messages 和 Google Gemini 配置仍可使用。API Key 不从前端提交，连接测试会产生模型用量。
+- **官方接口资料**：[DeepSeek 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[智谱思考模式](https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode)、[Kimi 思考模式](https://platform.kimi.ai/docs/guide/use-thinking-models)。内置模型能力采用对应资料与 LangChain 模型元数据，用户修改后标记为手动配置。
 - **配置生效**：Provider 注册表、默认模型和保留天数可在设置页修改；普通单 Provider 的端点与模型也可继续设置。已有任务冻结 Provider ID、类型、端点、模型能力与推理配置，恢复时按冻结身份解析。没有 Provider ID 的旧任务按原快照中的 Provider 与端点恢复。
 
 ### 交付到 GitHub

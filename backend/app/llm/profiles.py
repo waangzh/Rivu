@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Protocol = Literal["openai-chat", "openai-responses", "anthropic", "google"]
-ReasoningFormat = Literal["openai", "deepseek", "qwen", "chat-template", "anthropic", "google-budget", "google-level"]
+ReasoningFormat = Literal["openai", "deepseek", "glm", "kimi", "qwen", "chat-template", "anthropic", "google-budget", "google-level"]
 ReasoningEffort = Literal["minimal", "low", "medium", "high", "max", "xhigh"]
 
 
@@ -30,7 +30,8 @@ class ModelProfile(BaseModel):
     @model_validator(mode="after")
     def validate_reasoning(self):
         protocols = {"openai": {"openai-chat", "openai-responses"},
-                     "deepseek": {"openai-chat"}, "qwen": {"openai-chat"},
+                     "deepseek": {"openai-chat"}, "glm": {"openai-chat"},
+                     "kimi": {"openai-chat"}, "qwen": {"openai-chat"},
                      "chat-template": {"openai-chat"}, "anthropic": {"anthropic"},
                      "google-budget": {"google"}, "google-level": {"google"}}
         if self.reasoning_format and self.api_protocol not in protocols[self.reasoning_format]:

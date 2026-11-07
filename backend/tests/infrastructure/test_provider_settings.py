@@ -3,7 +3,7 @@ import pytest
 from app.api import system
 from app.core.config import settings
 from app.llm.profiles import ModelProfile, ProviderConfig
-from app.models.operations import ModelConnectionRequest, SystemSettingsUpdate
+from app.models.operations import ModelCatalogResponse, ModelConnectionRequest, SystemSettingsUpdate
 
 
 def provider_config():
@@ -23,6 +23,33 @@ async def test_registry_api_returns_capabilities_and_key_reference_not_key(monke
     assert result.providers[0].config.models[0].supports_tools
     catalog = await system.get_available_models()
     assert catalog.models[0].profile.model_id == "fixture"
+
+
+async def test_public_provider_presets_do_not_contain_credentials(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-fixture")
+    response = await system.get_provider_presets()
+    assert "secret-fixture" not in str(response)
+    assert any(item["id"] == "deepseek" for item in response)
+
+
+async def test_provider_catalog_uses_selected_saved_provider(monkeypatch):
+    monkeypatch.setenv("TEST_MODEL_KEY", "private-key-fixture")
+    monkeypatch.setattr(settings, "rivu_model_providers", {"local": provider_config()})
+    calls = []
+
+    async def fetch(**kwargs):
+        calls.append(kwargs)
+        return ModelCatalogResponse(provider=kwargs["provider"], default_model=kwargs["default_model"],
+                                    models=[{"id": "new-model",
+                                             "profile": ModelProfile(model_id="new-model")}])
+
+    monkeypatch.setattr(system, "fetch_model_catalog", fetch)
+    result = await system.get_provider_models("local")
+    assert calls == [{"provider": "openai-compatible", "api_key": "private-key-fixture",
+                      "base_url": "https://example.test/v1", "default_model": "fixture"}]
+    assert [model.id for model in result.models] == ["new-model"]
+    assert result.models[0].profile is None
+    assert "private-key-fixture" not in result.model_dump_json()
 
 
 async def test_settings_persists_registry_and_changes_default_without_changing_keys(monkeypatch):

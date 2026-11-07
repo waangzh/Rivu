@@ -18,6 +18,7 @@ import type {
   SystemDiagnostics,
   ProviderRegistryResponse,
   ProviderConfig,
+  ProviderPreset,
 } from '../types/operations';
 import type {
   PublicationAccepted,
@@ -87,7 +88,9 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
 export const getReviewCapabilities = () =>
   request<ReviewCapabilities>('/api/system/review-capabilities');
 export const getAvailableModels = () => request<ModelCatalogResponse>('/api/system/models');
+export const getProviderModels = (providerId: string) => request<ModelCatalogResponse>(`/api/system/providers/${encodeURIComponent(providerId)}/models`);
 export const getModelProviders = () => request<ProviderRegistryResponse>('/api/system/providers');
+export const getProviderPresets = () => request<ProviderPreset[]>('/api/system/provider-presets');
 export const testModelConnection = (provider: string, model: string) =>
   request<{ status: 'connected' | 'tools_not_returned'; usage: Record<string, unknown> | null }>(
     '/api/system/providers/' + encodeURIComponent(provider) + '/test', {

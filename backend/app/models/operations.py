@@ -85,6 +85,12 @@ class ProviderRegistryResponse(BaseModel):
     providers: list[ProviderInfo]
 
 
+class ProviderPreset(BaseModel):
+    id: str
+    label: str
+    config: ProviderConfig
+
+
 class ModelConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: str | None = None

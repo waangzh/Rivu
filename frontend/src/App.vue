@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
-import { ApiError, cancelReview, createReview, getAvailableModels, getModelProviders, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
-import type { AppPage, ProviderInfo, ReasoningEffort } from './types/operations';
+import { ApiError, cancelReview, createReview, getAvailableModels, getModelProviders, getProviderPresets, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
+import type { AppPage, ProviderInfo, ProviderPreset, ReasoningEffort } from './types/operations';
 import type { LocalGitRequest, Run } from './types/review';
 import type { ReviewCapabilities, ReviewPlanOptions } from './types/reviewPlan';
 import { reviewPrimarySections, type ReviewSection } from './types/workspace';
@@ -9,6 +9,7 @@ import { defaultPlan, phaseLabel, terminal } from './utils/nativeReview';
 import { initialReviewSection, reviewRecordMissing } from './utils/reviewProgress';
 import { creationWasRejected, readPendingCreation, saveAcceptedReview, savePendingCreation, type PendingReviewCreation } from './utils/reviewCreation';
 import { publicationErrorText } from './utils/publicationPresentation';
+import { providerDisplayNames } from './utils/providerPresets';
 import AppSidebar from './components/layout/AppSidebar.vue';
 import AppHeader from './components/layout/AppHeader.vue';
 import NewReviewPage from './components/pages/NewReviewPage.vue';
@@ -20,6 +21,8 @@ import ReviewWorkspace from './components/review/ReviewWorkspace.vue';
 const page = ref<AppPage>('dashboard'), section = ref<ReviewSection>('overview'), mobileOpen = ref(false);
 const prUrl = ref(''), model = ref(''), models = ref<string[]>([]);
 const providers = ref<ProviderInfo[]>([]), providerId = ref('');
+const providerPresets = ref<ProviderPreset[]>([]);
+const providerNames = computed(() => providerDisplayNames(providers.value, providerPresets.value));
 const thinking = ref<boolean | undefined>(undefined), reasoningEffort = ref<ReasoningEffort | undefined>(undefined);
 const selectedProvider = computed(() => providers.value.find(item => item.id === providerId.value));
 watch(providerId, () => { model.value = ''; thinking.value = undefined; reasoningEffort.value = undefined; });
@@ -99,6 +102,9 @@ async function rereview() {
 }
 async function loadModels() {
   const owner = ++catalogGeneration;
+  void getProviderPresets().then(value => {
+    if (!disposed && owner === catalogGeneration) providerPresets.value = value;
+  }).catch(() => {});
   try {
     const registry = await getModelProviders();
     if (!disposed && owner === catalogGeneration) {
@@ -335,7 +341,7 @@ onBeforeUnmount(() => {
             <p class="muted space-top">正在恢复任务状态，请稍候。</p>
             <button v-if="trackedId && !opening" class="btn secondary space-top" @click="follow(trackedId)">重试打开任务</button>
           </section>
-          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:local-source="localSource" v-model:model="model" v-model:provider-id="providerId" v-model:thinking="thinking" v-model:reasoning-effort="reasoningEffort" :providers="providers" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="selectedProvider?.config.models.map(item => item.model_id) || models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
+          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:local-source="localSource" v-model:model="model" v-model:provider-id="providerId" v-model:thinking="thinking" v-model:reasoning-effort="reasoningEffort" :providers="providers" :provider-names="providerNames" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="selectedProvider?.config.models.map(item => item.model_id) || models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
         </template>
       </main>
     </div>

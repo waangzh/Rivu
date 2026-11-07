@@ -9,12 +9,22 @@ class CompatibleChatModel(ObservedChatOpenAI):
     max_tokens_parameter: str = "max_tokens"
     replay_reasoning: bool = False
     model_provider_id: str = "openai-compatible"
+    automatic_tool_choice: bool = False
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(messages, stop=stop, **kwargs)
         if self.max_tokens_parameter == "max_tokens" and "max_completion_tokens" in payload:
             payload["max_tokens"] = payload.pop("max_completion_tokens")
+        if self.automatic_tool_choice:
+            choice = payload.get("tool_choice")
+            if isinstance(choice, dict):
+                tools = payload.get("tools") or []
+                name = choice.get("function", {}).get("name")
+                if len(tools) != 1 or name != tools[0]["function"]["name"]:
+                    raise ValueError("thinking_forced_tool_unsupported")
+            if choice in ("required", "any") or isinstance(choice, dict):
+                payload["tool_choice"] = "auto"
         if self.replay_reasoning:
             for original, outgoing in zip(messages, payload["messages"], strict=True):
                 if isinstance(original, AIMessage) and "reasoning_content" in original.additional_kwargs:

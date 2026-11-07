@@ -44,7 +44,7 @@ export interface ModelProfile {
   model_id: string;
   api_protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | 'google';
   supports_tools: boolean;
-  reasoning_format: 'openai' | 'deepseek' | 'qwen' | 'chat-template' | 'anthropic' | 'google-budget' | 'google-level' | null;
+  reasoning_format: 'openai' | 'deepseek' | 'glm' | 'kimi' | 'qwen' | 'chat-template' | 'anthropic' | 'google-budget' | 'google-level' | null;
   reasoning_efforts: ReasoningEffort[];
   thinking: boolean;
   reasoning_effort: ReasoningEffort | null;
@@ -70,6 +70,11 @@ export interface ProviderInfo {
 export interface ProviderRegistryResponse {
   default_provider: string;
   providers: ProviderInfo[];
+}
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  config: ProviderConfig;
 }
 
 export interface ModelCatalogResponse {

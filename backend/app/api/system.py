@@ -15,6 +15,7 @@ from app.core.database import schema_is_current
 from app.models.operations import (
     ModelCatalogResponse,
     ProviderRegistryResponse,
+    ProviderPreset,
     ModelConnectionRequest,
     ModelConnectionResponse,
     PublicationCapability,
@@ -80,6 +81,32 @@ async def get_model_providers():
         {"id": identifier, "config": config,
          "credentials_configured": bool(registry.resolve(identifier)._api_key)}
         for identifier, config in registry.configs().items()])
+
+
+@router.get("/providers/{provider_id}/models", response_model=ModelCatalogResponse)
+async def get_provider_models(provider_id: str):
+    try:
+        provider = ProviderRegistry(settings).resolve(provider_id)
+        if provider._provider_name not in {"openai", "deepseek", "openai-compatible"}:
+            raise HTTPException(status_code=400, detail="该供应商不支持 OpenAI 兼容模型列表")
+        catalog = await fetch_model_catalog(
+            provider=provider._provider_name, api_key=provider._api_key,
+            base_url=provider._base_url, default_model=provider._default_model)
+        return ModelCatalogResponse(provider=provider_id, default_model=catalog.default_model,
+            models=[{"id": model.id, "owned_by": model.owned_by} for model in catalog.models])
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=404, detail="供应商不存在") from exc
+    except ModelCatalogError as exc:
+        raise HTTPException(status_code=503, detail=(
+            "模型服务 API Key 未配置" if str(exc) == "模型服务 API Key 未配置"
+            else "无法获取模型列表，请检查接口地址和凭据，并确认供应商支持模型列表接口"
+        )) from exc
+
+
+@router.get("/provider-presets", response_model=list[ProviderPreset])
+async def get_provider_presets():
+    from app.llm.presets import provider_presets
+    return provider_presets()
 
 
 @router.post("/providers/{provider_id}/test", response_model=ModelConnectionResponse)
