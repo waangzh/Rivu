@@ -57,6 +57,27 @@ async def test_initial_and_diff_reads_share_index_across_review_and_verification
     assert build.call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_initial_packet_includes_only_in_unit_relationship_hints(tmp_path):
+    store, run, _, provider, _ = setup_source_run(tmp_path)
+    unit = run.plan.units[0]
+    unit.paths.append("b.py")
+    run.plan.relations = [
+        (0, "a.py", "b.py"),
+        (1, "a.py", "outside.py"),
+        (2, "a.py", "a.py"),
+    ]
+
+    work = store.work_items(run.id)[0]
+    initial = await provider.initial(AgentContext(provider, work, None))
+
+    assert initial["relationship_hints"]["edges"] == [
+        {"kind": "import_related", "paths": ["a.py", "b.py"]},
+    ]
+    assert "not source evidence" in initial["relationship_hints"]["notice"]
+    assert "may be incomplete" in initial["relationship_hints"]["notice"]
+
+
 def test_same_snapshot_reload_reuses_index_and_providers_are_independent(tmp_path, monkeypatch):
     store, run, lease, provider, _ = setup_source_run(tmp_path)
     key = run.plan.units[0].required_hunk_ids[0]

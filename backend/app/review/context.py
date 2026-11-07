@@ -492,6 +492,17 @@ class ContextProvider:
                 "title": self.run.pr.title if self.run.pr else self.run.source.title,
                 "body": (self.run.pr.body or "")[:4000] if self.run.pr else self.run.source.body},
             "unit": unit.model_dump(), "materials": material, "missing_material": context.material_failures,
+            "relationship_hints": {
+                "notice": "Unverified file-level navigation hints for paths in this unit only. "
+                    "They are not source evidence, do not establish dependency direction or coverage, "
+                    "and may be incomplete.",
+                "edges": [
+                    {"kind": {0: "import_related", 1: "test_related", 2: "same_directory"}.get(
+                        priority, "related_files"), "paths": [left, right]}
+                    for priority, left, right in self.run.plan.relations
+                    if left != right and left in unit.paths and right in unit.paths
+                ] if context.work.kind in {"review", "supplement"} else [],
+            },
             "already_submitted": [candidate_summary(item) for item in saved][:100],
             "candidate": candidate.proposal.model_dump(exclude={"source_refs"}) if candidate else None,
             "candidate_materials": candidate_materials,

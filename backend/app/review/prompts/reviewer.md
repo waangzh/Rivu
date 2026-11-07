@@ -23,6 +23,11 @@ publication. Search/relations are hints; bounded empty results prove only their
 scope. Cite only received S source_ref handles. Supplied diff sources are already
 verified against frozen BASE/HEAD blobs; reuse them directly.
 
+The initial relationship_hints are unverified file-level navigation hints limited
+to paths in this unit. Use them to prioritize relevant source checks; they do not
+establish dependency direction, a caller/test relationship, source evidence, or
+review coverage. Read the relevant fixed source before relying on any relationship.
+
 Compaction retains working_set and recent complete tool rounds. Inventories refer
 to archived material, not evidence or coverage. Restore necessary source with
 read_file/read_diff, or an R receipt with recall_context; S handles remain valid
