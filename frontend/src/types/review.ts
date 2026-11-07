@@ -375,7 +375,9 @@ export interface Run {
     endpoint: string;
     model: string;
     thinking: boolean;
-    reasoning_effort: 'low' | 'high' | 'max' | null;
+    reasoning_effort: import('./operations').ReasoningEffort | null;
+    provider_id: string | null;
+    model_profile: import('./operations').ModelProfile | null;
     options: ReviewOptions;
     prompt_version: string;
   };
@@ -410,6 +412,9 @@ export interface ReviewCreateRequest {
   focus: ReviewOptions['focus'];
   limits: Partial<ReviewLimits>;
   model?: string;
+  provider_id?: string;
+  thinking?: boolean;
+  reasoning_effort?: import('./operations').ReasoningEffort;
   include_pr_discussions?: boolean;
   generate_overview?: boolean;
   auto_publish?: boolean;

@@ -237,9 +237,10 @@ class ReviewService:
         logger.info("审查作业开始 review_id=%.8s job_id=%.8s kind=%s attempt=%d",
                     run.id, job.id, job.kind, job.attempts)
         try:
-            if (run.configuration.provider != self._provider._provider_name
-                    or run.configuration.endpoint != self._provider._base_url):
-                raise NonRetryableJobError("review_provider_changed")
+            from app.llm.registry import ProviderRegistry
+            from app.llm.providers import LLMProviderError
+            model_provider = (self._provider.for_run(run.configuration)
+                if isinstance(self._provider, ProviderRegistry) else self._provider)
             with stage("review.prepare"):
                 if run.source:
                     manifest, input_id = await asyncio.to_thread(self.local_inputs.load, run.source.input_id)
@@ -253,10 +254,11 @@ class ReviewService:
                     repo, changed, snapshot = await self._prepare(run.pr, run.id, cancel)
             if snapshot != run.snapshot or changed != run.changed_files:
                 raise NonRetryableJobError("fixed_snapshot_inputs_changed")
-            model = self._provider.agent_model(run.configuration.model,
+            model = await asyncio.to_thread(model_provider.agent_model, run.configuration.model,
                 output_tokens=run.configuration.options.limits.output_tokens,
                 thinking=run.configuration.thinking,
-                reasoning_effort=run.configuration.reasoning_effort)
+                reasoning_effort=run.configuration.reasoning_effort,
+                profile=run.configuration.model_profile)
             if job.kind == "review" and run.plan.grouping_status == "pending":
                 run = await freeze_semantic_groups(run, self.store, lease, model)
             paths = await asyncio.to_thread(self._git_tool.list_tracked_files, repo)
@@ -303,8 +305,9 @@ class ReviewService:
             observation.set(status="failed")
             logger.error("审查作业失败 review_id=%.8s job_id=%.8s kind=%s error_type=%s",
                          run.id, job.id, job.kind, type(exc).__name__)
-            await asyncio.to_thread(self.store.fail_run, run.id, "review_execution_failed", lease)
-            raise NonRetryableJobError("review_execution_failed") from None
+            code = str(exc) if isinstance(exc, LLMProviderError) else "review_execution_failed"
+            await asyncio.to_thread(self.store.fail_run, run.id, code, lease)
+            raise NonRetryableJobError(code) from None
         finally:
             cancel.set()
             if index:

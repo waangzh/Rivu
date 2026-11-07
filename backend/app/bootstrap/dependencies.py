@@ -7,7 +7,7 @@ from functools import lru_cache
 from fastapi import FastAPI
 
 from app.core.config import settings
-from app.llm.providers import build_provider
+from app.llm.registry import ProviderRegistry
 from app.services.publication.publication_repository import PublicationRepository
 from app.services.publication.publication_service import PublicationService
 from app.review.store import ReviewStore
@@ -29,12 +29,7 @@ def get_review_service() -> ReviewService:
         github_tool=GitHubTool(settings.github_token),
         git_tool=GitTool(settings.rivu_workdir, settings.rivu_git_bin),
         diff_parser=DiffParser(),
-        provider=build_provider(
-            settings.rivu_provider,
-            settings.openai_api_key,
-            settings.openai_base_url,
-            settings.rivu_model,
-        ),
+        provider=ProviderRegistry(settings),
         store=ReviewStore(),
     )
 

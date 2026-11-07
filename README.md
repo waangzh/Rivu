@@ -110,7 +110,7 @@ Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。在新�
 
 | 用途 | 配置 |
 | --- | --- |
-| 模型服务 | `RIVU_PROVIDER`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`RIVU_MODEL` |
+| 模型服务 | `RIVU_MODEL_PROVIDERS`、`RIVU_DEFAULT_PROVIDER`，或单 Provider 的 `RIVU_PROVIDER`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`RIVU_MODEL` |
 | GitHub 读取 | `GITHUB_TOKEN`：按仓库访问需求配置，不用作发布凭据 |
 | 成本与容量 | `RIVU_REVIEW_MAX_INPUT_TOKENS`、`RIVU_REVIEW_MAX_OUTPUT_TOKENS`、`RIVU_MODEL_CONTEXT_TOKENS` |
 | 并发与期限 | `RIVU_REVIEW_CONCURRENCY`、`RIVU_REVIEW_TIMEOUT_SECONDS` |
@@ -120,7 +120,8 @@ Windows 路径使用正斜杠，例如 `{"project":"D:/Code/project"}`。在新�
 - **首轮与补查**：调查、补查和核验使用单 Agent 调用熔断（默认 48 次）与模型上下文容量；正常追加历史以复用前缀缓存，仅在容量、持续慢响应或重复调查等压力下整理上下文。总期限不随 PR 规模自动延长；首轮在期限的 60% 前收尾，首轮核验最晚到 70%，补查可到 80%，其新候选核验使用剩余期限。有限累计预算在首轮阶段为补查保留约 20%（小预算按可用容量缩减），补查继续共用原账本和硬截止时间。首轮及其核验结束后才补查具体缺口，无进展不反复补查；未覆盖与未决仍如实交付。
 - **外部依赖疑点**：当前不提供依赖源码查询或外部搜索。需要仓库外依赖行为才能判断的疑点，交付具体版本、缺失前提和待确认问题，不因资料缺失确认缺陷，也不对明确的外部缺口反复执行仓库补查。历史报告已归档的依赖证据继续保留校验。
 - **数据**：当前为可信本地单用户应用，SQLite 与 Artifact 不提供多租户安全隔离。使用前确认源码外发边界；LangSmith 默认关闭，不要将 `.env`、凭据或运行产物提交到仓库。
-- **配置生效**：模型端点、默认模型和保留天数可在设置页修改；其他环境配置修改后重启后端。已有任务继续使用创建时冻结的审查配置。
+- **多 Provider**：在设置页维护各 Provider 的协议、模型能力与服务端 Key 环境变量名。OpenAI、DeepSeek、OpenAI 兼容接口、Anthropic Messages 和 Google Gemini 使用 LangChain 对应适配；每个模型单独配置上下文、输出上限、Tool Calling 和 Thinking 格式。API Key 只从服务端环境读取。
+- **配置生效**：Provider 注册表、默认模型和保留天数可在设置页修改；普通单 Provider 的端点与模型也可继续设置。已有任务冻结 Provider ID、类型、端点、模型能力与推理配置，恢复时按冻结身份解析。没有 Provider ID 的旧任务按原快照中的 Provider 与端点恢复。
 
 ### 交付到 GitHub
 

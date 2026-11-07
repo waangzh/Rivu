@@ -2,16 +2,21 @@
 
 import asyncio
 import os
+import json
 from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import APIRouter, HTTPException, status
 
 from app.api.reviews import get_review_service
-from app.llm.providers import build_provider
+from app.llm.registry import ProviderRegistry
+from app.llm.providers import LLMProviderError
 from app.core.config import persist_editable_settings, settings
 from app.core.database import schema_is_current
 from app.models.operations import (
     ModelCatalogResponse,
+    ProviderRegistryResponse,
+    ModelConnectionRequest,
+    ModelConnectionResponse,
     PublicationCapability,
     SystemDiagnostics,
     SystemSettingsUpdate,
@@ -48,6 +53,13 @@ def _active_workspace_paths() -> tuple[object, ...]:
 async def get_available_models() -> ModelCatalogResponse:
     """使用后端配置的凭证查询当前 Provider 实际开放的模型。"""
     try:
+        if settings.rivu_model_providers:
+            registry = ProviderRegistry(settings)
+            provider = registry.resolve()
+            return ModelCatalogResponse(provider=registry.default_id,
+                default_model=provider._default_model,
+                models=[{"id": profile.model_id, "profile": profile}
+                        for profile in provider.config.models])
         return await fetch_model_catalog(
             provider=settings.rivu_provider,
             api_key=settings.openai_api_key,
@@ -61,6 +73,41 @@ async def get_available_models() -> ModelCatalogResponse:
         ) from exc
 
 
+@router.get("/providers", response_model=ProviderRegistryResponse)
+async def get_model_providers():
+    registry = ProviderRegistry(settings)
+    return ProviderRegistryResponse(default_provider=registry.default_id, providers=[
+        {"id": identifier, "config": config,
+         "credentials_configured": bool(registry.resolve(identifier)._api_key)}
+        for identifier, config in registry.configs().items()])
+
+
+@router.post("/providers/{provider_id}/test", response_model=ModelConnectionResponse)
+async def test_model_connection(provider_id: str, value: ModelConnectionRequest):
+    from pydantic import BaseModel
+    from langchain_core.messages import HumanMessage
+
+    class ConnectionCheck(BaseModel):
+        connected: bool
+
+    try:
+        provider = ProviderRegistry(settings).resolve(provider_id)
+        profile = provider.profile(value.model)
+        model = await asyncio.to_thread(provider.agent_model, value.model,
+                                       output_tokens=min(profile.max_output_tokens, 4096))
+        response = await asyncio.wait_for(model.bind_tools([ConnectionCheck]).ainvoke([
+            HumanMessage(content="Call ConnectionCheck with connected=true. Do not use other tools.")
+        ]), timeout=settings.rivu_model_request_timeout_seconds)
+        connected = any(call["name"] == "ConnectionCheck" and call["args"] == {"connected": True}
+                        for call in response.tool_calls)
+        return ModelConnectionResponse(status="connected" if connected else "tools_not_returned",
+                                       usage=response.usage_metadata)
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="模型连接测试失败") from exc
+
+
 @router.get("/diagnostics", response_model=SystemDiagnostics)
 async def get_system_diagnostics() -> SystemDiagnostics:
     try:
@@ -69,15 +116,16 @@ async def get_system_diagnostics() -> SystemDiagnostics:
         app_version = "0.1.0"
 
     service = get_review_service()
+    provider = ProviderRegistry(settings).resolve()
     worker_running = service.worker_running()
     artifact_path = settings.rivu_artifact_dir.resolve()
     writable_target = artifact_path if artifact_path.exists() else artifact_path.parent
 
     return SystemDiagnostics(
         version=app_version,
-        provider=settings.rivu_provider,
-        default_model=settings.rivu_model,
-        model_base_url=settings.openai_base_url,
+        provider=provider.provider_id,
+        default_model=provider._default_model,
+        model_base_url=provider._base_url,
         database_schema_current=schema_is_current(),
         worker_status="running" if worker_running else "idle",
         artifact_directory_writable=writable_target.exists() and os.access(writable_target, os.W_OK),
@@ -86,7 +134,7 @@ async def get_system_diagnostics() -> SystemDiagnostics:
         retention_days=settings.rivu_retention_days,
         configured_secrets={
             "github": bool(settings.github_token),
-            "llm_provider": bool(settings.openai_api_key),
+            "llm_provider": bool(provider._api_key),
             "langsmith": bool(settings.langsmith_api_key),
             "github_webhook": bool(settings.rivu_github_webhook_secret),
         },
@@ -104,6 +152,8 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
         "model_name": "rivu_model",
     }
     changes: dict[str, object] = {}
+    if settings.rivu_model_providers and (value.model_base_url or value.model_name):
+        raise HTTPException(status_code=400, detail="请在 Provider 配置中修改模型与端点")
     for field, setting_name in mapping.items():
         item = getattr(value, field)
         if item is None:
@@ -115,17 +165,21 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
             "rivu_model": "RIVU_MODEL",
         }[setting_name]
         updates[env_key] = item
+    if value.model_providers is not None:
+        changes["rivu_model_providers"] = value.model_providers
+        updates["RIVU_MODEL_PROVIDERS"] = json.dumps(
+            {key: config.model_dump(mode="json") for key, config in value.model_providers.items()},
+            ensure_ascii=False)
+    if value.default_provider is not None:
+        changes["rivu_default_provider"] = value.default_provider
+        updates["RIVU_DEFAULT_PROVIDER"] = value.default_provider
     if updates:
         try:
+            type(settings).model_validate({**settings.model_dump(), **changes})
             await asyncio.to_thread(persist_editable_settings, updates)
             for setting_name, item in changes.items():
                 setattr(settings, setting_name, item)
-            get_review_service().reload_provider(build_provider(
-                settings.rivu_provider,
-                settings.openai_api_key,
-                settings.openai_base_url,
-                settings.rivu_model,
-            ))
+            get_review_service().reload_provider(ProviderRegistry(settings))
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="保存本地配置失败") from exc
     return await get_system_diagnostics()

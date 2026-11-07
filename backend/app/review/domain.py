@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.paths import validate_repo_relative_path
 from app.models.review.diff import ChangedFile, PullRequestInfo
+from app.llm.profiles import ModelProfile, ReasoningEffort
 
 RunStatus = Literal["queued", "running", "completed", "partial", "failed", "cancelled"]
 TERMINAL = frozenset({"completed", "partial", "failed", "cancelled"})
@@ -57,7 +58,10 @@ class Configuration(Model):
     endpoint: str
     model: str
     thinking: bool = False
-    reasoning_effort: Literal["low", "high", "max"] | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    provider_id: str | None = None
+    api_key_env: str | None = None
+    model_profile: ModelProfile | None = None
     options: Options
     prompt_version: str = "review-vnext-15"
 

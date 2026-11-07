@@ -3,6 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from app.llm.profiles import ModelProfile, ProviderConfig
 
 
 class ProviderModelInfo(BaseModel):
@@ -10,6 +11,7 @@ class ProviderModelInfo(BaseModel):
 
     id: str
     owned_by: str | None = None
+    profile: ModelProfile | None = None
 
 
 class ModelCatalogResponse(BaseModel):
@@ -53,6 +55,9 @@ class SystemSettingsUpdate(BaseModel):
     retention_days: int | None = Field(default=None, ge=1, le=3_650)
     model_base_url: str | None = Field(default=None, min_length=1, max_length=2_000)
     model_name: str | None = Field(default=None, min_length=1, max_length=200)
+    model_providers: dict[str, ProviderConfig] | None = None
+    default_provider: str | None = None
+
 
     @field_validator("model_base_url")
     @classmethod
@@ -67,6 +72,27 @@ class SystemSettingsUpdate(BaseModel):
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("model_base_url cannot contain credentials, query or fragment")
         return value.strip().rstrip("/")
+
+
+class ProviderInfo(BaseModel):
+    id: str
+    config: ProviderConfig
+    credentials_configured: bool
+
+
+class ProviderRegistryResponse(BaseModel):
+    default_provider: str
+    providers: list[ProviderInfo]
+
+
+class ModelConnectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str | None = None
+
+
+class ModelConnectionResponse(BaseModel):
+    status: Literal["connected", "tools_not_returned"]
+    usage: dict | None = None
 
 
 class PublicationCapability(BaseModel):

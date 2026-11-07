@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import Field, HttpUrl, model_validator
 
 from app.review.domain import Model
+from app.llm.profiles import ReasoningEffort
 
 
 class LocalGitRequest(Model):
@@ -26,6 +27,9 @@ class ReviewRequest(Model):
         "correctness", "security", "performance", "compatibility"])
     limits: dict[str, int] = Field(default_factory=dict, max_length=10)
     model: str | None = Field(default=None, min_length=1, max_length=200)
+    provider_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    thinking: bool | None = None
+    reasoning_effort: ReasoningEffort | None = None
     include_pr_discussions: bool | None = None
     generate_overview: bool = True
     auto_publish: bool = False
@@ -42,6 +46,9 @@ class ReviewRequest(Model):
         value = self.model_dump(mode="json")
         if self.source is None:
             value.pop("source")
+        for field in ("provider_id", "thinking", "reasoning_effort"):
+            if value[field] is None:
+                value.pop(field)
         if value["paths"] is not None:
             value["paths"] = sorted(set(value["paths"]))
         if not self.auto_publish:

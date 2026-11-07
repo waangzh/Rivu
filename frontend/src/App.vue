@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
-import { ApiError, cancelReview, createReview, getAvailableModels, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
-import type { AppPage } from './types/operations';
+import { ApiError, cancelReview, createReview, getAvailableModels, getModelProviders, getReview, getReviewCapabilities, retryOverview, retryReview, subscribeToReview } from './api/client';
+import type { AppPage, ProviderInfo, ReasoningEffort } from './types/operations';
 import type { LocalGitRequest, Run } from './types/review';
 import type { ReviewCapabilities, ReviewPlanOptions } from './types/reviewPlan';
 import { reviewPrimarySections, type ReviewSection } from './types/workspace';
@@ -19,6 +19,11 @@ import ReviewWorkspace from './components/review/ReviewWorkspace.vue';
 
 const page = ref<AppPage>('dashboard'), section = ref<ReviewSection>('overview'), mobileOpen = ref(false);
 const prUrl = ref(''), model = ref(''), models = ref<string[]>([]);
+const providers = ref<ProviderInfo[]>([]), providerId = ref('');
+const thinking = ref<boolean | undefined>(undefined), reasoningEffort = ref<ReasoningEffort | undefined>(undefined);
+const selectedProvider = computed(() => providers.value.find(item => item.id === providerId.value));
+watch(providerId, () => { model.value = ''; thinking.value = undefined; reasoningEffort.value = undefined; });
+watch(model, () => { thinking.value = undefined; reasoningEffort.value = undefined; });
 const localSource = ref<LocalGitRequest | null>(null);
 const autoPublish = ref(false), publicationToken = ref('');
 const capabilities = ref<ReviewCapabilities | null>(null);
@@ -76,7 +81,7 @@ function navigate(value: ReviewSection) {
   section.value = value;
   mobileOpen.value = false;
 }
-function rereview() {
+async function rereview() {
   if (!task.value || !terminal(task.value.status)) return;
   const previous = task.value, url = previous.pr_url, saved = previous.configuration.options;
   newReview();
@@ -85,12 +90,33 @@ function rereview() {
     repository_key: previous.source.repository_key, base_ref: previous.snapshot.declared_base_sha,
     head_ref: previous.snapshot.head_sha, input_id: previous.source.input_id };
   options.value = structuredClone(toRaw(saved));
+  providerId.value = previous.configuration.provider_id || providerId.value;
+  await nextTick();
+  model.value = previous.configuration.model;
+  await nextTick();
+  thinking.value = previous.configuration.thinking;
+  reasoningEffort.value = previous.configuration.reasoning_effort || undefined;
 }
 async function loadModels() {
   const owner = ++catalogGeneration;
   try {
+    const registry = await getModelProviders();
+    if (!disposed && owner === catalogGeneration) {
+      providers.value = registry.providers;
+      providerId.value = registry.default_provider;
+    }
     const value = await getAvailableModels();
-    if (!disposed && owner === catalogGeneration) models.value = value.models.map(item => item.id);
+    if (!disposed && owner === catalogGeneration) {
+      models.value = value.models.map(item => item.id);
+      const current = providers.value.find(item => item.id === registry.default_provider);
+      if (current) {
+        for (const item of value.models) {
+          if (item.profile && !current.config.models.some(profile => profile.model_id === item.id)) {
+            current.config.models.push(item.profile);
+          }
+        }
+      }
+    }
   } catch {}
 }
 
@@ -202,6 +228,9 @@ function start() {
     key: crypto.randomUUID(), startedAt: new Date().toISOString(),
     input: { ...(localSource.value ? { source: structuredClone(toRaw(localSource.value)) } : { pr_url: prUrl.value }),
       ...input, ...(model.value ? { model: model.value } : {}),
+      ...(providerId.value ? { provider_id: providerId.value } : {}),
+      ...(thinking.value === undefined ? {} : { thinking: thinking.value }),
+      ...(reasoningEffort.value ? { reasoning_effort: reasoningEffort.value } : {}),
       ...(autoPublish.value && !localSource.value ? { auto_publish: true } : {}) },
   };
   creationRecoverable.value = savePendingCreation(toRaw(creation.value));
@@ -306,7 +335,7 @@ onBeforeUnmount(() => {
             <p class="muted space-top">正在恢复任务状态，请稍候。</p>
             <button v-if="trackedId && !opening" class="btn secondary space-top" @click="follow(trackedId)">重试打开任务</button>
           </section>
-          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:local-source="localSource" v-model:model="model" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
+          <NewReviewPage v-else v-model:pr-url="prUrl" v-model:local-source="localSource" v-model:model="model" v-model:provider-id="providerId" v-model:thinking="thinking" v-model:reasoning-effort="reasoningEffort" :providers="providers" v-model:options="options" v-model:auto-publish="autoPublish" v-model:publication-token="publicationToken" :models="selectedProvider?.config.models.map(item => item.model_id) || models" :capabilities="capabilities" :busy="busy" @create="start" @open="openReview" @history="page = 'history'" />
         </template>
       </main>
     </div>

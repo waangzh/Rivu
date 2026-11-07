@@ -4,6 +4,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.models.operations import ModelCatalogResponse, ProviderModelInfo
+from app.llm.profiles import default_profile
 
 
 class ModelCatalogError(RuntimeError):
@@ -49,7 +50,8 @@ async def fetch_model_catalog(
         raise ModelCatalogError("无法从模型服务获取模型列表") from exc
 
     unique_models = {
-        item.id: ProviderModelInfo(id=item.id, owned_by=item.owned_by)
+        item.id: ProviderModelInfo(id=item.id, owned_by=item.owned_by,
+                                  profile=default_profile(provider, item.id))
         for item in payload.data
         if item.id.strip()
     }

@@ -307,6 +307,8 @@ dialog::backdrop { background: rgba(12,22,45,.45); }
 .settings-form input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(7, 134, 111, .1); outline: none; }
 .settings-form .field-hint { margin: 0; padding-top: 2px; line-height: 1.6; }
 .settings-actions { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 76px; padding: 16px 20px; }
+.settings-model-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.settings-model-profile { min-width: 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
 .settings-actions > div { min-width: 0; }
 .settings-actions strong { display: block; font-size: .9375rem; line-height: 1.4; }
 .settings-actions p { margin: 5px 0 0; line-height: 1.55; }
@@ -384,6 +386,7 @@ dialog::backdrop { background: rgba(12,22,45,.45); }
   .settings-form { padding: 16px; }
   .settings-form label { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .settings-actions { align-items: stretch; flex-direction: column; gap: 12px; padding: 16px; }
+  .settings-model-actions { justify-content: flex-start; }
   .settings-actions .button { width: 100%; }
   .rg-app .panel-header { flex-wrap: wrap; gap: 14px; }
 }

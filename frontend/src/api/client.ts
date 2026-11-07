@@ -16,6 +16,8 @@ import type {
   ModelCatalogResponse,
   ReviewTaskListResponse,
   SystemDiagnostics,
+  ProviderRegistryResponse,
+  ProviderConfig,
 } from '../types/operations';
 import type {
   PublicationAccepted,
@@ -85,11 +87,19 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
 export const getReviewCapabilities = () =>
   request<ReviewCapabilities>('/api/system/review-capabilities');
 export const getAvailableModels = () => request<ModelCatalogResponse>('/api/system/models');
+export const getModelProviders = () => request<ProviderRegistryResponse>('/api/system/providers');
+export const testModelConnection = (provider: string, model: string) =>
+  request<{ status: 'connected' | 'tools_not_returned'; usage: Record<string, unknown> | null }>(
+    '/api/system/providers/' + encodeURIComponent(provider) + '/test', {
+      method: 'POST', body: JSON.stringify({ model }),
+    });
 export const getDiagnostics = () => request<SystemDiagnostics>('/api/system/diagnostics');
 export const updateSystemSettings = (value: {
-  model_base_url: string;
-  model_name: string;
-  retention_days: number;
+  model_base_url?: string;
+  model_name?: string;
+  retention_days?: number;
+  model_providers?: Record<string, ProviderConfig>;
+  default_provider?: string;
 }) => request<SystemDiagnostics>('/api/system/settings', {
   method: 'PATCH',
   body: JSON.stringify(value),
@@ -132,6 +142,9 @@ function reviewBody(input: ReviewCreateRequest) {
       Object.entries(input.limits).filter(([, value]) => value != null),
     ),
     ...(input.model ? { model: input.model } : {}),
+    ...(input.provider_id ? { provider_id: input.provider_id } : {}),
+    ...(input.thinking === undefined ? {} : { thinking: input.thinking }),
+    ...(input.reasoning_effort ? { reasoning_effort: input.reasoning_effort } : {}),
     ...(input.include_pr_discussions === undefined
       ? {}
       : { include_pr_discussions: input.include_pr_discussions }),

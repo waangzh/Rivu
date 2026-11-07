@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.llm.profiles import ProviderConfig
+
 
 class Settings(BaseSettings):
     """应用配置，自动读取项目根目录的 .env 文件。"""
@@ -44,6 +46,17 @@ class Settings(BaseSettings):
     rivu_model_request_timeout_seconds: float = Field(default=60, ge=1, le=600)
     rivu_deepseek_thinking: bool = True
     rivu_deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    rivu_model_providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    rivu_default_provider: str | None = None
+
+    @model_validator(mode="after")
+    def validate_model_providers(self):
+        if any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", key)
+               for key in self.rivu_model_providers):
+            raise ValueError("provider_requires_safe_id")
+        if self.rivu_model_providers and self.rivu_default_provider not in self.rivu_model_providers:
+            raise ValueError("default_provider_not_configured")
+        return self
 
     rivu_pr_discussions_enabled: bool = True
 
@@ -133,6 +146,8 @@ _EDITABLE_ENV_KEYS = {
     "RIVU_RETENTION_DAYS",
     "OPENAI_BASE_URL",
     "RIVU_MODEL",
+    "RIVU_MODEL_PROVIDERS",
+    "RIVU_DEFAULT_PROVIDER",
 }
 
 
