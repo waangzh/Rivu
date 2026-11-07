@@ -1,3 +1,7 @@
+import difflib
+
+import pytest
+
 from app.models.review.diff import ChangedFile, DiffHunk, DiffLine
 from app.review.domain import Limits, Options, Snapshot
 from app.review.planner import MAX_UNIT_PATHS, members, plan_review, unit_capacity
@@ -30,7 +34,6 @@ def test_structural_rename_and_deletion_have_required_members():
 
 
 def test_sensitive_scope_is_excluded_and_cannot_be_selected():
-    import pytest
     changes = [ChangedFile(file_path=".env", change_type="modified", additions=1, deletions=1)]
     assert not plan_review(changes, snapshot(), Options()).units
     with pytest.raises(ValueError, match="selected_files_not_eligible"):
@@ -41,6 +44,118 @@ def test_comments_do_not_become_operation_risk():
     changes = DiffParser().parse(
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-# old\n+# subprocess.run(sql)\n")
     assert plan_review(changes, snapshot(), Options()).units[0].risk == "low"
+
+
+def source_change(path, before, after):
+    diff = f"diff --git a/{path} b/{path}\n" + "".join(difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=f"a/{path}", tofile=f"b/{path}"))
+    return DiffParser().parse(diff)
+
+
+@pytest.mark.parametrize(("path", "before", "after"), [
+    ("src/api/client.py", "def fetch(item):\n    return item\n",
+     "def fetch(item, required):\n    return item\n"),
+    ("src/index.ts", 'export { fetch } from "./client";\n',
+     'export { fetchV2 } from "./client";\n'),
+    ("src/client.ts", 'export { fetch } from "./v1";\n',
+     'export { fetch } from "./v2";\n'),
+    ("src/client.ts", "export function fetch(item: string) { return item; }\n",
+     "export function fetch(item: number) { return item; }\n"),
+    ("src/client.ts", "export const fetch = (item: string) => item;\n",
+     "export const fetch = (item: number) => item;\n"),
+    ("src/client.ts", "export interface Item { id: string; }\n",
+     "export interface Item { id: number; }\n"),
+    ("src/client.mts", "export type Item = string;\n", "export type Item = number;\n"),
+    ("src/api/client.py", 'def fetch(item="v1"):\n    return item\n',
+     'def fetch(item="v2"):\n    return item\n'),
+    ("src/__init__.py", "from .client import fetch\n", "from .client import fetch_v2\n"),
+    ("src/__init__.py", '__all__ = ["fetch"]\n', '__all__ = ["fetch_v2"]\n'),
+    ("src/api/client.py", "def fetch(item):\n    return item\n", ""),
+    ("src/api/client.py", "", "def fetch(item):\n    return item\n"),
+])
+def test_public_declaration_changes_raise_planned_risk(path, before, after):
+    changes = source_change(path, before, after)
+    plan = plan_review(changes, snapshot(), Options())
+    assert plan.units[0].risk == "high"
+
+
+@pytest.mark.parametrize(("path", "before", "after", "risk"), [
+    ("src/api/client.py", "def fetch(item):\n    return 1\n",
+     "def fetch(item):\n    return 2\n", "medium"),
+    ("src/api/client.py", "def fetch(item): return 1\n",
+     "def fetch(item): return 2\n", "medium"),
+    ("src/client.ts", "export function fetch() { return 1; }\n",
+     "export function fetch() { return 2; }\n", "low"),
+    ("src/client.ts", "export const fetch = () => 1;\n",
+     "export const fetch = () => 2;\n", "low"),
+    ("src/api/client.py", "def _fetch(item): return item\n",
+     "def _fetch(item, required): return item\n", "medium"),
+    ("src/internal.py", "def fetch(item): return item\n",
+     "def fetch(item, required): return item\n", "low"),
+    ("src/api/client.py", "# def fetch(item):\n", "# def fetch(item, required):\n", "low"),
+    ("src/index.ts", "// export { fetch };\n", "// export { fetchV2 };\n", "low"),
+    ("docs/api/README.md", "export { fetch };\n", "export { fetchV2 };\n", "low"),
+    ("src/api/client.py", '"""\ndef fetch(item):\n"""\n',
+     '"""\ndef fetch(item, required):\n"""\n', "low"),
+    ("src/client.ts", "function fetch(item: string) { return item; }\n",
+     "function fetch(item: number) { return item; }\n", "low"),
+    ("src/api/client.py", "def fetch(\n    item: str,\n):\n    return item\n",
+     "def fetch(\n    item: int,\n):\n    return item\n", "medium"),
+    ("src/index.ts", "/*\nexport { fetch };\n*/\n",
+     "/*\nexport { fetchV2 };\n*/\n", "low"),
+])
+def test_api_risk_distinguishes_declarations_from_path_hints(path, before, after, risk):
+    assert plan_review(source_change(path, before, after), snapshot(), Options()).units[0].risk == risk
+
+
+def test_api_hints_survive_plan_round_trip_and_regrouping():
+    from app.review.domain import Plan
+
+    changes = source_change("src/client.ts", 'export { fetch } from "./v1";\n',
+                            'export { fetch } from "./v2";\n')
+    changes += source_change("a.py", "x = 1\n", "x = 2\n")
+    initial = Plan.model_validate_json(plan_review(changes, snapshot(), Options()).model_dump_json())
+    rebuilt = plan_review(changes, snapshot(), Options(), file_groups=[["a.py"], ["src/client.ts"]])
+    assert initial.units[0].risk == rebuilt.units[0].risk == "high"
+    assert rebuilt.units[0].paths == ["src/client.ts"]
+
+
+def test_excluded_api_changes_do_not_raise_other_units_risk():
+    changes = source_change("src/api/client.py", "def fetch(item): pass\n",
+                            "def fetch(item, required): pass\n")
+    changes += source_change("a.py", "x = 1\n", "x = 2\n")
+    plan = plan_review(changes, snapshot(), Options(paths=["a.py"]))
+    assert [(unit.paths, unit.risk) for unit in plan.units] == [(["a.py"], "low")]
+
+
+def test_api_signal_reasons_distinguish_path_and_declaration():
+    from app.review.risk import _risk
+
+    body = source_change("src/api/client.py", "def fetch():\n    return 1\n",
+                         "def fetch():\n    return 2\n")[0]
+    signature = source_change("src/api/client.py", "def fetch(): pass\n",
+                              "def fetch(item): pass\n")[0]
+    assert _risk([body.file_path], {body.file_path: body.model_dump()}) == (
+        "medium", ["public_api_path"])
+    assert _risk([signature.file_path], {signature.file_path: signature.model_dump()}) == (
+        "high", ["public_api_change"])
+
+
+@pytest.mark.parametrize("destination", ["src/internal.py", "src/internal.txt"])
+def test_renamed_public_entry_retains_path_hint_without_claiming_declaration_change(destination):
+    from app.review.risk import _risk
+
+    change = ChangedFile(file_path=destination, old_file_path="src/api/client.py",
+                         change_type="renamed", additions=0, deletions=0)
+    assert _risk([change.file_path], {change.file_path: change.model_dump()}) == (
+        "medium", ["public_api_path", "structural_change"])
+
+
+def test_deleted_declarations_at_same_diff_position_are_not_lost():
+    changes = source_change("src/api/client.py", "def fetch(): pass\ndef other(): pass\n",
+                            "def other(): pass\n")
+    assert plan_review(changes, snapshot(), Options()).units[0].risk == "high"
 
 
 def changed(*paths):

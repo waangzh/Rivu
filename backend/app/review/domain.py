@@ -13,7 +13,7 @@ from app.llm.profiles import ModelProfile, ReasoningEffort
 
 RunStatus = Literal["queued", "running", "completed", "partial", "failed", "cancelled"]
 TERMINAL = frozenset({"completed", "partial", "failed", "cancelled"})
-PLAN_VERSION = "file-plan-v3"
+PLAN_VERSION = "file-plan-v4"
 
 
 def utcnow() -> datetime:

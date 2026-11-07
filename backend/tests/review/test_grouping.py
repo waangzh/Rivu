@@ -15,6 +15,7 @@ from app.review.grouping import FileGroup, GroupingOutput, freeze_semantic_group
 from app.review.planner import plan_review
 from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
 from tests.review.vnext_helpers import setup_run
+from tests.review.test_planner import source_change
 
 
 def changes(*paths):
@@ -51,6 +52,25 @@ def test_grouping_failure_falls_back_to_single_file_units(tmp_path):
     assert [unit.paths for unit in plan.units] == [[path] for path in ("a.py", "b.py", "c.py", "d.py")]
     assert plan.grouping_status == "fallback"
     assert plan.grouping_reason == "grouping_unavailable"
+
+
+@pytest.mark.parametrize("model_grouping", [True, False])
+def test_api_risk_survives_persisted_run_and_grouping(tmp_path, model_grouping):
+    from app.review.domain import Run
+
+    _, run, _, _ = setup_run(tmp_path)
+    run.changed_files = source_change("src/index.ts", 'export { fetch } from "./v1";\n',
+                                      'export { fetch } from "./v2";\n')
+    run.changed_files += changes("a.py", "b.py", "c.py")
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options)
+    restored = Run.model_validate_json(run.model_dump_json())
+    output = GroupingOutput(groups=[FileGroup(label="API", files=[3])]) if model_grouping else None
+
+    rebuilt = grouped_plan(restored, output, reason=None if model_grouping else "grouping_unavailable")
+
+    assert rebuilt.units[0].paths == ["src/index.ts"]
+    assert rebuilt.units[0].risk == "high"
+    assert all(unit.risk == "low" for unit in rebuilt.units[1:])
 
 
 def test_model_grouping_cannot_split_strong_relations_when_capacity_allows(tmp_path):

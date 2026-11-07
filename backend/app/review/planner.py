@@ -159,7 +159,7 @@ def plan_review(changed_files, snapshot, options,
     units = []
     for group in groups:
         paths = sorted(group)
-        risk, _ = _risk(paths, by_path, {})
+        risk, _ = _risk(paths, by_path)
         keys = [key for path in paths for key, _ in path_members[path]]
         unit_id = identity([snapshot.model_dump(), keys, options.focus, PLAN_VERSION])[:24]
         units.append(Unit(id=unit_id, paths=paths, required_hunk_ids=keys,
