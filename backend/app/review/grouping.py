@@ -40,6 +40,12 @@ def grouping_files(run):
                   key=lambda change: change.file_path)
 
 
+def grouping_requested(run, min_files: int | None) -> bool:
+    """Depth policy decides whether a semantic grouping call is worth making."""
+    return (min_files is not None and len(grouping_files(run)) >= min_files
+            and not any(unit.reused_from for unit in run.plan.units))
+
+
 def grouped_plan(run, output: GroupingOutput | None = None, *, reason: str | None = None):
     if output is None:
         # Static relations are trusted and already bounded by the planner, so a

@@ -8,17 +8,85 @@ from app.review.contracts import ReviewRequest
 from app.review.domain import Limits
 
 
-@pytest.mark.parametrize("depth", ["quick", "standard", "deep"])
-def test_depth_preserves_strategy_without_small_call_quota(monkeypatch, depth):
+@pytest.mark.parametrize(("depth", "followups", "grouping"), [
+    ("quick", 0, None),
+    ("standard", 2, 4),
+    ("deep", 3, 3),
+])
+def test_depth_policy_sets_defaults_without_lowering_agent_fuse(
+        monkeypatch, depth, followups, grouping):
     monkeypatch.setattr(settings, "rivu_agent_max_calls", 48)
+    monkeypatch.setattr(settings, "rivu_review_gap_followups", 3)
+    monkeypatch.setattr(settings, "rivu_review_max_model_calls", None)
+    monkeypatch.setattr(settings, "rivu_review_max_input_tokens", None)
+    monkeypatch.setattr(settings, "rivu_review_max_output_tokens", None)
+    monkeypatch.setattr(settings, "rivu_review_timeout_seconds", 1800)
     provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
     frozen = freeze_configuration(ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth=depth), provider)
     assert frozen.options.depth == depth
     assert frozen.options.limits.model_calls == 48
     assert Limits().model_calls == 48
+    assert frozen.options.gap_followups == followups
     presets = capabilities()
-    assert all(item["limits"] == presets["limits"]["defaults"] for item in presets["depth_presets"])
-    assert frozen.options.limits.model_dump() == presets["limits"]["defaults"]
+    preset = next(item for item in presets["depth_presets"] if item["id"] == depth)
+    assert preset["gap_followups"] == followups
+    assert preset["grouping_min_files"] == grouping
+    assert frozen.options.limits.model_dump() == preset["limits"]
+    assert presets["gap_followups"] == 2
+    assert presets["gap_followups_max"] == 3
+    if depth == "quick":
+        assert frozen.options.limits.timeout_seconds == 600
+        assert frozen.options.limits.total_model_calls == 32
+        assert frozen.options.limits.total_input_tokens == 800_000
+        assert frozen.options.limits.total_output_tokens == 128_000
+    else:
+        assert frozen.options.limits.timeout_seconds == 1800
+        assert frozen.options.limits.total_model_calls is None
+        assert frozen.options.limits.total_input_tokens is None
+        assert frozen.options.limits.total_output_tokens is None
+
+
+def test_quick_defaults_never_exceed_server_maxima(monkeypatch):
+    monkeypatch.setattr(settings, "rivu_review_timeout_seconds", 300)
+    monkeypatch.setattr(settings, "rivu_review_max_model_calls", 16)
+    monkeypatch.setattr(settings, "rivu_review_max_input_tokens", 50_000)
+    monkeypatch.setattr(settings, "rivu_review_max_output_tokens", 4096)
+    provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
+    limits = freeze_configuration(
+        ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth="quick"), provider
+    ).options.limits
+    assert limits.timeout_seconds == 300
+    assert limits.total_model_calls == 16
+    assert limits.total_input_tokens == 50_000
+    assert limits.total_output_tokens == 4096
+
+
+def test_explicit_total_limit_overrides_depth_default(monkeypatch):
+    monkeypatch.setattr(settings, "rivu_review_max_model_calls", None)
+    provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
+    request = ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth="quick",
+                            limits={"total_model_calls": 10})
+    assert freeze_configuration(request, provider).options.limits.total_model_calls == 10
+
+
+@pytest.mark.parametrize(("server_cap", "expected_followups"), [
+    (0, {"quick": 0, "standard": 0, "deep": 0}),
+    (1, {"quick": 0, "standard": 1, "deep": 1}),
+    (2, {"quick": 0, "standard": 2, "deep": 2}),
+    (3, {"quick": 0, "standard": 2, "deep": 3}),
+])
+def test_gap_followups_respect_server_cap(monkeypatch, server_cap, expected_followups):
+    monkeypatch.setattr(settings, "rivu_review_gap_followups", server_cap)
+    provider = SimpleNamespace(_provider_name="test", _base_url="http://localhost", _default_model="fake")
+    presets = capabilities()
+    assert presets["gap_followups"] == expected_followups["standard"]
+    assert presets["gap_followups_max"] == server_cap
+    assert {preset["id"]: preset["gap_followups"]
+            for preset in presets["depth_presets"]} == expected_followups
+    for depth, expected in expected_followups.items():
+        frozen = freeze_configuration(
+            ReviewRequest(pr_url="https://github.com/o/r/pull/1", depth=depth), provider)
+        assert frozen.options.gap_followups == expected
 
 
 def test_explicit_call_fuse_is_honored_within_server_policy(monkeypatch):

@@ -173,6 +173,31 @@ async def test_large_pr_groups_only_after_create_and_keeps_every_file(service_pi
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(("depth", "names", "expected", "work_items"), [
+    ("quick", ("b.py", "c.py", "d.py"), "deterministic", 4),
+    ("deep", ("b.py", "c.py"), "pending", 0),
+])
+async def test_depth_controls_semantic_grouping(
+        service_pipeline, depth, names, expected, work_items):
+    service, github, _ = service_pipeline
+    for name in names:
+        (github.source_repo / name).write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(github.source_repo), "add", "."],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(github.source_repo), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.test", "commit", "-m", "depth fixture"],
+                   check=True, capture_output=True)
+    github.pr.head.sha = subprocess.run(
+        ["git", "-C", str(github.source_repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True).stdout.decode().strip()
+
+    run = await service.create(ReviewRequest(pr_url=github.pr.html_url, depth=depth),
+                               f"depth-{depth}")
+
+    assert run.plan.grouping_status == expected
+    assert len(service.store.work_items(run.id)) == work_items
+
+
 async def test_cancel_preserves_candidate_facts_and_rejects_retry(service_pipeline):
     service, _, app = service_pipeline
     run = await service.create(ReviewRequest(pr_url="https://github.com/o/r/pull/1"), "cancel")

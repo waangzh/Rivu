@@ -11,7 +11,10 @@ from app.models.orm import ReviewRequestOrm, ReviewTaskOrm, ReviewWorkItemOrm, W
 from app.models.review.diff import ChangedFile
 from app.review.context import AgentContext
 from app.review.domain import utcnow
-from app.review.grouping import FileGroup, GroupingOutput, freeze_semantic_groups, grouped_plan
+from app.review.configuration import grouping_min_files
+from app.review.grouping import (
+    FileGroup, GroupingOutput, freeze_semantic_groups, grouped_plan, grouping_requested,
+)
 from app.review.planner import plan_review
 from app.review.store import OVERVIEW_INPUT, VERIFICATION_INPUT, BudgetExceeded, LeaseLost, ReviewStopped
 from tests.review.vnext_helpers import setup_run
@@ -72,6 +75,23 @@ def test_grouping_failure_keeps_small_change_bundle(tmp_path):
     assert [unit.paths for unit in plan.units] == [["a.py", "b.py", "c.py"]]
     assert plan.grouping_status == "fallback"
     assert plan.grouping_reason == "grouping_unavailable"
+
+
+def test_grouping_requested_follows_depth_policy_and_reuse(tmp_path):
+    _, run, _, _ = setup_run(tmp_path)
+    run.changed_files = changes("a.py", "b.py", "c.py", "d.py")
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options)
+    assert grouping_requested(run, grouping_min_files("quick")) is False
+    assert grouping_requested(run, grouping_min_files("standard")) is True
+    assert grouping_requested(run, grouping_min_files("deep")) is True
+
+    run.changed_files = changes("a.py", "b.py", "c.py")
+    run.plan = plan_review(run.changed_files, run.snapshot, run.configuration.options)
+    assert grouping_requested(run, grouping_min_files("standard")) is False
+    assert grouping_requested(run, grouping_min_files("deep")) is True
+
+    run.plan.units[0].reused_from = "previous:work"
+    assert grouping_requested(run, grouping_min_files("deep")) is False
 
 
 @pytest.mark.parametrize("model_grouping", [True, False])

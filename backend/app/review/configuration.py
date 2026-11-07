@@ -4,7 +4,32 @@ from app.core.config import settings
 from app.review.domain import Configuration, Limits, Options
 from app.llm.providers import validate_model_options
 
-DEPTHS = {"quick": "快速初筛", "standard": "标准审查", "deep": "深度核验"}
+DEPTH_POLICIES = {
+    "quick": {
+        "label": "快速初筛",
+        "gap_followups": 0,
+        "grouping_min_files": None,
+        "limits": {
+            "timeout_seconds": 600,
+            "total_model_calls": 32,
+            "total_input_tokens": 800_000,
+            "total_output_tokens": 128_000,
+        },
+    },
+    "standard": {
+        "label": "标准审查",
+        "gap_followups": 2,
+        "grouping_min_files": 4,
+        "limits": {},
+    },
+    "deep": {
+        "label": "深度核验",
+        "gap_followups": 3,
+        "grouping_min_files": 3,
+        "limits": {},
+    },
+}
+DEPTHS = {key: policy["label"] for key, policy in DEPTH_POLICIES.items()}
 
 
 def maxima():
@@ -19,6 +44,21 @@ def maxima():
         "total_output_tokens": settings.rivu_review_max_output_tokens,
         "context_tokens": settings.rivu_model_context_tokens,
     }
+
+
+def _depth_limits(depth, maximum):
+    """Depth presets may lower totals or deadlines, never raise server maxima."""
+    return {key: value if maximum[key] is None else min(value, maximum[key])
+            for key, value in DEPTH_POLICIES[depth]["limits"].items()}
+
+
+def gap_followups_for(depth):
+    """The server setting is the cap; the depth selects a value within it."""
+    return min(DEPTH_POLICIES[depth]["gap_followups"], settings.rivu_review_gap_followups)
+
+
+def grouping_min_files(depth):
+    return DEPTH_POLICIES[depth]["grouping_min_files"]
 
 
 def freeze_configuration(request, provider):
@@ -40,9 +80,10 @@ def freeze_configuration(request, provider):
         if any(request.limits.get(key, 0) > maximum[key]
                for key in ("context_tokens", "output_tokens")):
             raise ValueError("review_limit_exceeds_model_capacity")
-    limits = Limits.model_validate({**maximum, **request.limits})
+    limits = Limits.model_validate({**maximum, **_depth_limits(request.depth, maximum),
+                                    **request.limits})
     options = Options(depth=request.depth, paths=request.paths, focus=request.focus, limits=limits,
-        gap_followups=settings.rivu_review_gap_followups,
+        gap_followups=gap_followups_for(request.depth),
         generate_overview=request.generate_overview,
         include_pr_discussions=(False if request.source else settings.rivu_pr_discussions_enabled
             if request.include_pr_discussions is None else request.include_pr_discussions))
@@ -66,14 +107,20 @@ def freeze_configuration(request, provider):
 
 
 def capabilities():
+    maximum = maxima()
+    def preset_limits(depth):
+        return {**maximum, **_depth_limits(depth, maximum)}
     return {
-        "depth_presets": [{"id": key, "label": value, "limits": maxima()}
+        "depth_presets": [{"id": key, "label": value, "limits": preset_limits(key),
+                           "gap_followups": gap_followups_for(key),
+                           "grouping_min_files": grouping_min_files(key)}
                           for key, value in DEPTHS.items()],
         "focus_categories": ["correctness", "security", "performance", "compatibility"],
         "scope_selection_supported": True,
         "context_boundary": "固定提交的普通源码；不会执行目标仓库代码",
-        "limits": {"defaults": maxima(), "maxima": maxima()},
-        "gap_followups": settings.rivu_review_gap_followups,
+        "limits": {"defaults": preset_limits("standard"), "maxima": maximum},
+        "gap_followups": gap_followups_for("standard"),
+        "gap_followups_max": settings.rivu_review_gap_followups,
         "pr_discussions_available": settings.rivu_pr_discussions_enabled,
         "pr_discussions_default": settings.rivu_pr_discussions_enabled,
         "local_repositories": [{"key": key, "label": key}

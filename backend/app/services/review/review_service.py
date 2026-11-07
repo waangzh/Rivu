@@ -9,13 +9,13 @@ from time import perf_counter
 from uuid import uuid4
 
 from app.review.agent import AgentRunner
-from app.review.configuration import freeze_configuration
+from app.review.configuration import freeze_configuration, grouping_min_files
 from app.review.context import ContextProvider
 from app.review.domain import Overview, Run, Snapshot, TERMINAL, utcnow
 from app.review.evidence import EvidenceService
 from app.review.index import OnDemandIndex
 from app.review.incremental import refine_plan
-from app.review.grouping import freeze_semantic_groups, grouping_files
+from app.review.grouping import freeze_semantic_groups, grouping_requested
 from app.review.orchestrator import ReviewOrchestrator
 from app.review.observability import event, review_trace, stage
 from app.review.planner import identity, plan_review
@@ -151,8 +151,8 @@ class ReviewService:
             history = await asyncio.to_thread(self.store.history, previous)
             old_work = await asyncio.to_thread(self.store.work_items, previous.id) if previous else []
             await asyncio.to_thread(refine_plan, run, previous, old_work, self._git_tool, repo, history)
-            if (execute and len(grouping_files(run)) >= 4
-                    and not any(unit.reused_from for unit in run.plan.units)):
+            if execute and grouping_requested(
+                    run, grouping_min_files(run.configuration.options.depth)):
                 run.plan.grouping_status = "pending"
             logger.info("审查规划完成 review_id=%.8s units=%d excluded=%d reused_units=%d history_candidates=%d",
                         run_id, len(run.plan.units), len(run.plan.excluded),

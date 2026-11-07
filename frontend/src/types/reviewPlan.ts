@@ -9,6 +9,8 @@ export interface ReviewCapabilities {
     id: ReviewPlanOptions['depth'];
     label: string;
     limits: ReviewLimits;
+    gap_followups: number;
+    grouping_min_files: number | null;
   }[];
   focus_categories: ReviewPlanOptions['focus'];
   limits: {

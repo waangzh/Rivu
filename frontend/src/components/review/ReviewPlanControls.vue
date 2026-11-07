@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { toRaw } from 'vue';
-import type { ReviewCapabilities, ReviewPlanOptions } from '../../types/reviewPlan';
+import { computed, toRaw } from 'vue';
+import type { ReviewCapabilities, ReviewLimits, ReviewPlanOptions } from '../../types/reviewPlan';
 const props = defineProps<{ modelValue: ReviewPlanOptions; capabilities: ReviewCapabilities | null; disabled?: boolean }>();
 const emit = defineEmits<{ 'update:modelValue': [value: ReviewPlanOptions] }>();
 const focuses = { correctness: '正确性', security: '安全', performance: '性能', compatibility: '跨模块契约' } as const;
 const limits = { total_input_tokens: '整轮输入 Token 上限（可选）', total_output_tokens: '整轮输出 Token 上限（可选）', context_tokens: '模型上下文窗口', timeout_seconds: '总期限（秒）', output_tokens: '单次输出 Token', concurrency: '并发', tool_calls: '单 Agent 工具调用上限', model_calls: '单 Agent 模型调用熔断', total_model_calls: '整轮模型调用上限（可选）' } as const;
+const depthPreset = computed(() => props.capabilities?.depth_presets.find(item => item.id === props.modelValue.depth) ?? null);
+const defaultLimit = (key: keyof ReviewLimits) => depthPreset.value?.limits[key] ?? props.capabilities?.limits.defaults[key] ?? null;
 function change(update: (plan: ReviewPlanOptions) => void) { const next = structuredClone(toRaw(props.modelValue)); update(next); emit('update:modelValue', next); }
 function focus(value: keyof typeof focuses, checked: boolean) { change(plan => { plan.focus = checked ? [...new Set([...plan.focus, value])] : plan.focus.filter(item => item !== value); }); }
 </script>
@@ -20,6 +22,7 @@ function focus(value: keyof typeof focuses, checked: boolean) { change(plan => {
 <span class="opt-desc">{{ item[2] }}</span>
 </label>
 </div>
+<p class="muted small">深度决定默认预算、补查轮次和语义分组门槛；核验门禁不随深度降低。</p>
 </div>
 <div class="setting-section">
 <h3>关注重点</h3>
@@ -37,9 +40,9 @@ function focus(value: keyof typeof focuses, checked: boolean) { change(plan => {
 <input type="checkbox" :checked="modelValue.include_pr_discussions" :disabled="!capabilities?.pr_discussions_available" @change="change(plan => { plan.include_pr_discussions = ($event.target as HTMLInputElement).checked; })" />纳入冻结的 PR 讨论上下文</label>
 <details class="setting-section">
 <summary class="link">自定义运行保护上限</summary>
-<p class="muted small">优先以整轮 Token 和总期限控制预算；模型调用次数用作熔断，审查深度不另设次数配额。</p>
+<p class="muted small">优先以整轮 Token 和总期限控制预算；模型调用次数用作熔断。深度会调整整轮默认预算、补查轮次和语义分组门槛，但不会降低单 Agent 熔断或核验门禁。</p>
 <div class="grid two">
-<label v-for="(label,key) in limits" :key="key" class="field-label">{{ label }}<input class="input" type="number" min="1" :max="capabilities?.limits.maxima[key] ?? undefined" :placeholder="String(capabilities?.limits.defaults[key] ?? '')" :value="modelValue.limits[key] ?? ''" @input="change(plan => { plan.limits[key] = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null; })" />
+<label v-for="(label,key) in limits" :key="key" class="field-label">{{ label }}<input class="input" type="number" min="1" :max="capabilities?.limits.maxima[key] ?? undefined" :placeholder="String(defaultLimit(key) ?? '')" :value="modelValue.limits[key] ?? ''" @input="change(plan => { plan.limits[key] = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null; })" />
 </label>
 </div>
 </details>

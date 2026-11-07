@@ -40,7 +40,7 @@ test('本地来源展示提交选择、快照边界并隐藏自动发布', async
     const { default: Page } = await server.ssrLoadModule('/src/components/pages/NewReviewPage.vue');
     const html = await renderToString(createSSRApp(Page, {
       prUrl: '', localSource: source, model: '', models: [], options, busy: false,
-      capabilities: { local_repositories: [{ key: 'project', label: 'project' }], limits: { defaults: {}, maxima: {} } },
+      capabilities: { depth_presets: [], local_repositories: [{ key: 'project', label: 'project' }], limits: { defaults: {}, maxima: {} } },
     }));
     assert.match(html, /本地 Git/);
     assert.match(html, /固定并预览快照/);
