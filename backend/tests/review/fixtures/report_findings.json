@@ -1,0 +1,35 @@
+{
+  "sections": [
+    {
+      "title": "正确性",
+      "findings": [
+        {
+          "path": "app/a.py",
+          "line": 10,
+          "severity": "high",
+          "title": "缺少空值检查",
+          "detail": "调用方可能传入 None，需要在访问属性前判断。"
+        },
+        {
+          "path": "app/a.py",
+          "line": 9,
+          "severity": "medium",
+          "title": "异常信息未记录",
+          "detail": "捕获异常后直接返回默认值。"
+        }
+      ]
+    },
+    {
+      "title": "安全性",
+      "findings": [
+        {
+          "path": "app/b.py",
+          "line": 3,
+          "severity": "critical",
+          "title": "路径拼接未校验 | 可能越界",
+          "detail": "用户输入直接参与路径拼接。"
+        }
+      ]
+    }
+  ]
+}
