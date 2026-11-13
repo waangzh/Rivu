@@ -427,3 +427,11 @@ export interface ReviewPreviewResponse {
   plan: Plan;
   changed_files: ChangedFile[];
 }
+
+export interface ReviewReportResponse {
+  report: Report | null;
+  markdown: string;
+  findings_count: number;
+  duration_seconds: number | null;
+  generated_at: string | null;
+}

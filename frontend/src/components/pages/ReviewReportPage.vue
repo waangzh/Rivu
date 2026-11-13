@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'; import { getPublicationCapability } from '../../api/client'; import type { Run } from '../../types/review'; import type { PublicationPlan } from '../../types/publication'; import type { PublicationCapability } from '../../types/operations'; import { terminal } from '../../utils/nativeReview'; import AppIcon from '../common/AppIcon.vue'; import ReportMarkdown from '../report/ReportMarkdown.vue'; import GitHubPublicationPanel from '../review/publication/GitHubPublicationPanel.vue';
-const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; loading: boolean; publishOpen?: boolean }>(); const emit = defineEmits<{ export: []; 'update:publishOpen': [value: boolean] }>();
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'; import { getPublicationCapability } from '../../api/client'; import type { ReviewReportResponse, Run } from '../../types/review'; import type { PublicationPlan } from '../../types/publication'; import type { PublicationCapability } from '../../types/operations'; import { terminal } from '../../utils/nativeReview'; import AppIcon from '../common/AppIcon.vue'; import ReportMarkdown from '../report/ReportMarkdown.vue'; import ReportSummaryBar from '../report/ReportSummaryBar.vue'; import GitHubPublicationPanel from '../review/publication/GitHubPublicationPanel.vue';
+const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; summary?: ReviewReportResponse | null; loading: boolean; publishOpen?: boolean }>(); const emit = defineEmits<{ export: []; 'update:publishOpen': [value: boolean] }>();
 const showPublish = computed({ get: () => props.publishOpen ?? false, set: value => emit('update:publishOpen', value) }), capability = ref<PublicationCapability | null>(null), capabilityError = ref(false);
 const shortHead = computed(() => props.task.snapshot.head_sha.slice(0,8));
 // 页面工具栏已显示标题，正文去掉重复的一级标题；导出文件仍保留。
@@ -51,6 +51,7 @@ try { capability.value = await getPublicationCapability(); } catch { capabilityE
 <p>未执行目标仓库代码、测试或构建。{{ task.source ? '本地快照提供审查报告，不支持 GitHub 发布。' : '发布资格由服务端独立校验。' }}</p>
 </details>
 </div>
+<ReportSummaryBar v-if="summary" :summary="summary" />
 <div class="rd-shell">
 <div class="rd-toolbar">
 <div class="rd-toolbar__title">
