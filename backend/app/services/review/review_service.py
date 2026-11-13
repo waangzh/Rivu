@@ -73,6 +73,9 @@ class ReviewService:
     def active_workspace_paths(self):
         return tuple(self._repo_paths.values())
 
+    def snapshot_root(self, task_id):
+        return self._repo_paths.get(task_id)
+
     def worker_running(self):
         return self._worker_task is not None and not self._worker_task.done()
 
