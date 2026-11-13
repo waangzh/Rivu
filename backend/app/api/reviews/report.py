@@ -16,6 +16,7 @@ from app.api import reviews as _reviews
 from app.core.config import settings
 from app.review.domain import TERMINAL
 from app.models.publication import PublicationPlan, ReviewCommentCheck, ReviewCommentOptions, ReviewSummary
+from app.models.review.report import ReviewReportResponse
 from app.services.publication.publication_planner import PublicationPlanner, summary_projection
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -113,10 +114,19 @@ async def preview_review_comment(task_id: str, options: ReviewCommentOptions):
         retained_blocking_keys=retained)
 
 
-@router.get("/{task_id}/report")
-async def get_report(task_id: str):
+@router.get("/{task_id}/report", response_model=ReviewReportResponse)
+async def get_report(task_id: str) -> ReviewReportResponse:
     task = await asyncio.to_thread(_reviews.get_review_service().get_task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     plan = await asyncio.to_thread(PublicationPlanner(_reviews.get_review_service()._artifacts).build, task)
-    return {"report": task.report, "markdown": plan.user_report_markdown}
+    duration = None
+    if task.started_at is not None and task.completed_at is not None:
+        duration = (task.completed_at - task.started_at).seconds
+    return ReviewReportResponse(
+        report=task.report,
+        markdown=plan.user_report_markdown,
+        finding_count=len(task.report.findings) if task.report else 0,
+        duration_seconds=duration,
+        generated_at=task.completed_at,
+    )

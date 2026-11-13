@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { getFindings, getProgress, getPublicationPlan, getReport } from '../../api/client';
-import type { Candidate, Finding, FindingGroup, Report, ReviewProgress, Run } from '../../types/review';
+import type { Candidate, Finding, FindingGroup, Report, ReviewProgress, ReviewReportResponse, Run } from '../../types/review';
 import type { PublicationPlan } from '../../types/publication';
 import { reviewPrimarySections, type ReviewSection } from '../../types/workspace';
 import { executionErrorLabel, phaseLabel, reviewTitle, safeGitHubLink, terminal } from '../../utils/nativeReview';
@@ -56,6 +56,7 @@ const progress = ref<ReviewProgress | null>(null);
 const syncedAt = ref<number | null>(null);
 const progressError = ref('');
 const report = ref<Report | null>(null);
+const reportSummary = ref<ReviewReportResponse | null>(null);
 const markdown = ref('');
 const error = ref('');
 const loading = ref(false);
@@ -110,7 +111,8 @@ async function load() {
     const results = await Promise.allSettled([
       getFindings(id, request.signal),
       props.task.report || terminal(props.task.status)
-        ? getReport(id, request.signal) : Promise.resolve({ report: null, markdown: '' }),
+        ? getReport(id, request.signal)
+        : Promise.resolve({ report: null, markdown: '', findings_count: 0, duration_seconds: null, generated_at: null }),
       terminal(props.task.status) ? getPublicationPlan(id, request.signal) : Promise.resolve(null),
     ]);
     if (owner !== generation) return;
@@ -125,6 +127,7 @@ async function load() {
     if (nextReport.status === 'fulfilled') {
       report.value = nextReport.value.report;
       markdown.value = nextReport.value.markdown;
+      reportSummary.value = nextReport.value;
     }
     if (nextPlan.status === 'fulfilled') plan.value = nextPlan.value;
     if (nextFindings.status === 'rejected' || nextReport.status === 'rejected') {
@@ -204,7 +207,7 @@ function exportReport() {
   <ReviewFilesPage v-else-if="tab === 'changes'" :task="task" :findings="findings" @finding="tab = 'findings'" />
   <ReviewFindingsPage v-else-if="tab === 'findings'" :task="task" :findings="findings" :candidates="candidates" :finding-groups="findingGroups" :deduplication="report?.finding_deduplication" :loading="loading" />
   <ReviewActivityPage v-else-if="tab === 'activity'" :task="task" :units="progress?.units ?? []" :usage="progress?.usage" :report="report" :candidates="candidates" :findings-count="findings.length" :findings-loaded="findingsLoaded" :loaded="!!progress" :synced-at="syncedAt" :sync-error="connectionError || progressError" @navigate="tab = $event" @refresh="refreshData" />
-  <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :loading="loading" :publish-open="publishOpen" @update:publish-open="publishOpen = $event" @export="exportReport" />
+  <ReviewReportPage v-else :task="task" :plan="plan" :report="markdown" :summary="reportSummary" :loading="loading" :publish-open="publishOpen" @update:publish-open="publishOpen = $event" @export="exportReport" />
 
   <footer v-if="tab !== 'publish'" class="app-footer">
     <span>只读静态审查 · 未执行目标代码、测试或构建 · 结论仅适用于本次快照</span>
