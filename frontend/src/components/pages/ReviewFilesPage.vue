@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'; import type { Finding, Run } from '../../types/review'; import AppIcon from '../common/AppIcon.vue'; import EmptyState from '../common/EmptyState.vue'; import ReviewDiff from '../review/diff/ReviewDiff.vue';
+import { computed, ref } from 'vue'; import type { Finding, Run } from '../../types/review'; import AppIcon from '../common/AppIcon.vue'; import EmptyState from '../common/EmptyState.vue'; import ReviewDiff from '../review/diff/ReviewDiff.vue'; import SnapshotFileTools from '../review/SnapshotFileTools.vue';
 const props = defineProps<{ task: Run; findings: Finding[] }>(); defineEmits<{ finding: [id: string] }>();
 const selected = ref(0), query = ref('');
 const files = computed(() => props.task.changed_files.map((file,index) => ({file,index})).filter(({file}) => file.file_path.toLowerCase().includes(query.value.toLowerCase())));
@@ -35,6 +35,7 @@ const related = computed(() => props.findings.filter(item => item.location?.path
 <p v-for="finding in related" :key="finding.id">{{ finding.claim }}</p>
 </div>
 <ReviewDiff :key="task.id + '-' + selected" :file="file" :file-id="selected" :task-id="task.id" :snapshot="task.snapshot" />
+<SnapshotFileTools :task="task" />
 </div>
 </div>
 </template>

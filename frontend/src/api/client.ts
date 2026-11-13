@@ -9,6 +9,8 @@ import type {
   ReviewCreateRequest,
   ReviewPreviewResponse,
   ReviewProgress,
+  SnapshotFileResponse,
+  SnapshotSearchHit,
   WorkItem,
 } from '../types/review';
 import type { ReviewCapabilities } from '../types/reviewPlan';
@@ -279,3 +281,11 @@ export const checkReviewComment = (
   body: JSON.stringify(options),
 });
 
+export const getSnapshotFile = (id: string, path: string, signal?: AbortSignal) =>
+  request<SnapshotFileResponse>(reviewPath(id, '/snapshot/file') + '?path=' + encodeURIComponent(path), { signal });
+
+export const searchSnapshot = (id: string, q: string, path: string, signal?: AbortSignal) =>
+  request<{ hits: SnapshotSearchHit[] }>(
+    reviewPath(id, '/snapshot/search') + '?q=' + encodeURIComponent(q) + '&path=' + encodeURIComponent(path),
+    { signal },
+  );

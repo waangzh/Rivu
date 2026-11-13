@@ -427,3 +427,14 @@ export interface ReviewPreviewResponse {
   plan: Plan;
   changed_files: ChangedFile[];
 }
+
+export interface SnapshotFileResponse {
+  path: string;
+  content: string;
+}
+
+export interface SnapshotSearchHit {
+  path: string;
+  line: number;
+  text: string;
+}

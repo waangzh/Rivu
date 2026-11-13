@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.api import reviews as _reviews
 from app.core.config import settings
 from app.models.file_view import FileDiffResponse, FileContextResponse
+from app.services.review.snapshot_reader import SnapshotReader
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -54,3 +55,33 @@ async def get_file_context(task_id: str, file_id: int) -> FileContextResponse:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (httpx.HTTPError, TimeoutError) as exc:
         raise HTTPException(status_code=502, detail="读取固定快照上下文失败，请稍后重试") from exc
+
+
+def _snapshot_reader(task_id: str) -> SnapshotReader:
+    root = _reviews.get_review_service().snapshot_root(task_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="Snapshot is not available")
+    return SnapshotReader(root)
+
+
+@router.get("/{task_id}/snapshot/file")
+async def get_snapshot_file(task_id: str, path: str = Query(..., min_length=1)):
+    task = await asyncio.to_thread(_reviews.get_review_service().get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    reader = _snapshot_reader(task_id)
+    try:
+        content = reader.read(path)
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    return {"path": path, "content": content}
+
+
+@router.get("/{task_id}/snapshot/search")
+async def search_snapshot(task_id: str, q: str = Query(..., min_length=1),
+                          path: str = Query(default=".")):
+    task = await asyncio.to_thread(_reviews.get_review_service().get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    reader = _snapshot_reader(task_id)
+    return {"hits": reader.search(q, path)}
