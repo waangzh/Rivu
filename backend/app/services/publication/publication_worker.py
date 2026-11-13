@@ -7,7 +7,7 @@ from app.models.publication import PublicationPlan
 from app.core.fingerprints import stable_hash
 from app.services.publication.publication_renderer import render_summary
 from app.services.publication.publication_repository import PublicationConflict, PublicationLeaseLost, finding_fingerprint
-from app.services.review.sticky_summary import StickySummary, validate_comment
+from app.services.review.sticky import StickySummary, validate_comment
 from app.services.review.task_queue import ReviewWorker, RetryAfterJobError
 from app.tools.github.github_publisher import GitHubPublishError
 
