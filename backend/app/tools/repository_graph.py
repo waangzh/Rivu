@@ -93,11 +93,15 @@ def build_repository_graph(
                                                            submodules=True)
                 if target is not None:
                     candidates = {(_symbol_id(target),): target}
+                elif call_ref.get("import_binding"):
+                    # The bound module may be outside the parsed query window.
+                    # A namesake in another module cannot stand in for it.
+                    continue
                 else:
                     candidates = {_symbol_id(item): item
                         for item in by_name.get(simple, [])
                         if item is not caller and files[str(item["file"])].get("language") == "python"}
-                    if len(candidates) != 1 and not call_ref.get("import_binding"):
+                    if len(candidates) != 1:
                         continue  # 无模块绑定的多同名匹配不构成符号关系，CallRef 保留未核验原因。
                 for callee in sorted(candidates.values(), key=_symbol_id):
                     edges.append(_edge("symbol", _symbol_id(caller), "symbol", _symbol_id(callee),

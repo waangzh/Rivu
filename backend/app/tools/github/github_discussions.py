@@ -57,8 +57,11 @@ class GitHubDiscussionReader:
 
     def add(self, thread, comment):
         existing = self.threads.get(thread.id)
-        if existing and any(item.id == comment.id for item in existing.comments):
-            return
+        if existing:
+            if any(item.id == comment.id for item in existing.comments):
+                return
+            if not thread.complete:
+                existing.complete = False
         size = len(comment.model_dump_json().encode("utf-8"))
         if ((existing is None and len(self.threads) >= self.policy.max_roots)
                 or self.count >= self.policy.max_comments or self.bytes + size > self.policy.max_bytes):
@@ -175,6 +178,7 @@ class GitHubDiscussionReader:
         except (ValueError, KeyError, TypeError, httpx.HTTPError):
             self.limitations.append("inline_thread_state_unavailable")
         parents = {}
+        rest_threads = set()
         async for raw in self.rest(owner, repo, number, "pulls/{number}/comments"):
             identity = raw["id"]
             parents[identity] = raw.get("in_reply_to_id", identity)
@@ -184,8 +188,13 @@ class GitHubDiscussionReader:
                     raise ValueError("cyclic_comment_reply")
                 visited.add(root)
                 root = parents[root]
-            self.add(DiscussionThread(id=f"inline:{root}", source="inline", comments=[],
-                                     path=raw.get("path")), self.comment(raw))
+            thread = DiscussionThread(id=f"inline:{root}", source="inline", comments=[],
+                                      path=raw.get("path"), complete=False)
+            self.add(thread, self.comment(raw))
+            rest_threads.add(thread.id)
+        # Pages interleave threads, so only exhaustion confirms all REST replies were read.
+        for thread_id in rest_threads:
+            self.threads[thread_id].complete = True
         # REST has no authoritative resolved/outdated thread state.
         self.sources["inline"] = "partial"
 

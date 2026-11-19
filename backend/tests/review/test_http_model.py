@@ -385,6 +385,9 @@ async def test_small_unit_checkpoint_keeps_tools_for_concrete_followup(tmp_path,
     assert len(reviews) == 5
     assert report.units[0].status == "completed"
     assert report.units[0].error_code is None
+    tool_names = [call["function"]["name"] for message in reviews[-1]["messages"]
+                  for call in message.get("tool_calls", [])]
+    assert tool_names == ["read_file", "read_file", "search_code", "read_file"]
     for previous, current in zip(reviews, reviews[1:]):
         assert current["messages"][:len(previous["messages"])] == previous["messages"]
 

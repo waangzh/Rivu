@@ -1,4 +1,4 @@
-"""Bounded pagination over authorized immutable sources and the fixed diff."""
+"""Bounded pagination over authorized immutable sources."""
 
 import asyncio
 import fnmatch
@@ -249,61 +249,3 @@ def find_paths(context, query="", path="", glob="", cursor="", limit=80, *, excl
         index += 1
     return _page(context, scope, cursor, (index, 0), index < len(paths),
                  source="path_hint", paths=selected, scope_files=len(paths), filters=filters)
-
-
-def diff_page(context, path, hunk_index=None, start=0, cursor="", limit=60):
-    _limit(limit, 80)
-    if type(start) is not int or start < 0:
-        raise ValueError("invalid_diff_range")
-    if path not in _paths(context, path):
-        raise ValueError("path_not_authorized")
-    change = next((item for item in context.changed_files if item["file_path"] == path), None)
-    if change is None or (change.get("old_file_path") and
-                          is_sensitive_repository_path(change["old_file_path"])):
-        raise ValueError("diff_not_authorized")
-    hunks = change.get("hunks", [])
-    scope = _scope(context, "diff", [digest(json.dumps(change, sort_keys=True)), hunk_index, start])
-    metadata = {key: value for key, value in change.items() if key != "hunks"}
-    if hunk_index is None:
-        index, column, _ = _position(context, cursor, scope, len(hunks))
-        if column or start:
-            raise ValueError("invalid_diff_range")
-        selected = []
-        while index < len(hunks) and len(selected) < limit:
-            hunk = hunks[index]
-            item = {key: value for key, value in hunk.items() if key != "lines"}
-            item.update(hunk_index=index, line_count=len(hunk.get("lines", [])))
-            if _size(selected + [item]) > PAGE_CHARS:
-                if not selected:
-                    raise ValueError("diff_metadata_too_large")
-                break
-            selected.append(item)
-            index += 1
-        return _page(context, scope, cursor, (index, 0), index < len(hunks),
-                     source="fixed_diff", file=metadata, hunks=selected)
-    if type(hunk_index) is not int or not 0 <= hunk_index < len(hunks):
-        raise ValueError("invalid_hunk_index")
-    lines = hunks[hunk_index].get("lines", [])
-    index, column, _ = _position(context, cursor, scope, len(lines)) if cursor else (start, 0, 0)
-    if index > len(lines) or (index == len(lines) and index != 0):
-        raise ValueError("invalid_diff_range")
-    selected = []
-    while index < len(lines) and len(selected) < limit:
-        line = lines[index]
-        content = line.get("content", "")
-        if column > len(content):
-            raise ValueError("invalid_cursor")
-        fragment = content[column:column + 1000]
-        item = {**line, "content": fragment, "line_index": index,
-                "content_offset": column, "continued": column + len(fragment) < len(content)}
-        if _size(selected + [item]) > PAGE_CHARS:
-            if not selected:
-                raise ValueError("diff_line_metadata_too_large")
-            break
-        selected.append(item)
-        if item["continued"]:
-            column += len(fragment)
-        else:
-            index, column = index + 1, 0
-    return _page(context, scope, cursor, (index, column), index < len(lines), source="fixed_diff",
-                 file=metadata, hunk_index=hunk_index, lines=selected)

@@ -62,6 +62,8 @@ _LABELS = {
         "invalid_source_refs", "invalid_cursor", "invalid_source_range", "invalid_source_side",
         "source_output_too_large", "source_range_out_of_bounds", "source_range_too_large",
         "source_too_large", "source_unavailable",
+        "symbol_not_found", "symbol_ambiguous", "parser_unavailable",
+        "discussion_disabled", "discussion_not_found", "discussion_too_large",
         "invalid_tool_arguments", "unknown_tool", "source_or_submission_rejected",
         "source_not_visible_in_this_attempt", "investigation_reference_not_received",
         "unsupported_glob", "invalid_path_filter", "invalid_exclude_globs", "invalid_page_size",

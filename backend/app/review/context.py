@@ -14,6 +14,7 @@ from app.review.evidence import digest, source_lines
 from app.review.findings import candidate_summary
 from app.review.planner import identity, members, tokens
 from app.review.store import BudgetExceeded
+from app.review.tool_scope import is_sensitive_repository_path
 
 
 TOOL_LOOP_WARNING = 3
@@ -397,8 +398,8 @@ class AgentContext:
             self.pending_hunks.pop(key, None)
             self.material_failures.pop(key, None)
 
-    async def read(self, path, start, end, revision):
-        result = await self.evidence.read(path, start, end, revision)
+    async def read(self, path, start, end, revision, *, allow_partial=False):
+        result = await self.evidence.read(path, start, end, revision, allow_partial=allow_partial)
         ref = SourceRef.model_validate(result.pop("evidence"))
         handle = self.stage(ref)
         return {**result, "source_ref": handle, "source": ref.model_dump()}
@@ -413,6 +414,7 @@ class ContextProvider:
     denied_paths: frozenset[str] = frozenset()
     discussions: list[dict] = field(default_factory=list)
     index: Any = None
+    discussion_sources: dict[str, str] = field(default_factory=dict)
     _member_index: dict | None = field(default=None, init=False, repr=False, compare=False)
     _member_snapshot: Snapshot | None = field(default=None, init=False, repr=False, compare=False)
     _member_changes: list | None = field(default=None, init=False, repr=False, compare=False)
@@ -436,6 +438,31 @@ class ContextProvider:
 
     def _member(self, key):
         return deepcopy(self._member_map[key])
+
+    def _discussion_directory(self, unit):
+        paths = set(unit.paths)
+        paths.update(self._member_map[key]["old_path"] for key in unit.required_hunk_ids)
+        paths = {path for path in paths - self.denied_paths if not is_sensitive_repository_path(path)}
+        related, general = [], []
+        for index, thread in enumerate(self.discussions):
+            path = thread.get("path")
+            if path in paths:
+                related.append((index, thread))
+            elif not path and thread["source"] in {"conversation", "review"}:
+                general.append((index, thread))
+        eligible = related + general
+        return {
+            "frozen_thread_count": len(self.discussions),
+            "eligible_thread_count": len(eligible),
+            "sources": self.discussion_sources,
+            "truncated": len(eligible) > 8,
+            "threads": [
+                {"index": index, "source": thread["source"], "path": thread.get("path"),
+                 "resolved": thread.get("resolved"), "outdated": thread.get("outdated"),
+                 "complete": thread.get("complete", True)}
+                for index, thread in eligible[:8]
+            ],
+        }
 
     async def material(self, context, key):
         member = self._member(key)
@@ -586,6 +613,14 @@ class ContextProvider:
                 context.material_failures[key] = "material_capacity"
                 continue
             spent += cost
+        if self.run.configuration.options.include_pr_discussions:
+            directory = self._discussion_directory(unit)
+            base["discussion_directory_untrusted"] = directory
+            while directory["threads"] and not fits_request():
+                directory["threads"].pop()
+                directory["truncated"] = True
+            if not fits_request():
+                del base["discussion_directory_untrusted"]
         if not fits_request():
             raise BudgetExceeded("input_token_limit")
         context.submitted = {item["id"]: item for item in base["already_submitted"]}

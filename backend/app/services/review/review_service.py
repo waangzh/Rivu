@@ -277,7 +277,9 @@ class ReviewService:
             if job.kind == "review":
                 await self._seed_history(provider)
             if run.configuration.options.include_pr_discussions:
-                provider.discussions = await self._discussions(run, lease)
+                discussions = await self._discussions(run, lease)
+                provider.discussions = discussions["threads"]
+                provider.discussion_sources = discussions["sources"]
             if job.kind == "overview":
                 run = await asyncio.to_thread(self.store.begin, run.id, lease)
                 provider.run = run
@@ -331,7 +333,15 @@ class ReviewService:
             frozen = result.model_dump(mode="json")
         if frozen["head_sha"] != run.snapshot.head_sha or frozen["base_sha"] != run.snapshot.base_sha:
             raise ValueError("discussion_snapshot_mismatch")
-        return frozen["threads"]
+        limitations = set(frozen.get("limitations", []))
+        if ("inline_thread_state_unavailable" in limitations
+                and limitations & {"inline:collection_limit", "inline:collection_failed"}):
+            # Older snapshots used complete=True for REST threads even after an aborted scan.
+            for thread in frozen["threads"]:
+                if (thread["source"] == "inline" and thread.get("resolved") is None
+                        and thread.get("outdated") is None):
+                    thread["complete"] = False
+        return frozen
 
     async def _seed_history(self, provider):
         from app.review.domain import Candidate, CandidateInput, SourceRef

@@ -141,24 +141,41 @@ class EvidenceService(EvidenceArchive):
         self._check_worktree(path)
         return sha, source
 
-    def _read(self, path: str, start: int, end: int, side: str) -> dict:
-        if type(start) is not int or type(end) is not int or start < 1 or end < start:
+    def _read(self, path: str, start: int, end: int | None, side: str, allow_partial: bool = False) -> dict:
+        if (type(start) is not int or start < 1
+                or (end is not None and (type(end) is not int or end < start))):
             raise SourceReadError("invalid_source_range")
-        if end - start + 1 > self.max_lines:
+        bounded = allow_partial or end is None
+        if not bounded and end - start + 1 > self.max_lines:
             raise SourceReadError("source_range_too_large", max_lines=self.max_lines,
                 requested_range=[start, end], requested_lines=end - start + 1,
                 suggested_range=[start, start + self.max_lines - 1],
                 next_start=start + self.max_lines, retryable_with_corrected_arguments=True)
         sha, source = self._source(path, side)
         lines = source_lines(source)
-        if end > len(lines):
+        requested_end = len(lines) if end is None else end
+        if requested_end > len(lines) or start > requested_end:
             raise SourceReadError("source_range_out_of_bounds", side=side,
                 requested_range=[start, end], available_range=[1, len(lines)] if lines else None,
                 suggested_range=[start, len(lines)] if start <= len(lines) else None,
                 retryable_with_corrected_arguments=bool(lines))
-        content = "".join(lines[start - 1:end])
-        if len(content) > self.max_output_chars:
-            raise SourceReadError("source_output_too_large")
+        end = requested_end
+        if bounded:
+            chunks, size = [], 0
+            for line in lines[start - 1:min(end, start + self.max_lines - 1)]:
+                if size + len(line) > self.max_output_chars:
+                    break
+                chunks.append(line)
+                size += len(line)
+            if not chunks:
+                raise SourceReadError("source_output_too_large", line=start,
+                                      max_output_chars=self.max_output_chars)
+            end = start + len(chunks) - 1
+            content = "".join(chunks)
+        else:
+            content = "".join(lines[start - 1:end])
+            if len(content) > self.max_output_chars:
+                raise SourceReadError("source_output_too_large")
         payload = {
             "review_id": self.snapshot.review_id, "commit_sha": sha, "side": side,
             "path": path, "start_line": start, "end_line": end,
@@ -168,12 +185,15 @@ class EvidenceService(EvidenceArchive):
         artifact = self.artifacts.put_text(
             task_id=self.snapshot.review_id, kind="evidence", content=encoded)
         ref = SourceRef(id=artifact.sha256, **{k: v for k, v in payload.items() if k != "content"})
-        return {"ok": True, "evidence": ref.model_dump(), "content": content, "truncated": False,
-                "total_lines": len(lines), "max_read_lines": self.max_lines}
+        truncated = end < requested_end
+        return {"ok": True, "evidence": ref.model_dump(), "content": content, "truncated": truncated,
+                "total_lines": len(lines), "max_read_lines": self.max_lines,
+                **({"next_start": end + 1 if truncated else None} if bounded else {})}
 
-    async def read(self, path: str, start: int, end: int, side: str = "head") -> dict:
+    async def read(self, path: str, start: int, end: int | None, side: str = "head",
+                   *, allow_partial: bool = False) -> dict:
         async with self._semaphore:
-            return await asyncio.to_thread(self._read, path, start, end, side)
+            return await asyncio.to_thread(self._read, path, start, end, side, allow_partial)
 
     def resolve(self, identity: str) -> SourceRef:
         ref = super().resolve(identity)

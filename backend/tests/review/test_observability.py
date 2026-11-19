@@ -296,12 +296,16 @@ async def test_paginated_tool_is_observed_as_partial_without_logging_query(tmp_p
 
 @pytest.mark.parametrize(("tool_name", "arguments", "reason"), [
     ("read_symbol", {"path": "a.py", "symbol": "ratio"}, None),
+    ("read_file", {"path": "a.py", "revision": "head", "start": 1, "end": None}, None),
+    ("read_diff", {}, None),
+    ("read_discussion", {"index": 0}, None),
     ("read_file", {"path": "a.py", "revision": "head", "start": 2, "end": 1},
      "invalid_source_range"),
     ("search_code", {"query": "return", "cursor": "invented"}, "invalid_cursor"),
 ])
 async def test_tool_trace_preserves_registered_name_and_read_rejection(
         tmp_path, recorder, caplog, tool_name, arguments, reason):
+    from app.models.orm import ReviewTaskOrm
     from app.review.index import OnDemandIndex
 
     class ToolModel(ReviewModel):
@@ -313,8 +317,16 @@ async def test_tool_trace_preserves_registered_name_and_read_rejection(
                     usage_metadata={"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}))])
             return super()._generate(messages, stop, run_manager, **kwargs)
 
-    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    store, run, lease, provider, sessions = setup_source_run(tmp_path)
     provider.index = OnDemandIndex(provider.evidence)
+    if tool_name == "read_diff":
+        arguments = {"hunk_id": run.plan.units[0].required_hunk_ids[0]}
+    elif tool_name == "read_discussion":
+        run.configuration.options.include_pr_discussions = True
+        provider.discussions = [{"source": "inline", "path": "a.py", "complete": False,
+                                 "comments": [{"body": "private discussion body"}]}]
+        with sessions.begin() as session:
+            session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
     with caplog.at_level(logging.INFO, logger="Rivu.Observation"):
         await ReviewOrchestrator(store, AgentRunner(ToolModel())).run(run.id, provider, lease)
     events = [payload["extra"]["metadata"] for operation, payload in recorder.operations
@@ -326,8 +338,10 @@ async def test_tool_trace_preserves_registered_name_and_read_rejection(
         assert events[0]["reason"] == reason
     else:
         assert events[0]["ok"] is True
+        if tool_name == "read_discussion":
+            assert events[0]["partial"] is True
     encoded = json.dumps(recorder.operations, default=str)
-    for private in ("a.py", "def ratio", "invented"):
+    for private in ("a.py", "def ratio", "invented", "private discussion body"):
         assert private not in encoded
         assert private not in caplog.text
 

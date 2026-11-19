@@ -16,6 +16,7 @@ from app.review.findings import admit_candidate, candidate_summary
 from app.review.retrieval import find_paths, search
 from app.review.evidence import SourceReadError
 from app.review.observability import event, stage
+from app.review.tool_scope import is_sensitive_repository_path
 
 logger = logging.getLogger("Rivu.Review.Tools")
 
@@ -112,13 +113,14 @@ def bounded(function):
 @bounded
 async def read_file(path: str, revision: Literal["base", "head"],
                     start: Annotated[int, Field(ge=1, strict=True)],
-                    end: Annotated[int, Field(ge=1, strict=True)],
+                    end: Annotated[int, Field(ge=1, strict=True)] | None,
                     runtime: ToolRuntime[AgentContext]) -> dict:
     """Read fixed source lines using start/end, not start_line/end_line.
 
-    Lines are 1-based inclusive: at most 240, so end <= start + 239.
-    Reuse returned total_lines/max_read_lines for later ranges. For a named
-    function, prefer read_symbol. Rejected ranges include corrected arguments.
+    An integer end requests exact 1-based inclusive lines, at most 240.
+    Pass end=null to read whole lines up to EOF or the line/size limit.
+    The source receipt gives the actual range. Continue at next_start if present.
+    For a named function, prefer read_symbol.
     """
     return await runtime.context.read(path, start, end, revision)
 
@@ -131,7 +133,7 @@ async def read_diff(hunk_id: str, runtime: ToolRuntime[AgentContext]) -> dict:
                 if unit.id == runtime.context.work.unit_id)
     if hunk_id not in unit.required_hunk_ids:
         raise ValueError("hunk_not_in_unit")
-    return await runtime.context.provider.material(runtime.context, hunk_id)
+    return {"ok": True, **await runtime.context.provider.material(runtime.context, hunk_id)}
 
 
 @tool
@@ -215,7 +217,7 @@ async def record_investigation(note: InvestigationState, runtime: ToolRuntime[Ag
         raise ValueError("investigation_reference_not_received")
     context.investigations[note.question_id] = note
     context.memory_revision += 1
-    return {"ok": True, "investigation": note.model_dump()}
+    return {"ok": True, "question_id": note.question_id}
 
 
 @tool
@@ -232,33 +234,55 @@ async def recall_context(receipt_ref: str, runtime: ToolRuntime[AgentContext]) -
 @tool
 @bounded
 async def read_discussion(index: int, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Read frozen untrusted discussion background; it is never source evidence."""
+    """Read frozen untrusted background using a zero-based index from the initial discussion directory."""
     context = runtime.context
     if not context.provider.run.configuration.options.include_pr_discussions:
-        raise ValueError("discussion_disabled")
+        raise SourceReadError("discussion_disabled")
     if index < 0 or index >= len(context.provider.discussions):
-        raise ValueError("discussion_not_found")
-    text = json.dumps(context.provider.discussions[index], ensure_ascii=False)
+        raise SourceReadError("discussion_not_found",
+                              next_action="Use an index from discussion_directory_untrusted.")
+    thread = context.provider.discussions[index]
+    path = thread.get("path")
+    if path and (path in context.denied_paths or is_sensitive_repository_path(path)):
+        raise SourceReadError("discussion_not_found")
+    text = json.dumps(thread, ensure_ascii=False)
     if len(text) > 12000:
-        raise ValueError("discussion_too_large")
-    return {"source": "untrusted_discussion", "content": text}
+        raise SourceReadError("discussion_too_large")
+    return {"ok": True, "source": "untrusted_discussion", "content": text,
+            "partial": not thread.get("complete", True)}
 
 
 @tool
 @bounded
 async def read_symbol(path: str, symbol: str, runtime: ToolRuntime[AgentContext],
-                      revision: Literal["base", "head"] = "head") -> dict:
-    """Parse one fixed file on demand and read a unique symbol's complete source."""
+                      revision: Literal["base", "head"] = "head",
+                      start: Annotated[int, Field(ge=1, strict=True)] | None = None) -> dict:
+    """Read a unique symbol by name or symbol_id from one fixed file.
+
+    Returns its full symbol_range and a bounded page of whole source lines.
+    Continue with the same path/symbol/revision and start=next_start if present.
+    """
     context = runtime.context
     found = await context.provider.index.symbol(path, symbol, revision)
-    return await context.read(path, found["start_line"], found["end_line"], revision)
+    first, last = found["start_line"], found["end_line"]
+    start = first if start is None else start
+    if not first <= start <= last:
+        raise SourceReadError("invalid_source_range", symbol_range=[first, last],
+                              next_action="Use a start line within symbol_range.")
+    result = await context.read(path, start, last, revision, allow_partial=True)
+    return {**result, "symbol_range": [first, last], "parser_id": found["parser_id"]}
 
 
 @tool
 @bounded
 async def find_relations(path: str, symbol: str, runtime: ToolRuntime[AgentContext],
                          direction: Literal["in", "out", "both"] = "both", scope: str = "") -> dict:
-    """Find bounded caller/callee/reference hints, parsing likely related files only."""
+    """Find bounded static HEAD call hints for callers (in) or callees (out).
+
+    scope limits the other endpoint to a repository-relative file or directory.
+    Empty edges do not establish absence. For deleted or renamed code and old
+    consumers, use search_code and read_file on BASE.
+    """
     return await runtime.context.provider.index.relations(path, symbol, direction, scope)
 
 

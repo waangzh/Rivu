@@ -197,7 +197,7 @@ async def test_recording_notes_uses_existing_attempt_authority_and_tool_budget(t
     ref = SourceRef.model_validate(source())
     context.visible["S1"] = ref
     receipt = await record_investigation.coroutine(note=note, runtime=runtime)
-    assert receipt["ok"] is True
+    assert receipt == {"ok": True, "question_id": "q1"}
     assert context.investigations["q1"] == note
     assert context.resolve(["S1"]) == [ref]
     assert context.tool_calls == 2
