@@ -223,7 +223,7 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
         f"branch_{branch}.py": "\n".join(
             f"ITEM_{index} = '{branch} alpha{index} beta{index} gamma{index} delta{index} epsilon{index}'"
             for index in range(100)) + "\n"
-        for branch in range(4)
+        for branch in range(6)
     }
     store, run, lease, provider, sessions = setup_source_run(tmp_path, support_sources=support)
     run.configuration.options.limits.context_tokens = 24576
@@ -231,13 +231,14 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
         session.get(ReviewTaskOrm, run.id).task_snapshot = run.model_dump(mode="json")
     reviews = []
     restored = []
-    action_step = 0
+    branch_reads = 0
+    phase = "search"
     checkpoint_calls = 0
     recall_call_id = None
     reread_call_id = None
 
     def transport(request):
-        nonlocal action_step, checkpoint_calls, recall_call_id, reread_call_id
+        nonlocal branch_reads, phase, checkpoint_calls, recall_call_id, reread_call_id
         payload = json.loads(request.content)
         if thinking:
             assert payload["thinking"] == {"type": "enabled"}
@@ -254,9 +255,9 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
             reviews.append(payload)
             assert payload["tools"] == reviews[0]["tools"]
             checkpoint = " Context checkpoint:" in payload["messages"][-1]["content"]
-            if not checkpoint:
-                action_step += 1
-            step = action_step
+            states = [json.loads(message["content"]) for message in payload["messages"]
+                      if message["role"] == "user" and message["content"].startswith("{")]
+            ledger = next((state for state in states if "retrieval_receipts" in state), None)
             if checkpoint:
                 checkpoint_calls += 1
                 name, result = "record_investigation", {"note": {
@@ -265,22 +266,23 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
                     "conclusion": "The ratio source is known; remaining consumer contracts need inspection.",
                     "missing_premise": "Read remaining consumers.",
                 }}
-            elif step == 1:
+            elif phase == "search":
+                phase = "fill"
                 name, result = "search_code", {"query": "ratio", "path": "a.py", "revision": "base"}
-            elif step <= 5:
+            elif phase == "fill" and ledger is None:
+                assert branch_reads < len(support)
                 name, result = "read_file", {
-                    "path": f"branch_{step - 2}.py", "revision": "head", "start": 1, "end": 100,
+                    "path": f"branch_{branch_reads}.py", "revision": "head", "start": 1, "end": 100,
                 }
-            elif step == 6:
-                states = [json.loads(message["content"]) for message in payload["messages"]
-                          if message["role"] == "user" and message["content"].startswith("{")]
-                ledger = next(state for state in states if "retrieval_receipts" in state)
+                branch_reads += 1
+            elif phase == "fill":
                 receipt = next(item for item in ledger["retrieval_receipts"] if item["tool"] == "search_code")
                 assert receipt["arguments"]["revision"] == "base"
                 assert receipt["arguments"]["path"] == "a.py"
                 name, result = "recall_context", {"receipt_ref": receipt["receipt_ref"]}
                 recall_call_id = f"step-{len(reviews)}"
-            elif step == 7:
+                phase = "reread"
+            elif phase == "reread":
                 receipt = next(json.loads(message["content"]) for message in payload["messages"]
                                if message.get("tool_call_id") == recall_call_id)
                 assert receipt["original"]["result"]["source"] == "search_hint"
@@ -290,6 +292,7 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
                     "path": "branch_0.py", "revision": "head", "start": 1, "end": 100,
                 }
                 reread_call_id = f"step-{len(reviews)}"
+                phase = "finish"
             else:
                 receipt = next(json.loads(message["content"]) for message in payload["messages"]
                                if message.get("tool_call_id") == reread_call_id)
@@ -320,13 +323,15 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
         report = await ReviewOrchestrator(store, AgentRunner(model)).run(run.id, provider, lease)
     assert restored == ["query", "source"]
     assert checkpoint_calls >= 1
-    assert len(reviews) == 8 + checkpoint_calls
+    assert branch_reads >= 4
+    expected_reviews = 4 + branch_reads + checkpoint_calls
+    assert len(reviews) == expected_reviews
     assert report.status == "completed" and report.unresolved_unit_count == 1
     state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
     assert state["context_metrics"]["epoch"] >= 1
-    assert len(state["receipts"]) == 7 + checkpoint_calls
+    assert len(state["receipts"]) == expected_reviews - 1
     with sessions() as session:
-        assert len(list(session.scalars(select(ReviewRequestOrm)))) == report.usage["model_calls"] == 9 + checkpoint_calls
+        assert len(list(session.scalars(select(ReviewRequestOrm)))) == report.usage["model_calls"] == expected_reviews + 1
 
 
 @pytest.mark.parametrize("unfinished", [False, True])
@@ -804,7 +809,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
                 name, result = "read_file", {"path": "a.py", "revision": "head",
                                              "start": start, "end": start + 1}
                 if boundary == "loop_invalid" or (boundary == "arguments" and len(review_requests) == 1):
-                    result.pop("end")
+                    result.pop("path")
                 elif boundary == "loop_unknown":
                     name, result = "unregistered_tool", {}
                 elif boundary == "line_arguments" and len(review_requests) == 1:
@@ -850,7 +855,7 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         assert report.units[0].tool_calls == 2
         error = next(message for message in review_requests[1]["messages"] if message["role"] == "tool")
         assert json.loads(error["content"])["error"] == "invalid_tool_arguments"
-        assert "end" in json.loads(error["content"])["required_arguments"]
+        assert "path" in json.loads(error["content"])["required_arguments"]
         assert "read_file" in {tool["function"]["name"] for tool in review_requests[-1]["tools"]}
     elif boundary == "line_arguments":
         error = next(message for message in review_requests[1]["messages"]

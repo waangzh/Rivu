@@ -1,6 +1,8 @@
 """Run-local inventory and query-driven use of the existing isolated parsers."""
 
 import asyncio
+import json
+import subprocess
 import threading
 from pathlib import Path
 
@@ -11,10 +13,15 @@ from app.review.evidence import SourceReadError
 from app.review.tool_scope import (
     ReviewPathPolicyError, _validate_repository_relative_path, is_sensitive_repository_path,
 )
+from app.tools.git_tool import call_with_control
 from app.tools.repo_indexer import _scan_imports
 from app.tools.repository_graph import (
     build_repository_graph, resolved_import_targets, reverse_import_hints,
 )
+
+
+_MAX_SYMBOL_FIELD_CHARS = 256
+_MAX_SYMBOL_PAGE_CHARS = 16_000
 
 
 class OnDemandIndex:
@@ -73,18 +80,195 @@ class OnDemandIndex:
             symbol = await asyncio.to_thread(self._symbol, path, name, side)
             return symbol.to_index_entry()
 
+    def _list_symbols(self, path, side="head", offset=0, limit=80):
+        if side not in {"head", "base"}:
+            raise SourceReadError("invalid_source_side")
+        if type(offset) is not int or offset < 0:
+            raise SourceReadError("invalid_source_range", next_action="Use a non-negative integer offset.")
+        if type(limit) is not int or not 1 <= limit <= 120:
+            raise SourceReadError("invalid_page_size", minimum=1, maximum=120,
+                                  next_action="Use an integer limit between 1 and 120.")
+        analysis = self._parse(path, side)
+        if analysis.level != AnalysisLevel.semantic:
+            raise SourceReadError("parser_unavailable", next_action="Read fixed lines with read_file.")
+        symbols = analysis.symbols
+        selected = []
+        index = offset
+        while index < len(symbols) and len(selected) < limit:
+            item = symbols[index]
+            name = item.name
+            name_truncated = False
+            if len(name) > _MAX_SYMBOL_FIELD_CHARS:
+                name = name[:_MAX_SYMBOL_FIELD_CHARS] + "..."
+                name_truncated = True
+            entry = {
+                "symbol": name,
+                "kind": item.kind,
+                "range": [item.start_line, item.end_line],
+            }
+            if item.symbol_id is not None:
+                if len(item.symbol_id) <= _MAX_SYMBOL_FIELD_CHARS and not name_truncated:
+                    entry["symbol_id"] = item.symbol_id
+                else:
+                    name_truncated = True
+            if item.container:
+                if len(item.container) > _MAX_SYMBOL_FIELD_CHARS:
+                    entry["container"] = item.container[:_MAX_SYMBOL_FIELD_CHARS] + "..."
+                    name_truncated = True
+                else:
+                    entry["container"] = item.container
+            if name_truncated:
+                entry["name_truncated"] = True
+            if len(json.dumps(selected + [entry], ensure_ascii=False)) > _MAX_SYMBOL_PAGE_CHARS:
+                if not selected:
+                    entry = {
+                        "symbol": entry["symbol"][:64] + "...",
+                        "kind": str(item.kind)[:64],
+                        "range": [item.start_line, item.end_line],
+                        "name_truncated": True,
+                    }
+                    if len(json.dumps([entry], ensure_ascii=False)) > _MAX_SYMBOL_PAGE_CHARS:
+                        raise SourceReadError("source_output_too_large")
+                else:
+                    break
+            selected.append(entry)
+            index += 1
+        next_offset = index if index < len(symbols) else None
+        return {
+            "ok": True,
+            "source": "symbol_outline_hint",
+            "path": path,
+            "revision": side,
+            "parser_id": analysis.parser_id,
+            "symbols": selected,
+            "total_symbols": len(symbols),
+            "offset": offset,
+            "next_offset": next_offset,
+            "has_more": next_offset is not None,
+            "truncated": any(item.get("name_truncated") for item in selected),
+        }
+
+    async def list_symbols(self, path, side="head", offset=0, limit=80):
+        async with self._lock:
+            return await asyncio.to_thread(self._list_symbols, path, side, offset, limit)
+
+    def _prefetch_scan_window(self, window, remaining):
+        """按候选顺序在同份 8 MiB 预算内预取未缓存 HEAD 源码，不扩大本次扫描窗口。"""
+        git = getattr(self.evidence, "git", None)
+        batch_reader = getattr(git, "get_files_content_at_revision", None)
+        if batch_reader is None or not window:
+            return {}, {}
+        sha = self.evidence.snapshot.head_sha
+        need_meta = [
+            path for path in window
+            if path not in self.scanned
+            and path in self.evidence.allowed_paths
+            and not is_sensitive_repository_path(path)
+            and self.evidence._cache_get((sha, path)) is None
+        ]
+        entries = {}
+        if need_meta:
+            try:
+                entries = git.get_tree_entries(self.evidence.repo_path, sha, need_meta)
+            except (ValueError, OSError):
+                return {}, {}
+        budget = remaining
+        to_fetch, valid_entries = [], {}
+        for path in window:
+            if budget <= 0:
+                break
+            cached_scan = self.scanned.get(path)
+            if cached_scan is not None:
+                size = cached_scan[0]
+                if size > budget:
+                    break
+                budget -= size
+                continue
+            if path not in self.evidence.allowed_paths or is_sensitive_repository_path(path):
+                continue
+            cached_source = self.evidence._cache_get((sha, path))
+            if cached_source is not None:
+                entry, content = cached_source
+                try:
+                    self.evidence._check_entry(entry)
+                    self.evidence._check_worktree(path)
+                except (ValueError, OSError):
+                    continue
+                size = len(content.encode("utf-8"))
+                if size > budget:
+                    break
+                budget -= size
+                continue
+            entry = entries.get(path)
+            try:
+                self.evidence._check_entry(entry)
+                self.evidence._check_worktree(path)
+            except (ValueError, OSError):
+                continue
+            size = entry["size"] or 0
+            if size > budget:
+                break
+            to_fetch.append(path)
+            valid_entries[path] = entry
+            budget -= size
+        if not to_fetch:
+            return {}, entries
+        try:
+            fetched = batch_reader(
+                self.evidence.repo_path, sha, to_fetch, max_file_bytes=self.evidence.max_file_bytes,
+            )
+        except (ValueError, OSError):
+            return {}, entries
+        for path, content in fetched.items():
+            self.evidence._cache_put((sha, path), valid_entries[path], content)
+        return fetched, entries
+
     def _scan_scope(self, candidates):
         remaining = 8 * 1024 * 1024
+        window = candidates[:512]
+        sha = self.evidence.snapshot.head_sha
+        git = getattr(self.evidence, "git", None)
+        prefetched, entries = self._prefetch_scan_window(window, remaining)
         scanned = {}
-        for candidate in candidates[:512]:
+        for candidate in window:
             if remaining <= 0:
                 break
             cached = self.scanned.get(candidate)
             if cached is None:
-                try:
-                    _, content = self.evidence._source(candidate, "head")
-                except (ValueError, OSError):
-                    continue
+                content = prefetched.get(candidate)
+                if content is None:
+                    entry = entries.get(candidate)
+                    if entry is not None:
+                        try:
+                            self.evidence._check_entry(entry)
+                            self.evidence._check_worktree(candidate)
+                        except (ValueError, OSError):
+                            continue
+                        if (entry.get("size") or 0) > remaining:
+                            # 先区分不可读 blob（如二进制/非 UTF-8）与真正耗尽预算的文本文件。
+                            cached_source = self.evidence._cache_get((sha, candidate))
+                            if cached_source is not None:
+                                if len(cached_source[1].encode("utf-8")) > remaining:
+                                    break
+                                content = cached_source[1]
+                            elif git is not None:
+                                try:
+                                    probe = call_with_control(
+                                        git.get_file_content_at_revision,
+                                        self.evidence.repo_path, sha, candidate,
+                                    )
+                                except (ValueError, OSError, subprocess.SubprocessError):
+                                    continue
+                                if probe is None:
+                                    continue
+                                if len(probe.encode("utf-8")) > remaining:
+                                    break
+                                content = probe
+                    if content is None:
+                        try:
+                            _, content = self.evidence._source(candidate, "head")
+                        except (ValueError, OSError):
+                            continue
                 encoded = content.encode("utf-8")
                 size = len(encoded)
                 if size > remaining:

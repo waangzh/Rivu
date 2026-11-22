@@ -221,7 +221,7 @@ class WorkingContext:
             {"receipt_ref": handle, "tool": item["tool"], "arguments": item["arguments"],
              **item["summary"]}
             for handle, item in context.receipts.items()
-            if item["tool"] in {"search_code", "find_relations", "find_files"}
+            if item["tool"] in {"search_code", "find_relations", "find_files", "list_dir", "list_symbols"}
         ]
         read_history = {}
         for handle, receipt in context.receipts.items():

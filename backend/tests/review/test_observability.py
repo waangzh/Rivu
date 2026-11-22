@@ -356,7 +356,7 @@ def test_registered_tool_names_are_preserved(registered_tool):
 @pytest.mark.parametrize("reason", [
     "invalid_cursor", "invalid_source_range", "invalid_source_side", "source_output_too_large",
     "source_range_out_of_bounds", "source_range_too_large", "source_too_large", "source_unavailable",
-    "candidate_limit",
+    "candidate_limit", "invalid_regex", "invalid_depth", "invalid_context_lines",
 ])
 def test_host_read_and_candidate_limit_reasons_are_preserved(reason):
     assert obs.safe_fields({"reason": reason}) == {"reason": reason}

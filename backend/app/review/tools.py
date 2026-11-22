@@ -13,7 +13,7 @@ from pydantic import Field
 from app.review.context import AgentContext, InvestigationState, TOOL_LOOP_WARNING
 from app.review.domain import CandidateInput
 from app.review.findings import admit_candidate, candidate_summary
-from app.review.retrieval import find_paths, search
+from app.review.retrieval import find_paths, list_directory, search
 from app.review.evidence import SourceReadError
 from app.review.observability import event, stage
 from app.review.tool_scope import is_sensitive_repository_path
@@ -70,7 +70,8 @@ def bounded(function):
                                 has_more=result.get("has_more"),
                                 **{f"{name}_count": len(result[plural])
                                    for name, plural in (("match", "matches"), ("path", "paths"),
-                                                        ("edge", "edges"))
+                                                        ("edge", "edges"), ("entry", "entries"),
+                                                        ("symbol", "symbols"))
                                    if isinstance(result.get(plural), list)})
                 observation.content(outputs=result)
         except SourceReadError as exc:
@@ -111,16 +112,14 @@ def bounded(function):
 
 @tool
 @bounded
-async def read_file(path: str, revision: Literal["base", "head"],
-                    start: Annotated[int, Field(ge=1, strict=True)],
-                    end: Annotated[int, Field(ge=1, strict=True)] | None,
-                    runtime: ToolRuntime[AgentContext]) -> dict:
-    """Read fixed source lines using start/end, not start_line/end_line.
+async def read_file(path: str, runtime: ToolRuntime[AgentContext],
+                    revision: Literal["base", "head"] = "head",
+                    start: Annotated[int, Field(ge=1, strict=True)] = 1,
+                    end: Annotated[int, Field(ge=1, strict=True)] | None = None) -> dict:
+    """Read fixed lines using start/end (defaults: head, start=1, end=null).
 
-    An integer end requests exact 1-based inclusive lines, at most 240.
-    Pass end=null to read whole lines up to EOF or the line/size limit.
-    The source receipt gives the actual range. Continue at next_start if present.
-    For a named function, prefer read_symbol.
+    Integer end reads exact inclusive lines (max 240); end=null reads a bounded page.
+    Continue at next_start if present. Prefer read_symbol for a named symbol.
     """
     return await runtime.context.read(path, start, end, revision)
 
@@ -142,17 +141,24 @@ async def search_code(query: str, runtime: ToolRuntime[AgentContext], path: str 
                       glob: str = "", revision: Literal["base", "head"] = "head",
                       cursor: str = "",
                       limit: Annotated[int, Field(ge=1, le=40, strict=True)] = 12,
-                      exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None) -> dict:
-    """Bounded literal search. Results are hints, read source before citing them.
+                      exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None,
+                      ignore_case: bool = False,
+                      word_boundary: bool = False,
+                      regex: bool = False,
+                      context_lines: Annotated[int, Field(ge=0, le=3, strict=True)] = 0,
+                      files_only: bool = False) -> dict:
+    """Bounded code search (hints only; read source before citing).
 
-    Glob * and ? stay within one path component; ** spans directories.
-    Patterns with / are repository-relative; bare *.ts matches basenames anywhere.
-    Exclude tests with exclude_globs=["**/__tests__/**"], never a leading !.
-    limit is 1..40. Continue next_cursor with identical query/path/glob/revision
-    and exclude_globs; omit cursor if filters change. An empty partial page is not absence.
+    Literal by default; optional ignore_case, word_boundary, POSIX ERE regex,
+    context_lines (0..3), or files_only. Use exclude_globs (no leading !).
+    Keep all filters identical when continuing next_cursor.
     """
-    return await search(runtime.context, query, path, glob, revision, cursor, limit,
-                        exclude_globs=exclude_globs)
+    return await search(
+        runtime.context, query, path, glob, revision, cursor, limit,
+        exclude_globs=exclude_globs, ignore_case=ignore_case,
+        word_boundary=word_boundary, regex=regex,
+        context_lines=context_lines, files_only=files_only,
+    )
 
 
 @tool
@@ -161,12 +167,20 @@ async def find_files(runtime: ToolRuntime[AgentContext], query: str = "", path: 
                      glob: str = "", cursor: str = "",
                      limit: Annotated[int, Field(ge=1, le=80, strict=True)] = 80,
                      exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None) -> dict:
-    """Page tracked paths, limit 1..80, with the same glob rules as search_code.
-
-    Use exclude_globs for exclusions, never !. Keep all filters for next_cursor.
-    scope_empty means no authorized paths satisfy the filters.
-    """
+    """Page tracked paths (limit 1..80; same glob and exclude_globs rules as search_code)."""
     return await asyncio.to_thread(find_paths, runtime.context, query, path, glob, cursor, limit,
+                                   exclude_globs=exclude_globs)
+
+
+@tool
+@bounded
+async def list_dir(runtime: ToolRuntime[AgentContext], path: str = "",
+                   depth: Annotated[int, Field(ge=1, le=3, strict=True)] = 1,
+                   cursor: str = "",
+                   limit: Annotated[int, Field(ge=1, le=80, strict=True)] = 80,
+                   exclude_globs: Annotated[list[str] | None, Field(max_length=16)] = None) -> dict:
+    """List authorized subdirectories (with file_count) and files under path up to depth 1..3."""
+    return await asyncio.to_thread(list_directory, runtime.context, path, depth, cursor, limit,
                                    exclude_globs=exclude_globs)
 
 
@@ -275,6 +289,16 @@ async def read_symbol(path: str, symbol: str, runtime: ToolRuntime[AgentContext]
 
 @tool
 @bounded
+async def list_symbols(path: str, runtime: ToolRuntime[AgentContext],
+                       revision: Literal["base", "head"] = "head",
+                       offset: Annotated[int, Field(ge=0, strict=True)] = 0,
+                       limit: Annotated[int, Field(ge=1, le=120, strict=True)] = 80) -> dict:
+    """List parsed symbol names, kinds and line ranges for one fixed file (hints only)."""
+    return await runtime.context.provider.index.list_symbols(path, revision, offset, limit)
+
+
+@tool
+@bounded
 async def find_relations(path: str, symbol: str, runtime: ToolRuntime[AgentContext],
                          direction: Literal["in", "out", "both"] = "both", scope: str = "") -> dict:
     """Find bounded static HEAD call hints for callers (in) or callees (out).
@@ -286,4 +310,7 @@ async def find_relations(path: str, symbol: str, runtime: ToolRuntime[AgentConte
     return await runtime.context.provider.index.relations(path, symbol, direction, scope)
 
 
-READ_TOOLS = [read_file, read_diff, search_code, find_files, read_symbol, find_relations]
+READ_TOOLS = [
+    read_file, read_diff, search_code, find_files, list_dir,
+    read_symbol, list_symbols, find_relations,
+]

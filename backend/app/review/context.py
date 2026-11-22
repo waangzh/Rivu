@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -53,6 +54,7 @@ class AgentContext:
     pending_hunks: dict[str, str] = field(default_factory=dict)
     material_failures: dict[str, str] = field(default_factory=dict)
     cursors: dict[str, dict] = field(default_factory=dict)
+    search_windows: OrderedDict[str, dict] = field(default_factory=OrderedDict)
     tool_calls: int = 0
     model_calls: int = 0
     error_diagnostic: AgentErrorDiagnostic | None = None
@@ -263,9 +265,9 @@ class AgentContext:
             if message.type == "tool" and isinstance(payload, dict):
                 fingerprint = identity([message.name, payload])
                 previous = tool_results.get(fingerprint)
-                if previous and any(key in payload for key in ("matches", "edges", "paths", "member")):
+                if previous and any(key in payload for key in ("matches", "edges", "paths", "entries", "symbols", "member")):
                     payload = {key: value for key, value in payload.items()
-                               if key not in {"matches", "edges", "paths", "member"}}
+                               if key not in {"matches", "edges", "paths", "entries", "symbols", "member"}}
                     payload["same_result_as_tool_call"] = previous
                     payload["content_omitted"] = True
                     changed = True
@@ -290,11 +292,11 @@ class AgentContext:
         handle = f"R{len(self.receipts) + 1}"
         result = payload["result"]
         summary = {key: value for key, value in result.items() if key not in {
-            "content", "source", "sources", "matches", "edges", "paths", "member",
-            "investigation", "original",
+            "content", "source", "sources", "matches", "edges", "paths", "entries", "symbols",
+            "member", "investigation", "original",
         }}
         summary.update({f"{key}_count": len(result[key])
-                        for key in ("matches", "edges", "paths") if key in result})
+                        for key in ("matches", "edges", "paths", "entries", "symbols") if key in result})
         self.receipts[handle] = {
             "uri": artifact.uri, "sha256": artifact.sha256,
             "size_bytes": artifact.size_bytes,

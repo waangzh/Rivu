@@ -8,7 +8,10 @@ import pytest
 from app.models.pr_discussion import DiscussionPolicy
 from app.review.context import AgentContext
 from app.review.index import OnDemandIndex
-from app.review.tools import find_relations, read_diff, read_discussion, read_file, read_symbol
+from app.review.tools import (
+    find_relations, list_dir, list_symbols, read_diff, read_discussion, read_file,
+    read_symbol, search_code,
+)
 from app.services.review.review_service import ReviewService
 from app.tools.github.github_discussions import GitHubDiscussionReader
 from tests.review.vnext_helpers import setup_source_run
@@ -266,3 +269,151 @@ async def test_frozen_truncated_rest_snapshot_corrects_legacy_thread_flag(tmp_pa
     result = await service._discussions(run, lease)
     assert [thread["complete"] for thread in result["threads"]] == [False, True, True]
     assert json.loads(provider.evidence.artifacts.read_text(artifact.uri)) == frozen
+
+
+async def test_read_file_defaults_to_bounded_head_page(tmp_path):
+    store, run, _, provider, _ = setup_source_run(tmp_path, head_source="line1\nline2\nline3\n")
+    runtime = runtime_for(store, run, provider)
+    result = await read_file.coroutine(path="a.py", runtime=runtime)
+    assert result["ok"] is True
+    assert result["content"] == "line1\nline2\nline3\n"
+    assert result["source"]["side"] == "head"
+    assert result["source"]["start_line"] == 1
+    assert result["source"]["end_line"] == 3
+    assert result["truncated"] is False
+
+
+async def test_list_dir_and_list_symbols_return_bounded_hints_without_issuing_source_refs(tmp_path):
+    source = (
+        "class Service:\n"
+        "    def first(self):\n"
+        "        return 1\n\n"
+        "    def second(self):\n"
+        "        return 2\n\n"
+        "def helper():\n"
+        "    return 3\n"
+    )
+    store, run, _, provider, _ = setup_source_run(
+        tmp_path, head_source=source,
+        support_sources={"pkg/mod.py": "def run():\n    return 1\n", "notes.txt": "plain\n"},
+    )
+    provider.index = OnDemandIndex(provider.evidence)
+    runtime = runtime_for(store, run, provider)
+
+    listing = await list_dir.coroutine(runtime=runtime)
+    assert listing["ok"] is True and listing["source"] == "dir_hint"
+    assert "source_ref" not in listing
+    assert {"path": "pkg", "kind": "dir", "file_count": 1} in listing["entries"]
+    assert {"path": "a.py", "kind": "file"} in listing["entries"]
+
+    first_page = await list_symbols.coroutine(path="a.py", limit=2, runtime=runtime)
+    assert first_page["ok"] is True and first_page["source"] == "symbol_outline_hint"
+    assert "source_ref" not in first_page
+    assert first_page["has_more"] is True and first_page["next_offset"] == 2
+    assert len(first_page["symbols"]) == 2
+    second_page = await list_symbols.coroutine(
+        path="a.py", offset=first_page["next_offset"], limit=10, runtime=runtime)
+    assert second_page["ok"] is True and second_page["has_more"] is False
+    names = [item["symbol"] for item in [*first_page["symbols"], *second_page["symbols"]]]
+    assert "helper" in names and any("first" in name for name in names)
+
+    unsupported = await list_symbols.coroutine(path="notes.txt", runtime=runtime)
+    assert unsupported["ok"] is False and unsupported["error"] == "parser_unavailable"
+
+    bad_regex = await search_code.coroutine(query="(?P<x>a)", regex=True, runtime=runtime)
+    assert bad_regex["ok"] is False and bad_regex["error"] == "invalid_regex"
+    assert runtime.context.pending == {}
+
+
+async def test_list_symbols_caps_oversized_first_symbol_and_keeps_range(tmp_path):
+    long_name = "fn_" + "a" * 18_000
+    source = f"def {long_name}():\n    return 1\n\ndef normal():\n    return 2\n"
+    store, run, _, provider, _ = setup_source_run(tmp_path, head_source=source)
+    provider.index = OnDemandIndex(provider.evidence)
+    runtime = runtime_for(store, run, provider)
+
+    result = await list_symbols.coroutine(path="a.py", runtime=runtime)
+    assert result["ok"] is True
+    assert result["truncated"] is True
+    assert len(json.dumps(result, ensure_ascii=False)) < 16_000
+    first = result["symbols"][0]
+    assert first["name_truncated"] is True
+    assert "symbol_id" not in first
+    assert first["range"] == [1, 2]
+    assert len(first["symbol"]) < 300
+    assert any(item["symbol"] == "normal" and item["range"] == [4, 5] for item in result["symbols"])
+
+
+async def test_scan_scope_prefetch_deducts_already_scanned_budget(tmp_path, monkeypatch):
+    store, run, _, provider, _ = setup_source_run(
+        tmp_path,
+        head_source="def target():\n    return 1\n",
+        support_sources={
+            "pkg/01_cached.py": "import a\n",
+            "pkg/02_beyond.py": "import a\n" + "x" * 1024 + "\n",
+        },
+    )
+    index = OnDemandIndex(provider.evidence)
+    # Simulate an already-scanned prefix that consumes almost the full 8 MiB budget.
+    index.scanned["pkg/01_cached.py"] = (8 * 1024 * 1024 - 16, [])
+    fetched_batches = []
+    original_batch = provider.evidence.git.get_files_content_at_revision
+
+    def spy_batch(repo_path, revision, paths, **kwargs):
+        fetched_batches.append(list(paths))
+        return original_batch(repo_path, revision, paths, **kwargs)
+
+    monkeypatch.setattr(provider.evidence.git, "get_files_content_at_revision", spy_batch)
+    scanned = index._scan_scope(["pkg/01_cached.py", "pkg/02_beyond.py"])
+    assert list(scanned) == ["pkg/01_cached.py"]
+    assert fetched_batches == []
+    assert provider.evidence._cache_get((run.snapshot.head_sha, "pkg/02_beyond.py")) is None
+
+
+async def test_scan_scope_skips_policy_oversized_file_and_scans_later_callers(tmp_path):
+    store, run, _, provider, _ = setup_source_run(
+        tmp_path,
+        head_source="def target():\n    return 1\n",
+        support_sources={
+            "pkg/01_too_large.py": "import a\n" + "x" * 2000 + "\n",
+            "pkg/02_caller.py": "from a import target\ndef call():\n    return target()\n",
+        },
+    )
+    provider.evidence.max_file_bytes = 512
+    provider.index = OnDemandIndex(provider.evidence)
+    # Even if the rejected file's size exceeds remaining scan budget, policy-ineligible files must be skipped.
+    provider.index.scanned["pkg/00_prefix.py"] = (8 * 1024 * 1024 - 1024, [])
+    scanned = provider.index._scan_scope(
+        ["pkg/00_prefix.py", "pkg/01_too_large.py", "pkg/02_caller.py"]
+    )
+    assert "pkg/01_too_large.py" not in scanned
+    assert "pkg/02_caller.py" in scanned
+
+    runtime = runtime_for(store, run, provider)
+    relations = await find_relations.coroutine(path="a.py", symbol="target", direction="in", runtime=runtime)
+    assert relations["ok"] is True
+    assert any(edge["source_file"] == "pkg/02_caller.py" for edge in relations["edges"])
+
+
+async def test_scan_scope_skips_unreadable_binary_blob_exceeding_remaining_budget(tmp_path):
+    store, run, _, provider, _ = setup_source_run(
+        tmp_path,
+        head_source="def target():\n    return 1\n",
+        support_sources={
+            "pkg/01_binary.py": "import a\x00" + "x" * 2048 + "\n",
+            "pkg/02_caller.py": "from a import target\ndef call():\n    return target()\n",
+        },
+    )
+    provider.index = OnDemandIndex(provider.evidence)
+    # Binary file fits max_file_bytes (512 KB) yet exceeds remaining scan budget (1024 bytes).
+    provider.index.scanned["pkg/00_prefix.py"] = (8 * 1024 * 1024 - 1024, [])
+    scanned = provider.index._scan_scope(
+        ["pkg/00_prefix.py", "pkg/01_binary.py", "pkg/02_caller.py"]
+    )
+    assert "pkg/01_binary.py" not in scanned
+    assert "pkg/02_caller.py" in scanned
+
+    runtime = runtime_for(store, run, provider)
+    relations = await find_relations.coroutine(path="a.py", symbol="target", direction="in", runtime=runtime)
+    assert relations["ok"] is True
+    assert any(edge["source_file"] == "pkg/02_caller.py" for edge in relations["edges"])

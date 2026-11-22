@@ -1,5 +1,6 @@
 ﻿"""Git 操作工具 —— 克隆仓库、生成 diff、读取文件内容。"""
 
+import inspect
 import logging
 import queue
 import re
@@ -27,6 +28,53 @@ logger = logging.getLogger("Rivu.GitTool")
 DIFF_POLICY = "merge_base"
 DIFF_POLICY_VERSION = "merge-base-v2"
 DIFF_CONTEXT_LINES = 3
+_MAX_COMMAND_CHARS = 16_000
+_MAX_PATH_BATCH = 256
+
+
+def _argv_chars(argv: list[str]) -> int:
+    """估算跨平台命令行长度，兼容 Windows CreateProcessW 的 32,767 字符上限。"""
+    return sum(len(arg) + arg.count('"') + arg.count("\\") + 3 for arg in argv)
+
+
+def call_with_control(fn, *args, deadline: float | None = None,
+                      cancel_event: threading.Event | None = None, **kwargs):
+    """向支持的可调用对象传递截止时间与取消信号，同时兼容旧签名测试桩。"""
+    extra = {}
+    if deadline is not None or cancel_event is not None:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            params = {}
+        has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if deadline is not None and (has_var_kw or "deadline" in params):
+            extra["deadline"] = deadline
+        if cancel_event is not None and (has_var_kw or "cancel_event" in params):
+            extra["cancel_event"] = cancel_event
+    return fn(*args, **kwargs, **extra)
+
+
+def _iter_path_batches(
+    base_argv: list[str],
+    paths: list[str],
+    *,
+    max_paths: int = _MAX_PATH_BATCH,
+    max_command_chars: int = _MAX_COMMAND_CHARS,
+):
+    """按参数数量与编码后命令行总长度拆分路径批次。"""
+    base_len = _argv_chars(base_argv)
+    batch: list[str] = []
+    current_len = base_len
+    for path in paths:
+        arg_len = len(path) + path.count('"') + path.count("\\") + 3
+        if batch and (len(batch) >= max_paths or current_len + arg_len > max_command_chars):
+            yield batch
+            batch = []
+            current_len = base_len
+        batch.append(path)
+        current_len += arg_len
+    if batch:
+        yield batch
 
 _GIT_PROGRESS_RE = re.compile(
     r"(?:remote:\s*)?"
@@ -198,7 +246,15 @@ class GitTool:
                          "--name-only", "-z", older, newer, "--"])
         return set(filter(None, raw.split("\0")))
 
-    def get_tree_entries(self, repo_path: str | Path, revision: str, paths: list[str]) -> dict:
+    def get_tree_entries(
+        self,
+        repo_path: str | Path,
+        revision: str,
+        paths: list[str],
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         """只读固定 tree：literal pathspec、NUL 分隔、完整 object ID，不访问工作树文件。"""
         from app.models.review import FileChangeSide
         from app.review.tool_scope import is_sensitive_repository_change
@@ -210,46 +266,287 @@ class GitTool:
         if any(is_sensitive_repository_change(path) for path in selected):
             raise ValueError("sensitive tree evidence path")
         entries = {}
-        for offset in range(0, len(selected), 32):
-            batch = selected[offset:offset + 32]
-            raw = self._run([self._git, "--literal-pathspecs", "-C", str(repo_dir), "ls-tree",
-                "--full-tree", "-l", "-z", revision, "--", *batch])
+        base_argv = [
+            self._git, "--literal-pathspecs", "-C", str(repo_dir), "ls-tree",
+            "--full-tree", "-l", "-z", revision, "--",
+        ]
+        for batch in _iter_path_batches(base_argv, selected):
+            raw = self._run([*base_argv, *batch], cancel_event=cancel_event, deadline=deadline)
+            batch_set = set(batch)
             for entry in raw.split("\0"):
                 if not entry:
                     continue
                 fields, path = entry.split("\t", 1)
                 mode, kind, identity, size = fields.split()
-                if path in batch and kind in {"blob", "commit"}:
+                if path in batch_set and kind in {"blob", "commit"}:
                     entries[path] = {"blob_id": identity, "mode": mode,
                         "size": int(size) if size != "-" else None}
         return entries
 
     def get_file_content_at_revision(
-        self, repo_path: str | Path, revision: str, file_path: str
+        self,
+        repo_path: str | Path,
+        revision: str,
+        file_path: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str | None:
         """读取服务端选定 revision 的文件，不切换工作树。"""
         repo_dir = self._validate_worktree(repo_path)
         _normalized_commit_sha(revision, "source revision")
         from app.core.paths import validate_repo_relative_path
         validate_repo_relative_path(file_path)
-        completed = subprocess.run(
+        return_code, stdout, _, _ = self._run_process_bytes(
             [self._git, "-C", str(repo_dir), "show", f"{revision}:{file_path}"],
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        if return_code != 0 or b"\x00" in stdout:
+            return None
+        try:
+            return stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    def get_files_content_at_revision(
+        self,
+        repo_path: str | Path,
+        revision: str,
+        paths: list[str],
+        *,
+        max_file_bytes: int | None = None,
+    ) -> dict[str, str]:
+        """通过 git cat-file --batch 单进程批量读取不可变 blob，跳过二进制与超限文件。"""
+        repo_dir = self._validate_worktree(repo_path)
+        sha = _normalized_commit_sha(revision, "source revision")
+        from app.core.paths import validate_repo_relative_path
+        from app.review.tool_scope import is_sensitive_repository_path
+
+        selected = []
+        seen = set()
+        for path in paths:
+            normalized = validate_repo_relative_path(path)
+            if "\n" in normalized or "\r" in normalized or is_sensitive_repository_path(normalized):
+                raise ValueError("invalid_batch_read_scope")
+            if normalized not in seen:
+                seen.add(normalized)
+                selected.append(normalized)
+        if not selected:
+            return {}
+        request = "".join(f"{sha}:{path}\n" for path in selected).encode("utf-8")
+        completed = subprocess.run(
+            [self._git, "-C", str(repo_dir), "cat-file", "--batch"],
+            input=request,
             check=False,
             capture_output=True,
             timeout=self._command_timeout_seconds,
             env=git_safety_environment(),
         )
-        if completed.returncode != 0 or b"\x00" in completed.stdout:
-            return None
-        try:
-            return completed.stdout.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
+        if completed.returncode != 0:
+            return {}
+        data = completed.stdout
+        pos, total = 0, len(data)
+        results: dict[str, str] = {}
+        for path in selected:
+            newline = data.find(b"\n", pos)
+            if newline == -1:
+                break
+            header = data[pos:newline]
+            pos = newline + 1
+            if header.endswith(b" missing") or header.endswith(b" ambiguous"):
+                continue
+            parts = header.split()
+            if len(parts) != 3:
+                break
+            kind = parts[1]
+            try:
+                size = int(parts[2])
+            except ValueError:
+                break
+            if size < 0 or pos + size > total:
+                break
+            body = data[pos:pos + size]
+            pos += size
+            if pos < total and data[pos:pos + 1] == b"\n":
+                pos += 1
+            if kind != b"blob":
+                continue
+            if max_file_bytes is not None and size > max_file_bytes:
+                continue
+            if b"\x00" in body:
+                continue
+            try:
+                results[path] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return results
+
+    def _run_process_bytes(
+        self,
+        command: list[str],
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+        on_stdout_chunk: Callable[[bytes], bool | None] | None = None,
+    ) -> tuple[int, bytes, bytes, bool]:
+        """执行可取消、有严格截止期限与有界队列的 Git 子进程。"""
+        if cancel_event is not None and cancel_event.is_set():
+            raise GitToolCancelled("Git 操作已取消")
+        started_at = time.monotonic()
+        if self._command_timeout_seconds > 0:
+            command_deadline = started_at + self._command_timeout_seconds
+            deadline = min(deadline, command_deadline) if deadline is not None else command_deadline
+        if deadline is not None and started_at >= deadline:
+            raise subprocess.TimeoutExpired(command, max(0.0, deadline - started_at))
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=git_safety_environment(),
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        output_queue: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=64)
+        pump_stop = threading.Event()
+        readers = [
+            threading.Thread(
+                target=_pump_stream,
+                args=("stdout", process.stdout, output_queue, pump_stop),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_pump_stream,
+                args=("stderr", process.stderr, output_queue, pump_stop),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
+
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        remaining_streams = {"stdout", "stderr"}
+        timed_out = False
+        cancelled = False
+        stopped_early = False
+
+        while remaining_streams:
+            if not cancelled and not timed_out and not stopped_early:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    pump_stop.set()
+                    _terminate_process(process)
+                elif deadline is not None and time.monotonic() > deadline:
+                    timed_out = True
+                    pump_stop.set()
+                    _terminate_process(process)
+            try:
+                stream_name, chunk = output_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                remaining_streams.discard(stream_name)
+                continue
+            if stream_name == "stdout":
+                if cancelled or timed_out or stopped_early:
+                    continue
+                if on_stdout_chunk is not None:
+                    if on_stdout_chunk(chunk) is False:
+                        stopped_early = True
+                        pump_stop.set()
+                        _terminate_process(process)
+                else:
+                    stdout_chunks.append(chunk)
+            else:
+                if not (cancelled or timed_out or stopped_early) and len(stderr_chunks) < 64:
+                    stderr_chunks.append(chunk)
+
+        for reader in readers:
+            reader.join(timeout=1.0)
+        return_code = process.wait()
+        if cancelled or (cancel_event is not None and cancel_event.is_set()):
+            raise GitToolCancelled("Git 操作已取消")
+        if timed_out:
+            raise subprocess.TimeoutExpired(command, max(0.0, (deadline or started_at) - started_at))
+        return return_code, b"".join(stdout_chunks), b"".join(stderr_chunks), stopped_early
+
+    def _run_grep_bytes(
+        self,
+        command: list[str],
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+        on_stdout_chunk: Callable[[bytes], bool | None] | None = None,
+    ) -> tuple[int, bytes, bytes]:
+        return_code, stdout, stderr, stopped_early = self._run_process_bytes(
+            command,
+            deadline=deadline,
+            cancel_event=cancel_event,
+            on_stdout_chunk=on_stdout_chunk,
+        )
+        if stopped_early:
+            return 0, stdout, stderr
+        return return_code, stdout, stderr
+
+    @staticmethod
+    def _is_grep_regex_error(return_code: int, stderr: bytes) -> bool:
+        if return_code not in {2, 128}:
+            return False
+        text = stderr.decode("utf-8", errors="replace").lower()
+        return any(token in text for token in (
+            "-e option", "regular expression", "regex", "unmatched", "invalid", "trailing backslash",
+        ))
+
+    @staticmethod
+    def _effective_deadline(
+        deadline: float | None,
+        timeout_seconds: float | None,
+    ) -> float | None:
+        if timeout_seconds is not None and timeout_seconds > 0:
+            relative_deadline = time.monotonic() + timeout_seconds
+            return relative_deadline if deadline is None else min(deadline, relative_deadline)
+        return deadline
+
+    def _validate_grep_regex_on_empty_scope(
+        self,
+        repo_dir: Path,
+        revision: str,
+        flags: list[str],
+        query: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        # ".git" 不会存在于合法 Git 树中，可在扫描零文件时交由同一 git grep -E 校验语法。
+        return_code, _, stderr = self._run_grep_bytes(
+            [
+                self._git, "--literal-pathspecs", "-C", str(repo_dir), "grep",
+                *flags, "-e", query, revision, "--", ".git",
+            ],
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        if return_code not in {0, 1}:
+            if self._is_grep_regex_error(return_code, stderr):
+                raise ValueError("invalid_regex")
+            raise ValueError("snapshot_search_failed")
 
     def find_matching_paths(
-        self, repo_path: str | Path, revision: str, query: str, paths: list[str],
+        self,
+        repo_path: str | Path,
+        revision: str,
+        query: str,
+        paths: list[str],
+        *,
+        ignore_case: bool = False,
+        word_boundary: bool = False,
+        regex: bool = False,
+        timeout_seconds: float | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> set[str]:
-        """Search literal text in selected immutable blobs, without textconv or external grep."""
+        """Search text in selected immutable blobs, without textconv or external grep."""
         repo_dir = self._validate_worktree(repo_path)
         _normalized_commit_sha(revision, "search revision")
         from app.core.paths import validate_repo_relative_path
@@ -258,24 +555,214 @@ class GitTool:
         selected = sorted({validate_repo_relative_path(path) for path in paths})
         if not query or "\x00" in query or any(is_sensitive_repository_path(path) for path in selected):
             raise ValueError("invalid_search_scope")
+        flags = ["--no-ext-grep", "--no-textconv", "-I", "-E" if regex else "-F", "-l", "-z"]
+        if ignore_case:
+            flags.append("-i")
+        if word_boundary:
+            flags.append("-w")
+        effective_deadline = self._effective_deadline(deadline, timeout_seconds)
         if not selected:
+            if regex:
+                self._validate_grep_regex_on_empty_scope(
+                    repo_dir, revision, flags, query,
+                    deadline=effective_deadline, cancel_event=cancel_event,
+                )
             return set()
+        base_argv = [
+            self._git, "--literal-pathspecs", "-C", str(repo_dir), "grep",
+            *flags, "-e", query, revision, "--",
+        ]
         matches = set()
-        for offset in range(0, len(selected), 32):
-            completed = subprocess.run(
-                [self._git, "--literal-pathspecs", "-C", str(repo_dir), "grep",
-                 "--no-ext-grep", "--no-textconv", "-I", "-F", "-l", "-z",
-                 "-e", query, revision, "--", *selected[offset:offset + 32]],
-                capture_output=True, timeout=self._command_timeout_seconds,
-                env=git_safety_environment(),
+        prefix = revision + ":"
+        for batch in _iter_path_batches(base_argv, selected):
+            return_code, stdout, stderr = self._run_grep_bytes(
+                [*base_argv, *batch], deadline=effective_deadline, cancel_event=cancel_event,
             )
-            if completed.returncode not in {0, 1}:
+            if return_code not in {0, 1}:
+                if regex and self._is_grep_regex_error(return_code, stderr):
+                    raise ValueError("invalid_regex")
                 raise ValueError("snapshot_search_failed")
-            prefix = revision + ":"
-            for item in completed.stdout.decode("utf-8").split("\0"):
-                if item.startswith(prefix) and item[len(prefix):] in selected:
+            batch_set = set(batch)
+            for item in stdout.decode("utf-8").split("\0"):
+                if item.startswith(prefix) and item[len(prefix):] in batch_set:
                     matches.add(item[len(prefix):])
         return matches
+
+    def _stream_grep_lines(
+        self,
+        repo_path: str | Path,
+        revision: str,
+        query: str,
+        paths: list[str],
+        *,
+        ignore_case: bool = False,
+        word_boundary: bool = False,
+        regex: bool = False,
+        timeout_seconds: float | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+        on_hit: Callable[[str, int], bool | None],
+    ) -> None:
+        repo_dir = self._validate_worktree(repo_path)
+        _normalized_commit_sha(revision, "search revision")
+        from app.core.paths import validate_repo_relative_path
+        from app.review.tool_scope import is_sensitive_repository_path
+
+        selected = sorted({validate_repo_relative_path(path) for path in paths})
+        if not query or "\x00" in query or any(is_sensitive_repository_path(path) for path in selected):
+            raise ValueError("invalid_search_scope")
+        flags = ["--no-ext-grep", "--no-textconv", "-I", "-E" if regex else "-F", "-n", "-z"]
+        if ignore_case:
+            flags.append("-i")
+        if word_boundary:
+            flags.append("-w")
+        effective_deadline = self._effective_deadline(deadline, timeout_seconds)
+        if not selected:
+            if regex:
+                self._validate_grep_regex_on_empty_scope(
+                    repo_dir, revision, flags, query,
+                    deadline=effective_deadline, cancel_event=cancel_event,
+                )
+            return
+        base_argv = [
+            self._git, "--literal-pathspecs", "-C", str(repo_dir), "grep",
+            *flags, "-e", query, revision, "--",
+        ]
+        prefix = (revision + ":").encode("utf-8")
+        for batch in _iter_path_batches(base_argv, selected):
+            batch_set = set(batch)
+            buffer = bytearray()
+            stopped_early = False
+
+            def drain_records(*, final: bool = False) -> bool:
+                nonlocal stopped_early
+                # 严格按 <rev>:<path>\0<line_no>\0<content>\n 解析，避免含换行符的路径被截断。
+                start = 0
+                total = len(buffer)
+                while start < total:
+                    first_nul = buffer.find(b"\x00", start)
+                    if first_nul == -1:
+                        break
+                    second_nul = buffer.find(b"\x00", first_nul + 1)
+                    if second_nul == -1:
+                        break
+                    newline = buffer.find(b"\n", second_nul + 1)
+                    if newline == -1:
+                        if not final:
+                            break
+                        end = total
+                    else:
+                        end = newline + 1
+                    header = bytes(buffer[start:first_nul])
+                    if header.startswith(prefix):
+                        try:
+                            rel_path = header[len(prefix):].decode("utf-8")
+                            line_no = int(bytes(buffer[first_nul + 1:second_nul]))
+                        except (UnicodeDecodeError, ValueError):
+                            rel_path, line_no = "", 0
+                        if rel_path in batch_set and line_no >= 1:
+                            if on_hit(rel_path, line_no) is False:
+                                stopped_early = True
+                                buffer.clear()
+                                return False
+                    start = end
+                if start:
+                    del buffer[:start]
+                return True
+
+            def on_chunk(chunk: bytes) -> bool:
+                if stopped_early:
+                    return False
+                buffer.extend(chunk)
+                return drain_records(final=False)
+
+            return_code, _, stderr = self._run_grep_bytes(
+                [*base_argv, *batch],
+                deadline=effective_deadline,
+                cancel_event=cancel_event,
+                on_stdout_chunk=on_chunk,
+            )
+            if not stopped_early:
+                drain_records(final=True)
+            if not stopped_early and return_code not in {0, 1}:
+                if regex and self._is_grep_regex_error(return_code, stderr):
+                    raise ValueError("invalid_regex")
+                raise ValueError("snapshot_search_failed")
+            if stopped_early:
+                return
+
+    def find_matching_lines(
+        self,
+        repo_path: str | Path,
+        revision: str,
+        query: str,
+        paths: list[str],
+        *,
+        ignore_case: bool = False,
+        word_boundary: bool = False,
+        regex: bool = False,
+        min_line: int = 1,
+        max_matches: int | None = None,
+        timeout_seconds: float | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, list[int]]:
+        """由 git grep 直接返回 1-based 命中行号，支持按页限制命中上限。"""
+        hit_lines: dict[str, list[int]] = {}
+        total_hits = 0
+
+        def on_hit(rel_path: str, line_no: int) -> bool:
+            nonlocal total_hits
+            if line_no < min_line:
+                return True
+            hit_lines.setdefault(rel_path, []).append(line_no)
+            total_hits += 1
+            if max_matches is not None and total_hits >= max_matches:
+                return False
+            return True
+
+        self._stream_grep_lines(
+            repo_path, revision, query, paths,
+            ignore_case=ignore_case, word_boundary=word_boundary, regex=regex,
+            timeout_seconds=timeout_seconds, deadline=deadline, cancel_event=cancel_event,
+            on_hit=on_hit,
+        )
+        return hit_lines
+
+    def summarize_matching_lines(
+        self,
+        repo_path: str | Path,
+        revision: str,
+        query: str,
+        paths: list[str],
+        *,
+        ignore_case: bool = False,
+        word_boundary: bool = False,
+        regex: bool = False,
+        timeout_seconds: float | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        """流式统计每个文件的首行命中与命中总数，内存仅随文件数增长。"""
+        summaries: dict[str, list[int]] = {}
+
+        def on_hit(rel_path: str, line_no: int) -> bool:
+            entry = summaries.get(rel_path)
+            if entry is None:
+                summaries[rel_path] = [line_no, 1]
+            else:
+                if line_no < entry[0]:
+                    entry[0] = line_no
+                entry[1] += 1
+            return True
+
+        self._stream_grep_lines(
+            repo_path, revision, query, paths,
+            ignore_case=ignore_case, word_boundary=word_boundary, regex=regex,
+            timeout_seconds=timeout_seconds, deadline=deadline, cancel_event=cancel_event,
+            on_hit=on_hit,
+        )
+        return {path: (entry[0], entry[1]) for path, entry in summaries.items()}
 
     def clone_and_diff(
         self,
@@ -779,14 +1266,20 @@ def _pump_stream(
     stream_name: str,
     stream: BinaryIO,
     output_queue: queue.Queue[tuple[str, bytes | None]],
+    stop_event: threading.Event | None = None,
 ) -> None:
     try:
         read = getattr(stream, "read1", stream.read)
-        while True:
+        while stop_event is None or not stop_event.is_set():
             chunk = read(8192)
             if not chunk:
                 break
-            output_queue.put((stream_name, chunk))
+            while stop_event is None or not stop_event.is_set():
+                try:
+                    output_queue.put((stream_name, chunk), timeout=0.05)
+                    break
+                except queue.Full:
+                    continue
     finally:
         output_queue.put((stream_name, None))
 

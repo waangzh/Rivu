@@ -29,9 +29,12 @@ establish dependency direction, a caller/test relationship, source evidence, or
 review coverage. Read the relevant fixed source before relying on any relationship.
 
 find_relations gives bounded HEAD call hints. For deletions, renames and old
-consumers, use search_code and read_file on BASE. If the initial packet includes
-discussion_directory_untrusted, use its indices with read_discussion only when
-the background helps resolve a concrete question.
+consumers, use search_code and read_file on BASE. Use list_dir to inspect module
+layout, list_symbols to outline a file before read_symbol, and search_code options
+(ignore_case, word_boundary, regex, context_lines, files_only) to narrow queries;
+all search, directory, outline and relation outputs remain hints, never source evidence.
+If the initial packet includes discussion_directory_untrusted, use its indices with
+read_discussion only when the background helps resolve a concrete question.
 
 Compaction retains working_set and recent complete tool rounds. Inventories refer
 to archived material, not evidence or coverage. Restore necessary source with

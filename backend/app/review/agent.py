@@ -128,14 +128,27 @@ class RequestGate(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         context = request.runtime.context
         await context.check_active()
-        result = await handler(request)
+        fields = request.tool.tool_call_schema.model_fields if request.tool else {}
+        unknown_args = (
+            sorted(set(request.tool_call["args"]) - set(fields))
+            if request.tool is not None and isinstance(request.tool_call.get("args"), dict)
+            else []
+        )
+        if unknown_args:
+            result = ToolMessage(
+                content="unknown_tool_arguments",
+                tool_call_id=request.tool_call["id"],
+                name=request.tool_call["name"],
+                status="error",
+            )
+        else:
+            result = await handler(request)
         # Schema and unknown-tool errors happen before @bounded executes.
         if isinstance(result, ToolMessage) and result.status == "error":
             limit = context.provider.run.configuration.options.limits.tool_calls
             reserve = min(3, max(0, limit // 4)) if context.work.kind != "verification" else 0
             if context.tool_calls < limit - reserve:
                 context.tool_calls += 1
-            fields = request.tool.tool_call_schema.model_fields if request.tool else {}
             error = ("tool_call_limit"
                      if context.tool_calls > context.provider.run.configuration.options.limits.tool_calls
                      else "invalid_tool_arguments" if request.tool else "unknown_tool")
@@ -145,6 +158,8 @@ class RequestGate(AgentMiddleware):
                 "next_action": "Correct the arguments using the tool schema. Do not repeat "
                                "the same rejected call. Return the required result tool if finished.",
             }
+            if unknown_args:
+                body["unknown_arguments"] = unknown_args
             if request.tool_call["name"] == "read_file":
                 corrections = {name: replacement for name, replacement in (
                     ("start_line", "start"), ("end_line", "end"))
@@ -157,7 +172,6 @@ class RequestGate(AgentMiddleware):
                                  name=request.tool_call["name"], status="error")
         await context.check_active()
         if isinstance(result, ToolMessage):
-            fields = request.tool.tool_call_schema.model_fields if request.tool else {}
             arguments = {name: field.get_default(call_default_factory=True)
                          for name, field in fields.items() if not field.is_required()}
             arguments.update(request.tool_call["args"])

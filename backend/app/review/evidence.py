@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import re
+import subprocess
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +19,7 @@ from app.review.tool_scope import (
     validate_repository_file,
 )
 from app.services.review.artifact_store import LocalArtifactStore
-from app.tools.git_tool import GitTool
+from app.tools.git_tool import GitTool, GitToolCancelled, call_with_control
 
 SOURCE_CACHE_MAX_BYTES = 64 * 1024 * 1024
 SOURCE_CACHE_MAX_ENTRIES = 512
@@ -119,19 +121,45 @@ class EvidenceService(EvidenceArchive):
         if (self.repo_path / path).exists() or (self.repo_path / path).is_symlink():
             validate_repository_file(self.repo_path, path, require_tracked_if_git=False)
 
-    def _source(self, path: str, side: str) -> tuple[str, str]:
+    @staticmethod
+    def _check_control(
+        deadline: float | None,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise GitToolCancelled("Git 操作已取消")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("git", 0)
+
+    def _source(
+        self,
+        path: str,
+        side: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[str, str]:
         _validate_repository_relative_path(path)
         if path not in self.allowed_paths or is_sensitive_repository_path(path):
             raise ReviewPathPolicyError("path_not_authorized")
         if side not in {"head", "base"}:
             raise SourceReadError("invalid_source_side")
+        self._check_control(deadline, cancel_event)
         sha = self.snapshot.head_sha if side == "head" else self.snapshot.base_sha
         cached = self._cache_get((sha, path))
         if cached is None:
-            entry = self._check_entry(
-                self.git.get_tree_entries(self.repo_path, sha, [path]).get(path))
+            entries = call_with_control(
+                self.git.get_tree_entries, self.repo_path, sha, [path],
+                deadline=deadline, cancel_event=cancel_event,
+            )
+            self._check_control(deadline, cancel_event)
+            entry = self._check_entry(entries.get(path))
             self._check_worktree(path)
-            source = self.git.get_file_content_at_revision(self.repo_path, sha, path)
+            source = call_with_control(
+                self.git.get_file_content_at_revision, self.repo_path, sha, path,
+                deadline=deadline, cancel_event=cancel_event,
+            )
+            self._check_control(deadline, cancel_event)
             if source is None:
                 raise SourceReadError("source_unavailable")
             self._cache_put((sha, path), entry, source)
@@ -139,6 +167,7 @@ class EvidenceService(EvidenceArchive):
         entry, source = cached
         self._check_entry(entry)
         self._check_worktree(path)
+        self._check_control(deadline, cancel_event)
         return sha, source
 
     def _read(self, path: str, start: int, end: int | None, side: str, allow_partial: bool = False) -> dict:
