@@ -9,6 +9,7 @@ import type {
   ReviewCreateRequest,
   ReviewPreviewResponse,
   ReviewProgress,
+  ReviewReportResponse,
   WorkItem,
 } from '../types/review';
 import type { ReviewCapabilities } from '../types/reviewPlan';
@@ -215,7 +216,7 @@ export const getFindings = (id: string, signal?: AbortSignal) =>
     report_version: string | null;
   }>(reviewPath(id, '/findings'), { signal });
 export const getReport = (id: string, signal?: AbortSignal) =>
-  request<{ report: Report | null; markdown: string }>(reviewPath(id, '/report'), { signal });
+  request<ReviewReportResponse>(reviewPath(id, '/report'), { signal });
 export const getFileContext = (id: string, file: number, signal?: AbortSignal) =>
   request<FileContext>(reviewPath(id, '/files/' + file + '/context'), { signal });
 

@@ -87,6 +87,9 @@ async def test_direct_create_is_idempotent_and_complete_report_uses_new_api(serv
         assert "goals" not in result["report"]
         report = (await client.get(f"/api/reviews/{run_id}/report")).json()
         assert "更新比例计算逻辑" in report["markdown"]
+        assert report["finding_count"] == 1
+        assert "duration_seconds" in report
+        assert report["generated_at"] is not None
         plan = (await client.get(f"/api/reviews/{run_id}/publication-plan")).json()
         assert plan["report_version"] == report["report"]["version"]
         events = await client.get(f"/api/reviews/{run_id}/events")
