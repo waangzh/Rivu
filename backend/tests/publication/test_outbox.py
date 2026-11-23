@@ -449,3 +449,10 @@ async def test_large_question_report_can_preflight_and_publish(large_question_ru
     assert len(comment.encode("utf-8")) <= 60_000
     assert "\u5b58\u5728 15 \u4e2a\u672a\u51b3\u95ee\u9898" in comment
     assert "\u6761\u5f85\u6838\u5b9e\u9879\u56e0\u8bc4\u8bba\u957f\u5ea6\u9650\u5236\u7701\u7565" in comment
+
+
+def test_sticky_summary_marker_uses_stable_contract():
+    from app.services.review.sticky_summary import summary_marker
+
+    marker = summary_marker({"repository_id": 1, "pr_number": 2, "publisher_identity": "bot"})
+    assert marker.startswith("<!-- rivu:summary:v1")

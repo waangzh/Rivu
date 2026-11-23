@@ -1,58 +1,11 @@
-"""PR 级 Sticky Summary：验证作者、对象归属、受控正文与远端恢复。"""
+"""Sticky Summary 的远端读取、预检与幂等写入。"""
+
 import asyncio
-import base64
-import json
-import re
 
 from app.core.fingerprints import stable_hash
 from app.tools.github.github_publisher import GitHubPublishError
-
-
-def summary_marker(context):
-    return (f"<!-- rivu:summary:v1\nrepository_id={context['repository_id']}\n"
-            f"pr={context['pr_number']}\npublisher={context['publisher_identity']}\n-->")
-
-
-def controlled_body(content, attempt, context):
-    metadata = {"hash": stable_hash(content), "publication": attempt.id, "review_id": attempt.review_id,
-                "head_sha": attempt.head_sha, "order": context["order"]}
-    encoded = base64.urlsafe_b64encode(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
-    body = content + "\n\n" + summary_marker(context) + f"\n<!-- rivu:payload:v1 {encoded} -->"
-    if len(body.encode()) > 60_000:
-        raise GitHubPublishError("publication_body_too_long")
-    return body
-
-
-def summary_metadata(body, context):
-    if not isinstance(body, str):
-        raise GitHubPublishError("summary_identity_conflict")
-    match = re.search(r"\n<!-- rivu:payload:v1 ([A-Za-z0-9_-]+) -->$", body)
-    if not match or len(match[1]) > 4096:
-        raise GitHubPublishError("summary_identity_conflict")
-    try:
-        metadata = json.loads(base64.urlsafe_b64decode(match[1] + "=" * (-len(match[1]) % 4)))
-        prefix = body[:match.start()]
-        suffix = "\n\n" + summary_marker(context)
-        if (not prefix.endswith(suffix) or metadata["hash"] != stable_hash(prefix[:-len(suffix)])
-                or not all(isinstance(metadata[key], str) for key in ("order", "head_sha", "review_id", "publication"))):
-            raise ValueError
-        return metadata
-    except (ValueError, KeyError, TypeError):
-        raise GitHubPublishError("summary_identity_conflict") from None
-
-
-def validate_comment(comment, context, *, review=False):
-    path = f"https://api.github.com/repos/{context['owner']}/{context['repo']}"
-    link_key, expected = ("pull_request_url", f"{path}/pulls/{context['pr_number']}") if review else ("issue_url", f"{path}/issues/{context['pr_number']}")
-    identity = comment.get("id")
-    if (type(identity) is not int or identity < 1 or (comment.get("user") or {}).get("id") != context["publisher_id"]
-            or comment.get(link_key) != expected):
-        raise GitHubPublishError("remote_object_identity_conflict")
-    url = comment.get("html_url")
-    prefix = f"https://github.com/{context['owner']}/{context['repo']}/"
-    if not isinstance(url, str) or not any(url.startswith(prefix + f"{kind}/{context['pr_number']}#") for kind in ("pull", "issues")):
-        raise GitHubPublishError("remote_object_identity_conflict")
-    return comment
+from app.services.review.sticky.markers import controlled_body, summary_marker, summary_metadata
+from app.services.review.sticky.validation import validate_comment
 
 
 class StickySummary:
