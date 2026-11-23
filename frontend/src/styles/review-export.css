@@ -1,0 +1,3 @@
+.export-panel { display: grid; gap: 16px; max-width: 560px; }
+.export-panel label { display: grid; gap: 6px; }
+.export-panel .btn { justify-self: start; }

@@ -1,0 +1,18 @@
+{
+  "findings": [
+    {
+      "path": "app/a.py",
+      "line": 10,
+      "severity": "high",
+      "title": "缺少空值检查",
+      "detail": "调用方可能传入 None，需要在访问属性前判断。"
+    },
+    {
+      "path": "app/b.py",
+      "line": 3,
+      "severity": "critical",
+      "title": "路径拼接未校验 | 可能越界",
+      "detail": "用户输入直接参与路径拼接。"
+    }
+  ]
+}

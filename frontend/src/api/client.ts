@@ -29,6 +29,7 @@ import type {
   AutomaticPublicationStatus,
 } from '../types/publication';
 import { publicationErrorText } from '../utils/publicationPresentation';
+import type { ExportRequest } from '../types/export';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const retryableCreateStatuses = new Set([408, 429, 500, 502, 503, 504]);
@@ -279,3 +280,15 @@ export const checkReviewComment = (
   body: JSON.stringify(options),
 });
 
+export async function exportReview(id: string, input: ExportRequest, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(apiPath(reviewPath(id, '/export')), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    signal,
+  });
+  if (!response.ok) {
+    throw requestError(await response.json().catch(() => null), response.status);
+  }
+  return response.blob();
+}
