@@ -3,6 +3,7 @@
 import os
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -152,9 +153,10 @@ _EDITABLE_ENV_KEYS = {
 }
 
 
-def persist_editable_settings(values: dict[str, object]) -> None:
+def persist_editable_settings(values: dict[str, object], *, env_path: Path | None = None) -> None:
     """更新白名单配置并原子写回 backend/.env，不触碰秘密字段。"""
-    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if env_path is None:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
     existing = env_path.read_text(encoding="utf-8-sig") if env_path.exists() else ""
     lines = existing.splitlines()
     updates = {key: str(value) for key, value in values.items() if key in _EDITABLE_ENV_KEYS}
@@ -169,9 +171,17 @@ def persist_editable_settings(values: dict[str, object]) -> None:
         else:
             lines.append(f"{key}={value}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = env_path.with_name(env_path.name + ".tmp")
-    temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(temp_path, env_path)
+    temp_path = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=env_path.parent,
+                                prefix=env_path.name + ".", suffix=".tmp", delete=False) as temporary:
+            temp_path = Path(temporary.name)
+            temporary.write("\n".join(lines) + "\n")
+        os.replace(temp_path, env_path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 # 全局配置单例

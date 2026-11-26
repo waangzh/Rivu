@@ -119,4 +119,4 @@ async def get_report(task_id: str):
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     plan = await asyncio.to_thread(PublicationPlanner(_reviews.get_review_service()._artifacts).build, task)
-    return {"report": task.report, "markdown": plan.user_report_markdown}
+    return {"report": task.report, "markdown": plan.user_report_markdown, "report_version": plan.report_version}

@@ -116,9 +116,10 @@ export const getReview = (id: string, signal?: AbortSignal) =>
   request<Run>(reviewPath(id), { signal });
 
 export function subscribeToReview(id: string, refresh: () => void) {
+  if (typeof EventSource === 'undefined') return () => {};
   const stream = new EventSource(apiPath(reviewPath(id, '/events')));
   for (const event of ['task', 'progress', 'done']) stream.addEventListener(event, refresh);
-  stream.onerror = () => stream.close();
+  stream.onerror = refresh;
   return () => stream.close();
 }
 
@@ -215,7 +216,7 @@ export const getFindings = (id: string, signal?: AbortSignal) =>
     report_version: string | null;
   }>(reviewPath(id, '/findings'), { signal });
 export const getReport = (id: string, signal?: AbortSignal) =>
-  request<{ report: Report | null; markdown: string }>(reviewPath(id, '/report'), { signal });
+  request<{ report: Report | null; markdown: string; report_version: string }>(reviewPath(id, '/report'), { signal });
 export const getFileContext = (id: string, file: number, signal?: AbortSignal) =>
   request<FileContext>(reviewPath(id, '/files/' + file + '/context'), { signal });
 
@@ -234,7 +235,7 @@ async function publicationRequest<T>(path: string, token: string, init: RequestI
     const code = typeof payload?.detail?.code === 'string'
       ? payload.detail.code
       : 'HTTP ' + response.status;
-    throw new Error(publicationErrorText(code));
+    throw new ApiError(publicationErrorText(code), response.status);
   }
 
   return response.json() as Promise<T>;

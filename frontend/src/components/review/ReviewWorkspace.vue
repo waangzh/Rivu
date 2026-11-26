@@ -16,7 +16,7 @@ import ReviewReportPage from '../pages/ReviewReportPage.vue';
 import AutomaticPublicationStatus from './publication/AutomaticPublicationStatus.vue';
 
 const props = defineProps<{ task: Run; section?: ReviewSection; busy?: boolean; connectionError?: string }>();
-const emit = defineEmits<{ navigate: [value: ReviewSection]; cancel: []; retry: []; overviewRetry: []; rereview: [] }>();
+const emit = defineEmits<{ navigate: [value: ReviewSection]; cancel: []; retry: []; overviewRetry: []; rereview: []; refresh: [] }>();
 
 const localSection = ref<ReviewSection>(initialReviewSection(props.task.status));
 const tab = computed({
@@ -59,97 +59,132 @@ const report = ref<Report | null>(null);
 const markdown = ref('');
 const error = ref('');
 const loading = ref(false);
-let controller: AbortController | null = null;
-let progressController: AbortController | null = null;
-let generation = 0;
-let progressGeneration = 0;
-let reloadQueued = false;
-let progressLoading = false, progressQueued = false;
+const planError = ref('');
+const resultKey = computed(() => JSON.stringify([
+  props.task.id, props.task.snapshot.head_sha, props.task.report?.version ?? null,
+  terminal(props.task.status) ? props.task.status : 'active',
+]));
+let resultRequest: AbortController | null = null;
+let progressRequest: AbortController | null = null;
+let resultQueued = false;
+let progressQueued = false;
+let reportLoaded = false;
+let reportVersion: string | null = null;
 
 async function loadProgress() {
-  if (progressLoading) { progressQueued = true; return; }
-  const owner = ++progressGeneration;
+  if (progressRequest) { progressQueued = true; return; }
   const request = new AbortController();
-  progressController = request;
-  progressLoading = true;
+  progressRequest = request;
   try {
     const result = await getProgress(props.task.id, request.signal);
-    if (owner !== progressGeneration) return;
+    if (request.signal.aborted) return;
     progress.value = result;
     syncedAt.value = Date.now();
     progressError.value = '';
   } catch {
-    if (owner === progressGeneration && !request.signal.aborted) {
-      progressError.value = '进度读取失败，当前显示的是上次取得的状态。';
+    if (!request.signal.aborted) {
+      progressError.value = '进度读取失败，请重试。';
     }
   } finally {
-    progressLoading = false;
-    if (owner === progressGeneration && progressQueued) {
-      progressQueued = false;
-      void loadProgress();
+    if (progressRequest === request) {
+      progressRequest = null;
+      if (progressQueued) { progressQueued = false; void loadProgress(); }
+    }
+  }
+}
+
+async function loadResults() {
+  if (resultRequest) { resultQueued = true; return; }
+  const { id, status, snapshot } = props.task;
+  const version = props.task.report?.version ?? null;
+  const finished = terminal(status);
+  const readFindings = !finished || !findingsLoaded.value;
+  const readReport = !reportLoaded && (version !== null || finished);
+  const readPlan = finished && !plan.value;
+  if (!readFindings && !readReport && !readPlan) return;
+
+  const request = new AbortController();
+  resultRequest = request;
+  loading.value = !findingsLoaded.value || readReport;
+  try {
+    const [nextFindings, nextReport, nextPlan] = await Promise.allSettled([
+      readFindings ? getFindings(id, request.signal) : null,
+      readReport ? getReport(id, request.signal) : null,
+      readPlan ? getPublicationPlan(id, request.signal) : null,
+    ]);
+    if (request.signal.aborted) return;
+
+    let resultFailed = false;
+    if (readFindings) {
+      if (nextFindings.status === 'fulfilled' && nextFindings.value?.report_version === version) {
+        const values = nextFindings.value;
+        findings.value = values.findings;
+        candidates.value = values.candidates;
+        findingGroups.value = values.finding_groups;
+        findingsLoaded.value = true;
+      } else resultFailed = true;
+    }
+    if (readReport) {
+      if (nextReport.status === 'fulfilled' && nextReport.value && (nextReport.value.report?.version ?? null) === version) {
+        report.value = nextReport.value.report;
+        markdown.value = nextReport.value.markdown;
+        reportVersion = nextReport.value.report_version;
+        reportLoaded = true;
+      } else resultFailed = true;
+    }
+    error.value = resultFailed ? '暂时无法读取与当前审查版本一致的结果。' : '';
+    if (readPlan) {
+      const value = nextPlan.status === 'fulfilled' ? nextPlan.value : null;
+      if (value && value.review_id === id && value.snapshot.head_sha === snapshot.head_sha
+          && value.digest.execution_status === status && value.report_version === (version ?? reportVersion)) {
+        plan.value = value;
+        planError.value = '';
+      } else {
+        planError.value = '暂时无法读取与当前审查版本一致的发布计划。';
+      }
+    }
+  } finally {
+    if (resultRequest === request) {
+      resultRequest = null;
+      loading.value = false;
+      if (resultQueued) { resultQueued = false; void loadResults(); }
     }
   }
 }
 
 function refreshData() {
+  emit('refresh');
   void loadProgress();
-  void load();
+  void loadResults();
 }
 
-async function load() {
-  if (loading.value) { reloadQueued = true; return; }
-  const id = props.task.id;
-  const owner = ++generation;
-  controller?.abort();
-  const request = new AbortController();
-  controller = request;
-  loading.value = true;
-  error.value = '';
-
-  try {
-    const results = await Promise.allSettled([
-      getFindings(id, request.signal),
-      props.task.report || terminal(props.task.status)
-        ? getReport(id, request.signal) : Promise.resolve({ report: null, markdown: '' }),
-      terminal(props.task.status) ? getPublicationPlan(id, request.signal) : Promise.resolve(null),
-    ]);
-    if (owner !== generation) return;
-
-    const [nextFindings, nextReport, nextPlan] = results;
-    if (nextFindings.status === 'fulfilled') {
-      findings.value = nextFindings.value.findings;
-      candidates.value = nextFindings.value.candidates;
-      findingGroups.value = nextFindings.value.finding_groups;
-      findingsLoaded.value = true;
-    }
-    if (nextReport.status === 'fulfilled') {
-      report.value = nextReport.value.report;
-      markdown.value = nextReport.value.markdown;
-    }
-    if (nextPlan.status === 'fulfilled') plan.value = nextPlan.value;
-    if (nextFindings.status === 'rejected' || nextReport.status === 'rejected') {
-      error.value = '部分结果暂时无法读取，已有内容会保留。';
-    }
-  } catch (cause) {
-    if (owner === generation && !request.signal.aborted) {
-      error.value = cause instanceof Error ? cause.message : '结果读取失败';
-    }
-  } finally {
-    if (owner === generation) {
-      loading.value = false;
-      if (reloadQueued) { reloadQueued = false; void load(); }
-    }
-  }
+function abortReads() {
+  resultRequest?.abort();
+  progressRequest?.abort();
+  resultRequest = progressRequest = null;
+  resultQueued = progressQueued = false;
 }
+watch(resultKey, () => {
+  abortReads();
+  plan.value = null;
+  report.value = null;
+  markdown.value = '';
+  findings.value = [];
+  candidates.value = [];
+  findingGroups.value = [];
+  findingsLoaded.value = reportLoaded = false;
+  reportVersion = null;
+  progress.value = null;
+  syncedAt.value = null;
+  error.value = planError.value = progressError.value = '';
+}, { flush: 'sync' });
 
-// Work-item events can change progress without changing the run's updated_at.
-watch(() => props.task, refreshData, { immediate: true });
-onBeforeUnmount(() => {
-  generation += 1;
-  progressGeneration += 1;
-  controller?.abort();
-  progressController?.abort();
-});
+// Work-item events can change progress and candidates without changing run.updated_at.
+watch(() => props.task, () => {
+  if (!terminal(props.task.status) || !progress.value) void loadProgress();
+  void loadResults();
+}, { immediate: true });
+onBeforeUnmount(abortReads);
 
 function exportReport() {
   if (!markdown.value) return;
@@ -194,6 +229,9 @@ function exportReport() {
 
   <p v-if="error" class="notice warn space-bottom" role="alert">
     {{ error }} <button class="link" @click="refreshData">重试读取结果</button>
+  </p>
+  <p v-if="tab === 'publish' && planError" class="notice warn space-bottom" role="alert">
+    {{ planError }} <button class="link" @click="refreshData">重试读取发布计划</button>
   </p>
   <p v-if="connectionError" class="notice warn space-bottom" role="alert">{{ connectionError }}</p>
   <p v-if="task.error_code" class="notice warn space-bottom">

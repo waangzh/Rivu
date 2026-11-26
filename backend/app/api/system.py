@@ -33,6 +33,7 @@ from app.tools.workspace_cleanup import inspect_orphaned_workspaces, reap_orphan
 
 
 router = APIRouter(prefix="/system", tags=["system"])
+_settings_update_lock = asyncio.Lock()
 
 @router.get("/review-capabilities")
 async def get_review_capabilities():
@@ -172,6 +173,25 @@ async def get_system_diagnostics() -> SystemDiagnostics:
 @router.patch("/settings", response_model=SystemDiagnostics)
 async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnostics:
     """更新本地单用户可编辑配置；密钥和执行安全边界不在此接口内。"""
+    await _settings_update_lock.acquire()
+
+    async def commit():
+        try:
+            await _commit_system_settings(value)
+        finally:
+            _settings_update_lock.release()
+
+    # Once started, finish the file and runtime update even if the requester disconnects.
+    update = asyncio.create_task(commit())
+    try:
+        await asyncio.shield(update)
+    except asyncio.CancelledError:
+        update.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        raise
+    return await get_system_diagnostics()
+
+
+async def _commit_system_settings(value: SystemSettingsUpdate) -> None:
     updates: dict[str, object] = {}
     mapping = {
         "retention_days": "rivu_retention_days",
@@ -179,7 +199,8 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
         "model_name": "rivu_model",
     }
     changes: dict[str, object] = {}
-    if settings.rivu_model_providers and (value.model_base_url or value.model_name):
+    providers = settings.rivu_model_providers if value.model_providers is None else value.model_providers
+    if providers and (value.model_base_url or value.model_name):
         raise HTTPException(status_code=400, detail="请在 Provider 配置中修改模型与端点")
     for field, setting_name in mapping.items():
         item = getattr(value, field)
@@ -202,14 +223,15 @@ async def update_system_settings(value: SystemSettingsUpdate) -> SystemDiagnosti
         updates["RIVU_DEFAULT_PROVIDER"] = value.default_provider
     if updates:
         try:
-            type(settings).model_validate({**settings.model_dump(), **changes})
+            candidate = type(settings).model_validate({**settings.model_dump(), **changes})
+            registry = ProviderRegistry(candidate)
+            service = get_review_service()
             await asyncio.to_thread(persist_editable_settings, updates)
-            for setting_name, item in changes.items():
-                setattr(settings, setting_name, item)
-            get_review_service().reload_provider(ProviderRegistry(settings))
+            for setting_name in changes:
+                setattr(settings, setting_name, getattr(candidate, setting_name))
+            service.reload_provider(registry)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="保存本地配置失败") from exc
-    return await get_system_diagnostics()
 
 
 @router.get("/workspaces/cleanup/preview", response_model=WorkspaceCleanupPreview)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
-from sqlalchemy import select, update, or_, exists
+from sqlalchemy import select, update, or_, exists, and_
 from sqlalchemy.dialects.sqlite import insert
 
 from app.core.database import sync_session
@@ -14,6 +14,7 @@ from app.models.orm import ReviewTaskOrm
 from app.models.publication import PublicationAttempt, PublicationItem, GitHubSummarySlot
 from app.core.fingerprints import stable_hash
 from app.services.review.review_task_access import lock_live_review
+from app.review.store import as_utc
 
 
 class PublicationConflict(ValueError):
@@ -42,6 +43,48 @@ def finding_fingerprint(finding):
 class PublicationRepository:
     def __init__(self, session_factory=sync_session):
         self.sessions = session_factory
+
+    @staticmethod
+    def reap_exhausted(session, now, identity=None):
+        active_states = ("queued", "preparing", "publishing")
+        unresolved_states = ("publishing", "uncertain")
+        attempt_for_job = Attempt.review_id == WorkerJobOrm.task_id, (
+            WorkerJobOrm.idempotency_key == "github_publication:" + Attempt.id)
+        live_slot = exists(select(Slot.id).join(Attempt, and_(
+            Attempt.repository_id == Slot.repository_id, Attempt.pr_number == Slot.pr_number,
+            Attempt.publisher_identity == Slot.publisher_identity,
+        )).where(*attempt_for_job, Slot.lease_until > now))
+        exhausted = update(WorkerJobOrm).where(
+            WorkerJobOrm.kind == "github_publication",
+            or_(
+                and_(WorkerJobOrm.status == "leased", WorkerJobOrm.lease_until <= now,
+                     WorkerJobOrm.attempts >= WorkerJobOrm.max_attempts),
+                and_(WorkerJobOrm.status == "dead_letter", exists(select(Attempt.id).where(
+                    *attempt_for_job, Attempt.state.in_(active_states)))),
+            ),
+            ~live_slot,
+        )
+        if identity is not None:
+            exhausted = exhausted.where(WorkerJobOrm.idempotency_key == "github_publication:" + identity)
+        keys = session.scalars(exhausted.values(
+            status="dead_letter", lease_owner=None, lease_until=None,
+            last_error="publication_worker_exhausted", updated_at=now,
+        ).returning(WorkerJobOrm.idempotency_key)).all()
+        for key in keys:
+            row = session.get(Attempt, key.removeprefix("github_publication:"))
+            if row is None or row.state not in active_states:
+                continue
+            # Keep the send journal and receipts intact for read-only reconciliation.
+            intent, delivered = session.execute(select(
+                or_(
+                    exists(select(Slot.id).where(Slot.pending_publication_id == row.id)),
+                    exists(select(Item.id).where(Item.publication_id == row.id, Item.state.in_(unresolved_states))),
+                    exists(select(Batch.id).where(Batch.publication_id == row.id, Batch.state.in_(unresolved_states))),
+                ),
+                exists(select(Item.id).where(Item.publication_id == row.id, Item.state == "published")),
+            )).one()
+            row.state = "uncertain" if intent else "partial" if delivered else "failed"
+            row.completed_at, row.last_error_code = now, "publication_worker_exhausted"
 
     def create(self, plan, selection, context, key, *, automatic_job=None):
         selected = selection.model_dump(mode="json")
@@ -145,6 +188,16 @@ class PublicationRepository:
         slot_id = stable_hash([attempt.repository_id, attempt.pr_number, attempt.publisher_identity])
         now = utcnow()
         with self.sessions.begin() as session:
+            if reconciliation:
+                self.reap_exhausted(session, now, attempt.id)
+            elif job is not None:
+                if not lock_live_review(session, attempt.review_id):
+                    raise PublicationLeaseLost("review_not_publishable")
+                current_job = session.get(WorkerJobOrm, job.id)
+                if (current_job is None or current_job.status != "leased"
+                        or current_job.lease_owner != job.lease_owner or current_job.attempts != job.attempts
+                        or current_job.lease_until is None or as_utc(current_job.lease_until) <= utcnow()):
+                    raise PublicationLeaseLost("publication_lease_lost")
             review = session.get(ReviewTaskOrm, attempt.review_id)
             if review is None or review.status not in {"completed", "partial"}:
                 raise PublicationConflict("review_not_publishable")
@@ -154,12 +207,12 @@ class PublicationRepository:
                     WorkerJobOrm.idempotency_key == "github_publication:" + attempt.id))
                 if (current.state not in {"failed", "partial", "uncertain"}
                         or (pending_job and pending_job.status == "leased" and pending_job.lease_until
-                            and pending_job.lease_until.replace(tzinfo=now.tzinfo) > now)):
+                            and as_utc(pending_job.lease_until) > now)):
                     raise PublicationConflict("publication_busy")
             session.execute(insert(Slot).values(id=slot_id, repository_id=attempt.repository_id,
                 pr_number=attempt.pr_number, publisher_identity=attempt.publisher_identity).on_conflict_do_nothing())
             result = session.execute(update(Slot).where(Slot.id == slot_id,
-                or_(Slot.lease_until.is_(None), Slot.lease_until < now))
+                or_(Slot.lease_until.is_(None), Slot.lease_until <= now))
                 .values(lease_owner=owner, lease_until=now + timedelta(seconds=300), revision=Slot.revision + 1))
             if result.rowcount != 1:
                 raise PublicationConflict("publication_busy")
@@ -168,8 +221,10 @@ class PublicationRepository:
 
     @contextmanager
     def locked(self, lease):
-        now = utcnow()
         with self.sessions.begin() as session:
+            if lease.review_id is not None and not lock_live_review(session, lease.review_id):
+                raise PublicationLeaseLost("review_not_publishable")
+            now = utcnow()
             condition = [Slot.id == lease.slot_id, Slot.lease_owner == lease.owner,
                          Slot.revision == lease.revision, Slot.lease_until > now]
             if lease.job is not None:
@@ -255,10 +310,16 @@ class PublicationRepository:
             review_id = select(Attempt.review_id).where(Attempt.id == identity).scalar_subquery()
             if not lock_live_review(session, review_id):
                 raise PublicationConflict("review_unavailable")
+            now = utcnow()
+            self.reap_exhausted(session, now, identity)
             job = session.scalar(select(WorkerJobOrm).where(WorkerJobOrm.idempotency_key == "github_publication:" + identity))
-            if job is None or (job.status == "leased" and job.lease_until and job.lease_until.replace(tzinfo=utcnow().tzinfo) > utcnow()):
+            if job is None or (job.status == "leased" and job.lease_until and as_utc(job.lease_until) > now):
                 raise PublicationConflict("publication_busy")
             row = session.get(Attempt, identity)
+            if session.scalar(select(Slot.id).where(Slot.repository_id == row.repository_id,
+                    Slot.pr_number == row.pr_number, Slot.publisher_identity == row.publisher_identity,
+                    Slot.lease_until > now)):
+                raise PublicationConflict("publication_busy")
             review = session.get(ReviewTaskOrm, row.review_id)
             if review.status not in {"completed", "partial"}:
                 raise PublicationConflict("review_not_publishable")

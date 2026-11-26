@@ -117,6 +117,8 @@ class DatabaseTaskQueue:
                     WorkerJobOrm.kind == "automatic_publication").values(
                         status="dead_letter", lease_owner=None, lease_until=None,
                         last_error="automatic_publication_check_failed", updated_at=now))
+                from app.services.publication.publication_repository import PublicationRepository
+                PublicationRepository.reap_exhausted(session, now)
                 eligibility = or_(
                     WorkerJobOrm.status.in_(["queued", "retry"]),
                     (WorkerJobOrm.status == "leased") & (WorkerJobOrm.lease_until < now),

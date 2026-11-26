@@ -5,6 +5,7 @@ import type { ReviewCommentCheck, ReviewCommentOptions } from "../types/publicat
 interface CommentSource {
   reviewId: () => string | undefined;
   reviewedHeadSha: () => string | null | undefined;
+  version?: () => string | undefined;
   markdown: () => string | null | undefined;
   options: () => ReviewCommentOptions;
 }
@@ -26,7 +27,7 @@ export function useReviewCommentCopy(source: CommentSource, load = checkReviewCo
     controller?.abort(); controller = null;
     checking.value = false; pendingCopy.value = null; pendingAction = null; headCheck.value = null; copied.value = false; feedback.value = "";
   }
-  watch([source.reviewId, source.reviewedHeadSha, source.markdown, () => source.options().detail,
+  watch([source.reviewId, source.reviewedHeadSha, source.markdown, () => source.version?.(), () => source.options().detail,
     () => source.options().exclude_resolved,
     () => source.options().finding_key], () => { updatedPreview.value = null; resetCopy(); }, { flush: "sync" });
   onScopeDispose(resetCopy);
@@ -102,7 +103,7 @@ export function useReviewCommentCopy(source: CommentSource, load = checkReviewCo
     pendingAction = null;
     if (result && action) await action(result.review_comment_markdown);
   }
-  function cancelPending() { pendingCopy.value = null; pendingAction = null; }
+  function cancelPending() { pendingCopy.value = null; pendingAction = null; feedback.value = ""; }
   const checkHead = () => checkedComment(() => {}, true);
   return { copied, feedback, checking, pendingCopy, headCheck, previewMarkdown, checkHead, cancelPending, resetCopy, writeClipboard, checkedComment,
     copyCheckedComment, copyAcknowledged, retryPending };

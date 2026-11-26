@@ -449,3 +449,137 @@ async def test_large_question_report_can_preflight_and_publish(large_question_ru
     assert len(comment.encode("utf-8")) <= 60_000
     assert "\u5b58\u5728 15 \u4e2a\u672a\u51b3\u95ee\u9898" in comment
     assert "\u6761\u5f85\u6838\u5b9e\u9879\u56e0\u8bc4\u8bba\u957f\u5ea6\u9650\u5236\u7701\u7565" in comment
+
+
+def claim_last_publication(delivery, repository):
+    from sqlalchemy import update
+
+    from app.models.orm import WorkerJobOrm
+
+    with repository.sessions.begin() as session:
+        session.execute(update(WorkerJobOrm).where(WorkerJobOrm.kind == "github_publication").values(max_attempts=1))
+    job = delivery.worker.queue.claim(worker_id="last-worker", kinds=("github_publication",))
+    assert job.attempts == job.max_attempts == 1
+    return job
+
+
+def expire_publication_leases(repository, job=None, lease=None):
+    from datetime import timedelta
+
+    from app.models.orm import GitHubSummarySlotOrm, WorkerJobOrm, utcnow
+
+    with repository.sessions.begin() as session:
+        expired = utcnow() - timedelta(seconds=1)
+        if job:
+            session.get(WorkerJobOrm, job.id).lease_until = expired
+        if lease:
+            session.get(GitHubSummarySlotOrm, lease.slot_id).lease_until = expired
+
+
+@pytest.mark.parametrize("interruption", ["claim", "prepare", "dead_letter"])
+async def test_exhausted_unsent_delivery_can_retry_through_normal_entrypoint(publication_pipeline, interruption):
+    from app.models.orm import WorkerJobOrm
+
+    task, api, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    job = claim_last_publication(delivery, store)
+    if interruption == "prepare":
+        lease = delivery.repo.acquire(attempt, f"{job.id}:{job.attempts}", job)
+        delivery.repo.set_state(attempt.id, "preparing", lease=lease)
+        expire_publication_leases(store, job, lease)
+        assert not await delivery.worker.run_once()
+        assert delivery.repo.get(attempt.id).state == "failed"
+        with store.sessions() as session:
+            assert session.get(WorkerJobOrm, job.id).status == "dead_letter"
+    elif interruption == "dead_letter":
+        assert delivery.worker.queue.fail(job.id, job.lease_owner, "task cancelled", attempt=job.attempts) == "dead_letter"
+        assert not await delivery.worker.run_once()
+        assert delivery.repo.get(attempt.id).state == "failed"
+    else:
+        expire_publication_leases(store, job)
+
+    assert not api.writes
+    result = await delivery.retry(task.id, attempt.id)
+    assert result.state == "queued"
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    assert len(api.comments) == len(api.reviews) == 1
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_exhausted_send_intent_survives_and_reconciles_without_resend(publication_pipeline, accepted):
+    from app.models.orm import WorkerJobOrm
+    from app.services.publication.publication_repository import PublicationLeaseLost
+    from app.services.publication.publication_worker import compose_summary
+    from app.services.review.sticky_summary import controlled_body
+    from app.models.publication import PublicationPlan
+
+    task, api, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    job = claim_last_publication(delivery, store)
+    owner = f"{job.id}:{job.attempts}"
+    lease = delivery.repo.acquire(attempt, owner, job)
+    delivery.repo.set_state(attempt.id, "preparing", lease=lease)
+    frozen, selection, context = delivery.repo.frozen(attempt.id)
+    body = controlled_body(compose_summary(PublicationPlan.model_validate(frozen), selection, {}, []), attempt, context)
+    item = next(item for item in attempt.items if item.kind == "summary")
+    delivery.repo.summary_intent(attempt, item, body, lease=lease)
+    if accepted:
+        await delivery.delivery.github.create_summary("/repos/local/repo", task.pr.number, body)
+    writes = list(api.writes)
+
+    expire_publication_leases(store, lease=lease)
+    assert not await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "preparing"  # Job lease is still active.
+    with store.sessions.begin() as session:
+        from datetime import timedelta
+        from app.models.orm import GitHubSummarySlotOrm, utcnow
+
+        session.get(GitHubSummarySlotOrm, lease.slot_id).lease_until = utcnow() + timedelta(seconds=60)
+    expire_publication_leases(store, job)
+    assert not await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "preparing"  # Slot lease is still active.
+    with pytest.raises(PublicationLeaseLost):
+        delivery.repo.set_state(attempt.id, "succeeded", lease=lease)
+    with pytest.raises(PublicationConflict):
+        await delivery.retry(task.id, attempt.id)
+    expire_publication_leases(store, lease=lease)
+
+    if not accepted:
+        assert not await delivery.worker.run_once()
+        assert delivery.repo.get(attempt.id).state == "uncertain"
+        with pytest.raises(GitHubPublishError, match="summary_operation_uncertain"):
+            await delivery.preflight(task.id)
+        await delivery.retry(task.id, attempt.id)
+        assert await delivery.worker.run_once()
+        assert delivery.repo.get(attempt.id).state == "uncertain"
+        assert delivery.repo.lookup_slot(123, task.pr.number, "user:7").pending_publication_id == attempt.id
+        assert api.writes == writes == []
+        return
+
+    # Preflight can recover an already accepted POST even before the next worker tick.
+    assert (await delivery.preflight(task.id)).ready
+    assert api.writes == writes
+    assert delivery.repo.lookup_slot(123, task.pr.number, "user:7").pending_publication_id is None
+    result = delivery.repo.get(attempt.id)
+    assert result.state == "partial"
+    assert next(item for item in result.items if item.kind == "summary").github_comment_id == next(iter(api.comments))
+    with store.sessions() as session:
+        assert session.get(WorkerJobOrm, job.id).status == "dead_letter"
+    with pytest.raises(PublicationLeaseLost):
+        delivery.repo.acquire(attempt, owner, job)
+    await delivery.retry(task.id, attempt.id)
+    assert await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    assert sum(method == "POST" and path.endswith("/comments") for method, path, _ in api.writes) == 1
+
+
+async def test_exhausted_job_receipt_does_not_downgrade_succeeded_publication(publication_pipeline):
+    task, _, delivery, store = await setup(publication_pipeline)
+    attempt, _ = await create_attempt(task, delivery)
+    job = claim_last_publication(delivery, store)
+    await delivery.delivery.execute(job)
+    assert delivery.repo.get(attempt.id).state == "succeeded"
+    expire_publication_leases(store, job)
+    assert not await delivery.worker.run_once()
+    assert delivery.repo.get(attempt.id).state == "succeeded"

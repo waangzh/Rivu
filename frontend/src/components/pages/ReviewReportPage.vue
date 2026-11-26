@@ -1,23 +1,45 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'; import { getPublicationCapability } from '../../api/client'; import type { Run } from '../../types/review'; import type { PublicationPlan } from '../../types/publication'; import type { PublicationCapability } from '../../types/operations'; import { terminal } from '../../utils/nativeReview'; import AppIcon from '../common/AppIcon.vue'; import ReportMarkdown from '../report/ReportMarkdown.vue'; import GitHubPublicationPanel from '../review/publication/GitHubPublicationPanel.vue';
+import { computed, onMounted, ref, watch } from 'vue';
+import { getPublicationCapability } from '../../api/client';
+import { useReviewCommentCopy } from '../../composables/useReviewCommentCopy';
+import type { Run } from '../../types/review';
+import type { PublicationPlan } from '../../types/publication';
+import type { PublicationCapability } from '../../types/operations';
+import { terminal } from '../../utils/nativeReview';
+import AppIcon from '../common/AppIcon.vue';
+import ReportMarkdown from '../report/ReportMarkdown.vue';
+import GitHubPublicationPanel from '../review/publication/GitHubPublicationPanel.vue';
 const props = defineProps<{ task: Run; plan: PublicationPlan | null; report: string; loading: boolean; publishOpen?: boolean }>(); const emit = defineEmits<{ export: []; 'update:publishOpen': [value: boolean] }>();
 const showPublish = computed({ get: () => props.publishOpen ?? false, set: value => emit('update:publishOpen', value) }), capability = ref<PublicationCapability | null>(null), capabilityError = ref(false);
 const shortHead = computed(() => props.task.snapshot.head_sha.slice(0,8));
 // 页面工具栏已显示标题，正文去掉重复的一级标题；导出文件仍保留。
 const displayReport = computed(() => props.report.replace(/^#\s+Rivu 审查(?:评论|报告)\s*(?:\r?\n)+/, ''));
-const commentMarkdown = computed(() => props.plan?.review_comment_markdown || props.plan?.summary_markdown || '');
-const copyState = ref<'idle' | 'copied' | 'failed'>('idle');
-let copyTimer: ReturnType<typeof setTimeout> | null = null;
+const commentMarkdown = computed(() => {
+  const plan = props.plan;
+  if (!plan || plan.review_id !== props.task.id || plan.snapshot.head_sha !== props.task.snapshot.head_sha) return '';
+  return plan.review_comment_markdown || (props.task.source ? plan.summary_markdown : '');
+});
+const { copied, feedback, checking, pendingCopy, previewMarkdown, writeClipboard, copyCheckedComment,
+  copyAcknowledged, retryPending, cancelPending } = useReviewCommentCopy({
+  reviewId: () => props.task.id,
+  reviewedHeadSha: () => props.task.snapshot.head_sha,
+  version: () => props.plan?.report_version,
+  markdown: () => commentMarkdown.value,
+  options: () => ({ detail: 'compact', exclude_resolved: false }),
+});
+const previewChanged = computed(() => previewMarkdown.value !== commentMarkdown.value);
 async function copyComment() {
   if (!commentMarkdown.value) return;
-  try { await navigator.clipboard.writeText(commentMarkdown.value); copyState.value = 'copied'; }
-  catch { copyState.value = 'failed'; }
-  if (copyTimer) clearTimeout(copyTimer);
-  copyTimer = setTimeout(() => { copyState.value = 'idle'; }, 2000);
+  if (props.task.source) await writeClipboard(commentMarkdown.value);
+  else await copyCheckedComment();
 }
-onBeforeUnmount(() => { if (copyTimer) clearTimeout(copyTimer); });
-async function loadCapability() { capabilityError.value = false;
-try { capability.value = await getPublicationCapability(); } catch { capabilityError.value = true; } } onMounted(() => { if (!props.task.source) void loadCapability(); });
+async function loadCapability() {
+  capabilityError.value = false;
+  try { capability.value = await getPublicationCapability(); }
+  catch { capabilityError.value = true; }
+}
+watch(() => !!props.task.source, local => { if (!local) void loadCapability(); });
+onMounted(() => { if (!props.task.source) void loadCapability(); });
 </script>
 <template>
 <div class="rd-workspace">
@@ -63,14 +85,23 @@ try { capability.value = await getPublicationCapability(); } catch { capabilityE
 <div class="rd-toolbar__actions">
 <button class="btn secondary" :disabled="!report" @click="$emit('export')">
 <AppIcon name="download" />导出评论</button>
-<button class="btn secondary" :disabled="!commentMarkdown" :title="commentMarkdown ? (task.source ? '复制本地快照的审查总结' : '复制将发布到 PR 的总结评论原文') : '评论尚未生成'" @click="copyComment">
-<AppIcon name="copy" />{{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制评论' }}</button>
+<button class="btn secondary" :disabled="!commentMarkdown || checking || !!pendingCopy" @click="copyComment">
+<AppIcon name="copy" />{{ checking ? '正在检查…' : copied ? '已复制' : previewChanged ? '确认复制更新后的评论' : '复制评论' }}</button>
 <button v-if="!task.source" class="btn secondary" :aria-expanded="showPublish" @click="showPublish = !showPublish">
 <AppIcon name="send" />{{ showPublish ? '收起发布面板' : '发布到 GitHub' }}</button>
-<span class="sr-only" role="status">{{ copyState === 'copied' ? '评论已复制到剪贴板' : copyState === 'failed' ? '复制失败，请重试' : '' }}</span>
 </div>
 </div>
 <div class="rd-document">
+<p v-if="feedback" role="status">{{ feedback }}</p>
+<div v-if="pendingCopy" class="row">
+<button class="btn secondary" @click="copyAcknowledged">确认复制带快照说明的评论</button>
+<button class="btn secondary" @click="retryPending">重试检查</button>
+<button class="btn secondary" @click="cancelPending">取消复制</button>
+</div>
+<details v-if="!task.source && previewMarkdown" :open="previewChanged || !!pendingCopy || undefined">
+<summary>复制评论预览</summary>
+<ReportMarkdown :content="previewMarkdown" />
+</details>
 <p v-if="loading" class="muted">正在读取报告…</p>
 <ReportMarkdown v-else-if="report" :content="displayReport" />
 <p v-else class="muted">尚无可读取的 Markdown 报告。</p>

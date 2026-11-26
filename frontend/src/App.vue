@@ -40,6 +40,7 @@ let controller: AbortController | null = null;
 let creationController: AbortController | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let closeStream: (() => void) | null = null;
+let refreshTrackedReview: (() => Promise<void>) | null = null;
 let generation = 0, catalogGeneration = 0;
 let disposed = false;
 
@@ -57,6 +58,7 @@ function forgetTask() {
   creationController?.abort();
   closeStream?.();
   closeStream = null;
+  refreshTrackedReview = null;
   if (timer) clearTimeout(timer);
   timer = null;
   task.value = null;
@@ -142,7 +144,7 @@ async function follow(id: string, initial?: Run, activate = true, selectDefault 
   if (timer) clearTimeout(timer);
   const owner = ++generation, abort = new AbortController();
   controller = abort;
-  let refreshing = false, chooseSection = chooseDefault;
+  let refreshing = false, refreshQueued = false, chooseSection = chooseDefault;
   try { localStorage.setItem('rg-review-task', id); } catch {}
 
   function accept(result: Run) {
@@ -156,15 +158,22 @@ async function follow(id: string, initial?: Run, activate = true, selectDefault 
     error.value = '';
   }
   async function refresh() {
-    if (owner !== generation || refreshing) return;
+    if (owner !== generation) return;
+    if (refreshing) { refreshQueued = true; return; }
     refreshing = true;
     if (timer) clearTimeout(timer);
     try {
       const result = await getReview(id, abort.signal);
       if (owner !== generation) return;
       accept(result);
-      if (!terminal(result.status)) timer = setTimeout(refresh, 1500);
-      else { closeStream?.(); closeStream = null; }
+      if (!terminal(result.status)) {
+        timer = setTimeout(refresh, 1500);
+        closeStream ??= subscribeToReview(id, () => { void refresh(); });
+      } else {
+        closeStream?.();
+        closeStream = null;
+        refreshQueued = false;
+      }
     } catch (cause) {
       if (owner !== generation || abort.signal.aborted) return;
       if (reviewRecordMissing(cause)) {
@@ -177,15 +186,17 @@ async function follow(id: string, initial?: Run, activate = true, selectDefault 
       timer = setTimeout(refresh, 3000);
     } finally {
       refreshing = false;
-      if (owner === generation) opening.value = false;
+      if (owner === generation) {
+        opening.value = false;
+        if (refreshQueued) { refreshQueued = false; void refresh(); }
+      }
     }
   }
-  if (initial) accept(initial);
-  else await refresh();
-  if (owner === generation && task.value && !terminal(task.value.status)) {
-    closeStream = subscribeToReview(id, () => { void refresh(); });
-    if (initial) void refresh();
-  }
+  refreshTrackedReview = refresh;
+  if (initial) {
+    accept(initial);
+    if (!terminal(initial.status)) void refresh();
+  } else await refresh();
 }
 
 async function openReview(id: string) {
@@ -335,7 +346,7 @@ onBeforeUnmount(() => {
         <SettingsPage v-else-if="page === 'settings'" @saved="loadModels" />
         <template v-else>
           <ReviewSubmissionPage v-if="creation" v-model:publication-token="publicationToken" :creation="creation" :submitting="busy" :rejected="creationRejected" :error="creationError" :recoverable="creationRecoverable" @retry="submitCreation" @edit="editCreation" @history="page = 'history'" />
-          <ReviewWorkspace v-else-if="task" :key="task.id" :task="task" :section="section" :busy="busy || opening" :connection-error="connectionError" @navigate="navigate" @cancel="stop" @retry="retry" @overview-retry="retrySummary" @rereview="rereview" />
+          <ReviewWorkspace v-else-if="task" :key="task.id" :task="task" :section="section" :busy="busy || opening" :connection-error="connectionError" @navigate="navigate" @cancel="stop" @retry="retry" @overview-retry="retrySummary" @rereview="rereview" @refresh="refreshTrackedReview?.()" />
           <section v-else-if="restoring || opening || trackedId" class="card card-pad workspace-loading" role="status">
             <h1 tabindex="-1">正在打开审查记录…</h1>
             <p class="muted space-top">正在恢复任务状态，请稍候。</p>

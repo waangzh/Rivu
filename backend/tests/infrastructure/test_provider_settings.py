@@ -102,3 +102,109 @@ def test_provider_configuration_requires_default_model_and_safe_endpoint():
     with pytest.raises(ValueError, match="provider_requires_unique_models_and_valid_default"):
         ProviderConfig(provider="openai", base_url="https://example.test", api_key_env="TEST_KEY",
                        default_model="other", models=[ModelProfile(model_id="fixture")])
+
+
+@pytest.fixture
+def settings_file(tmp_path, monkeypatch):
+    import asyncio
+    from app.core.config import persist_editable_settings
+
+    path = tmp_path / ".env"
+    path.write_text("# preserved\nTEST_MODEL_KEY=fixture-secret\n", encoding="utf-8")
+    monkeypatch.setattr(system, "_settings_update_lock", asyncio.Lock())
+    monkeypatch.setattr(settings, "rivu_model_providers", {})
+    monkeypatch.setattr(settings, "rivu_default_provider", None)
+    monkeypatch.setattr(settings, "rivu_retention_days", 30)
+    monkeypatch.setattr(settings, "rivu_model", "original")
+    reloads = []
+
+    class Service:
+        def reload_provider(self, registry):
+            reloads.append(registry.settings)
+
+    async def diagnostics():
+        return "diagnostics"
+
+    monkeypatch.setattr(system, "get_review_service", Service)
+    monkeypatch.setattr(system, "get_system_diagnostics", diagnostics)
+    monkeypatch.setattr(system, "persist_editable_settings",
+                        lambda values: persist_editable_settings(values, env_path=path))
+    return path, reloads
+
+
+async def test_concurrent_settings_patches_finish_file_and_reload_after_request_cancellation(settings_file, monkeypatch):
+    import asyncio
+    from threading import Event
+    from dotenv import dotenv_values
+    from fastapi import HTTPException
+
+    path, reloads = settings_file
+    persist = system.persist_editable_settings
+    entered, release = Event(), Event()
+
+    def block_first(values):
+        if "RIVU_MODEL_PROVIDERS" in values:
+            entered.set()
+            assert release.wait(5)
+        persist(values)
+
+    monkeypatch.setattr(system, "persist_editable_settings", block_first)
+    first = asyncio.create_task(system.update_system_settings(SystemSettingsUpdate(
+        model_providers={"local": provider_config()}, default_provider="local")))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        second = asyncio.create_task(system.update_system_settings(SystemSettingsUpdate(retention_days=45)))
+        invalid_default = asyncio.create_task(system.update_system_settings(SystemSettingsUpdate(default_provider="missing")))
+        invalid_model = asyncio.create_task(system.update_system_settings(SystemSettingsUpdate(model_name="legacy")))
+        await asyncio.sleep(0)
+        assert not second.done() and not invalid_default.done() and not invalid_model.done()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not reloads and not second.done()
+    finally:
+        release.set()
+
+    assert await second == "diagnostics"
+    with pytest.raises(HTTPException, match="保存本地配置失败"):
+        await invalid_default
+    with pytest.raises(HTTPException, match="Provider 配置"):
+        await invalid_model
+
+    contents = dotenv_values(path)
+    assert contents["RIVU_DEFAULT_PROVIDER"] == settings.rivu_default_provider == "local"
+    assert contents["RIVU_RETENTION_DAYS"] == str(settings.rivu_retention_days) == "45"
+    assert '"local"' in contents["RIVU_MODEL_PROVIDERS"]
+    assert contents["TEST_MODEL_KEY"] == "fixture-secret" and "RIVU_MODEL" not in contents
+    assert [item.rivu_retention_days for item in reloads] == [30, 45]
+    assert [item.rivu_default_provider for item in reloads] == ["local", "local"]
+    assert list(path.parent.iterdir()) == [path]
+
+
+async def test_settings_failed_atomic_replace_preserves_disk_and_runtime(settings_file, monkeypatch):
+    from app.core import config
+    from fastapi import HTTPException
+
+    path, reloads = settings_file
+    original = path.read_bytes()
+    temporary_paths = []
+
+    def fail_replace(source, destination):
+        assert source.parent == destination.parent
+        assert source.exists()
+        temporary_paths.append(source)
+        raise OSError("replace failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(config.os, "replace", fail_replace)
+        with pytest.raises(HTTPException, match="保存本地配置失败"):
+            await system.update_system_settings(SystemSettingsUpdate(retention_days=60))
+        with pytest.raises(HTTPException, match="保存本地配置失败"):
+            await system.update_system_settings(SystemSettingsUpdate(retention_days=70))
+
+    assert len(set(temporary_paths)) == 2
+    assert path.read_bytes() == original
+    assert settings.rivu_retention_days == 30 and not reloads
+    assert list(path.parent.iterdir()) == [path]
+    assert await system.update_system_settings(SystemSettingsUpdate(retention_days=60)) == "diagnostics"
+    assert settings.rivu_retention_days == reloads[-1].rivu_retention_days == 60

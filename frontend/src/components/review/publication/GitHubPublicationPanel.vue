@@ -4,7 +4,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type { PublicationPlan, PublicationPreflightResult, PublicationAttempt, PublicationFinding } from "../../../types/publication";
 import type { PublicationCapability } from "../../../types/operations";
-import { preflightPublication, createPublication, getPublications, getPublication, retryPublication } from "../../../api/client";
+import { ApiError, preflightPublication, createPublication, getPublications, getPublication, retryPublication } from "../../../api/client";
 import { publicationFindingTitle } from "../../../utils/reportPresentation";
 import { publicationErrorText, publicationItemKindLabel, publicationItemStateLabel,
   publicationStateLabel, publicationWarningText, inlineActionLabel } from "../../../utils/publicationPresentation";
@@ -21,6 +21,10 @@ const selected = ref<string[]>([]);
 const preview = ref<PublicationPreflightResult | null>(null);
 const history = ref<PublicationAttempt[]>([]);
 const historyLoaded = ref(false);
+const historyLoading = ref(false);
+const historyError = ref("");
+const trackingError = ref("");
+const trackingId = ref<string | null>(null);
 const current = ref<PublicationAttempt | null>(null);
 const busy = ref(false);
 const error = ref("");
@@ -30,7 +34,8 @@ const confirmationKey = ref("");
 const expandAll = ref(false);
 let controller: AbortController | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
-let generation = 0;
+let trackingRequest: AbortController | null = null;
+let historyRequest: AbortController | null = null;
 const findings = computed(() => [...props.plan.inline_drafts, ...props.plan.summary_findings].sort((left, right) =>
     ["critical", "high", "medium", "low"].indexOf(left.severity) - ["critical", "high", "medium", "low"].indexOf(right.severity)
     || (left.anchor?.file_path ?? "").localeCompare(right.anchor?.file_path ?? "")
@@ -48,14 +53,28 @@ function renderMarkdown(value: string) {
 }
 function clearTimer() { if (timer) clearTimeout(timer); timer = null; }
 function invalidate() { preview.value = null; acknowledge.value = false; confirmationKey.value = ""; dialog.value?.close(); }
-watch(() => JSON.stringify(props.plan), (value, previous) => {
-  generation += 1; controller?.abort(); clearTimer(); current.value = null; history.value = []; historyLoaded.value = false; busy.value = false;
-  selected.value = findings.value.map(item => item.finding_key); token.value = ""; error.value = ""; expandAll.value = false;
+function resetRequests() {
+  controller?.abort();
+  trackingRequest?.abort();
+  historyRequest?.abort();
+  clearTimer();
+  busy.value = false;
+  historyLoading.value = false;
+  current.value = null;
+  trackingId.value = null;
+  history.value = [];
+  historyLoaded.value = false;
+  error.value = historyError.value = trackingError.value = "";
   invalidate();
-if (previous !== undefined) emit("result", null);
+}
+watch([() => props.reviewId, () => JSON.stringify(props.plan), publishEnabled], () => {
+  resetRequests();
+  selected.value = findings.value.map(item => item.finding_key);
+  token.value = "";
+  expandAll.value = false;
 }, { immediate: true });
 watch(selected, invalidate, { deep: true });
-watch(token, () => { generation += 1; controller?.abort(); clearTimer(); busy.value = false; invalidate(); });
+watch(token, resetRequests, { flush: "sync" });
 watch(current, value => {
   if (!value) { emit("result", null);
 return; }
@@ -66,27 +85,55 @@ return; }
     emit("result", { tone: "warn", text: publicationStateLabel[value.state] });
   } else emit("result", { tone: "muted", text: publicationStateLabel[value.state] });
 });
-onBeforeUnmount(() => { generation += 1; controller?.abort(); clearTimer(); });
+onBeforeUnmount(resetRequests);
 
 async function action(operation: (signal: AbortSignal) => Promise<void>) {
-  controller?.abort(); clearTimer(); controller = new AbortController();
-  const signal = controller.signal, version = ++generation;
+  if (busy.value || !token.value) return;
+  controller = new AbortController();
+  const signal = controller.signal;
   busy.value = true; error.value = "";
   try { await operation(signal); }
-  catch (failure) { if (!signal.aborted && version === generation) error.value = failure instanceof Error ? failure.message : "发布请求失败"; }
-  finally { if (!signal.aborted && version === generation) busy.value = false; }
+  catch (failure) { if (!signal.aborted) error.value = failure instanceof Error ? failure.message : "发布请求失败"; }
+  finally { if (!signal.aborted) busy.value = false; }
 }
-function schedulePoll(attempt: PublicationAttempt) {
-  current.value = attempt;
-  if (["queued", "preparing", "publishing"].includes(attempt.state)) timer = setTimeout(() => void refresh(attempt.id), 1500);
-}
-async function refresh(identity: string) {
-  await action(async signal => {
-    const result = await getPublication(props.reviewId, identity, token.value, signal);
-    if (!signal.aborted) schedulePoll(result);
-  });
+function track(identity: string, initial?: PublicationAttempt) {
+  if (!token.value) return;
+  const reviewId = props.reviewId, credential = token.value;
+  trackingRequest?.abort();
+  clearTimer();
+  const request = new AbortController();
+  trackingRequest = request;
+  trackingError.value = "";
+  if (trackingId.value !== identity) current.value = null;
+  trackingId.value = identity;
+
+  function accept(attempt: PublicationAttempt) {
+    if (attempt.id !== identity || attempt.review_id !== reviewId) throw new Error("发布记录与当前审查不匹配");
+    current.value = attempt;
+    trackingError.value = "";
+    history.value = history.value.map(item => item.id === identity ? attempt : item);
+    if (["queued", "preparing", "publishing"].includes(attempt.state)) {
+      timer = setTimeout(poll, 1500);
+    }
+  }
+  async function poll() {
+    try {
+      const attempt = await getPublication(reviewId, identity, credential, request.signal);
+      if (!request.signal.aborted) accept(attempt);
+    } catch (failure) {
+      if (request.signal.aborted) return;
+      const status = failure instanceof ApiError ? failure.status : null;
+      const retry = status === null || status >= 500 || status === 408 || status === 429;
+      trackingError.value = retry ? "暂时无法读取发布状态，正在重试。"
+        : failure instanceof Error ? failure.message : "发布状态读取失败。";
+      if (retry) timer = setTimeout(poll, 3000);
+    }
+  }
+  if (initial) accept(initial);
+  else void poll();
 }
 async function preflight() {
+  if (busy.value || !token.value) return;
   invalidate();
   await action(async signal => {
     const result = await preflightPublication(props.reviewId, selected.value, token.value, signal);
@@ -97,24 +144,40 @@ async function submit() {
   if (!canConfirm.value || !preview.value) return;
   const prepared = preview.value;
   dialog.value?.close();
-  current.value = null;
   await action(async signal => {
     const accepted = await createPublication(props.reviewId, { expected_plan_hash: prepared.plan_hash, expected_report_version: prepared.report_version, expected_head_sha: prepared.head_sha,
       publish_summary: true, finding_keys: [...selected.value], acknowledge_partial_review: acknowledge.value }, confirmationKey.value, token.value, signal);
     if (signal.aborted) return;
-    const result = await getPublication(props.reviewId, accepted.publication_id, token.value, signal);
-    if (!signal.aborted) schedulePoll(result);
+    invalidate();
+    track(accepted.publication_id);
   });
 }
 async function loadHistory() {
-  await action(async signal => { const result = await getPublications(props.reviewId, token.value, signal);
-if (!signal.aborted) { history.value = result; historyLoaded.value = true; } });
+  if (historyLoading.value || !token.value) return;
+  const request = new AbortController();
+  historyRequest = request;
+  historyLoading.value = true;
+  historyError.value = "";
+  const previouslyTracked = current.value;
+  try {
+    const result = await getPublications(props.reviewId, token.value, request.signal);
+    if (request.signal.aborted) return;
+    const tracked = current.value === previouslyTracked ? null : current.value;
+    history.value = result.map(item => item.id === tracked?.id ? tracked : item);
+    historyLoaded.value = true;
+  } catch (failure) {
+    if (!request.signal.aborted) historyError.value = failure instanceof Error ? failure.message : "交付记录读取失败。";
+  } finally {
+    if (!request.signal.aborted) historyLoading.value = false;
+  }
 }
 async function recover() {
   if (!current.value) return;
   const identity = current.value.id;
-  await action(async signal => { const result = await retryPublication(props.reviewId, identity, token.value, signal);
-if (!signal.aborted) schedulePoll(result); });
+  await action(async signal => {
+    const result = await retryPublication(props.reviewId, identity, token.value, signal);
+    if (!signal.aborted) track(identity, result);
+  });
 }
 function safeLink(value: string | null) {
   try { const url = new URL(value || "");
@@ -203,6 +266,11 @@ function stateTone(state: string) {
         <button type="button" class="button button--primary" :disabled="!canConfirm" @click="dialog?.showModal()">确认发布</button>
       </div>
     </section>
+    <p v-if="trackingError" class="gp-alert" role="alert">
+      {{ trackingError }}
+      <button v-if="trackingId" type="button" class="text-button" @click="track(trackingId)">重试读取发布状态</button>
+    </p>
+    <p v-else-if="trackingId && !current" class="gp-status" role="status">正在读取发布状态…</p>
     <section v-if="current" class="gp-step" aria-label="发布结果">
       <header class="gp-step__head">
         <h3 class="gp-step__title">4. 发布结果</h3>
@@ -227,11 +295,12 @@ function stateTone(state: string) {
       <div class="gp-record__body">
         <div class="gp-record__head">
           <p class="gp-note">发布后可在此回看每次投递的状态与远端结果。</p>
-          <button type="button" class="button button--secondary button--compact" :disabled="busy || !token" @click="loadHistory">刷新交付记录</button>
+          <button type="button" class="button button--secondary button--compact" :disabled="historyLoading || !token" @click="loadHistory">刷新交付记录</button>
         </div>
+        <p v-if="historyError" class="gp-alert" role="alert">{{ historyError }}</p>
         <ul v-if="history.length" class="gp-record__list">
           <li v-for="item in history" :key="item.id">
-            <button type="button" class="gp-record__row" @click="refresh(item.id)">
+            <button type="button" class="gp-record__row" :disabled="busy" @click="track(item.id)">
               <span class="gp-state" :data-tone="stateTone(item.state)">{{ publicationStateLabel[item.state] || '状态未知' }}</span>
               <time>{{ item.requested_at }}</time>
             </button>

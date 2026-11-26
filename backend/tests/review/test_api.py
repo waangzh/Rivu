@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.review.contracts import ReviewRequest
+from app.review.grouping import GROUPING_PROMPT
 from app.services.review.review_service import ReviewService
 from app.tools.diff_parser import DiffParser
 from app.tools.git_tool import GitTool, GitToolError, GitToolTimeout
@@ -137,7 +138,7 @@ async def test_large_pr_groups_only_after_create_and_keeps_every_file(service_pi
 
     class GroupedReviewModel(ReviewModel):
         def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-            if str(messages[0].content).startswith("Group changed files"):
+            if messages[0].content == GROUPING_PROMPT:
                 packet = json.loads(messages[1].content)
                 calls.append(packet)
                 assert len(packet["files"]) == 4

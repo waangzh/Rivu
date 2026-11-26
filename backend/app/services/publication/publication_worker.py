@@ -100,6 +100,10 @@ class PublicationDelivery:
                 if not remote or remote["body"] != expected.get("body"):
                     raise GitHubPublishError("summary_operation_uncertain", uncertain=True)
                 await asyncio.to_thread(self.repo.set_state, attempt.id, "succeeded", lease=lease)
+            elif current.state == "uncertain" and all(
+                    item.state not in {"publishing", "uncertain"} for item in current.items):
+                state = "partial" if any(item.state == "published" for item in current.items) else "failed"
+                await asyncio.to_thread(self.repo.set_state, attempt.id, state, current.last_error_code, lease=lease)
         finally:
             await asyncio.to_thread(self.repo.release, lease)
 

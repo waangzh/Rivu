@@ -13,7 +13,7 @@ from app.services.publication.automatic_publication import (
 )
 from app.services.publication.publication_repository import PublicationLeaseLost
 from app.services.review.task_queue import DatabaseTaskQueue
-from tests.publication.test_outbox import setup
+from tests.publication.test_outbox import claim_last_publication, expire_publication_leases, setup
 
 
 async def setup_automatic(publication_pipeline, *, grant_update=None):
@@ -224,6 +224,36 @@ async def test_expiry_after_dispatch_prevents_new_github_writes(publication_pipe
     assert await service.worker.run_once()
     assert status(service, task).state == "failed"
     assert api.writes == []
+
+
+async def test_expired_automatic_delivery_reconciles_accepted_inline_batch(publication_pipeline, monkeypatch):
+    task, api, service, store, dispatch_id = await setup_automatic(publication_pipeline)
+    assert await service.worker.run_once()
+    identity = status(service, task).publication_id
+    job = claim_last_publication(service, store)
+
+    def lose_receipt(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service.repo, "finish_batch", lose_receipt)
+        with pytest.raises(asyncio.CancelledError):
+            await service.delivery.execute(job)
+    assert len(api.reviews) == 1
+    batches = service.repo.batches(identity)
+    assert len(batches) == 1 and batches[0]["state"] == "publishing"
+
+    expire_publication_leases(store, job)
+    assert not await service.worker.run_once()
+    assert status(service, task).state == "uncertain"
+    assert service.repo.batches(identity) == batches
+    with store.sessions() as session:
+        assert session.get(WorkerJobOrm, dispatch_id).status == "completed"
+    await service.retry(task.id, identity)
+    assert await service.worker.run_once()
+    assert status(service, task).state == "succeeded"
+    assert len(api.comments) == len(api.inline) == len(api.reviews) == 1
+    assert sum(method == "POST" and path.endswith("/reviews") for method, path, _ in api.writes) == 1
 
 
 @pytest.mark.parametrize("operation", ["retry", "delete", "retention"])

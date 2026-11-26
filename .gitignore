@@ -30,3 +30,4 @@ docs/
 eval/reviewbench/deepseek-judge/auth.json
 eval/reviewbench/deepseek-judge/models.json
 eval/reviewbench/deepseek-judge/bin/
+/.archify
