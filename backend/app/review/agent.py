@@ -17,7 +17,7 @@ from app.llm.receipts import observe_response, safe_request_id
 from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
 from app.review.domain import AgentErrorDiagnostic, UnitCompletion, VerificationOutput, utcnow
 from app.review.findings import admit_verification
-from app.review.planner import tokens
+from app.review.planner import identity, tokens
 from app.review.observability import event, message_content, review_trace, stage
 from app.review.store import BudgetExceeded, LeaseLost, ReviewStopped, verification_input_limit
 from app.review.tools import (
@@ -220,11 +220,16 @@ class RequestGate(AgentMiddleware):
                 ([request.system_message] if request.system_message else []) + messages,
                 tools, schema) + 1024
 
-        input_limit = limits.context_tokens - limits.output_tokens
-        messages = context.window.project(context, request.messages, estimate_packet, input_limit)
         validate_replay = getattr(request.model, "validate_replay", None)
-        if validate_replay is not None:
-            validate_replay(([request.system_message] if request.system_message else []) + messages)
+        def inspect_projection(messages):
+            if validate_replay is not None:
+                validate_replay(([request.system_message] if request.system_message else []) + messages)
+            return context.projected_delivery(messages, request.messages)
+
+        input_limit = limits.context_tokens - limits.output_tokens
+        previous_projection = context.window.previous_projection
+        messages = context.window.project(context, request.messages, estimate_packet, input_limit)
+        pending, hunks = inspect_projection(messages)
         await context.persist()
         # Reserve the full packet, including all tools and room for budget guidance.
         estimate = estimate_packet(messages)
@@ -232,8 +237,13 @@ class RequestGate(AgentMiddleware):
             ticket, available = await context.budget.reserve(context.work, estimate, with_remaining=True)
         except BudgetExceeded as exc:
             if str(exc) in {"context_capacity", "input_token_limit"}:
+                if str(exc) == "input_token_limit":
+                    headroom = await context.budget.headroom(context.work)
+                    input_limit = min(input_limit, max(1, headroom["input_tokens"]))
+                context.window.previous_projection = previous_projection
                 messages = context.window.project(
                     context, request.messages, estimate_packet, input_limit, force=True)
+                pending, hunks = inspect_projection(messages)
                 estimate = estimate_packet(messages)
                 ticket, available = await context.budget.reserve(context.work, estimate, with_remaining=True)
             else:
@@ -355,6 +365,10 @@ class RequestGate(AgentMiddleware):
                 )
         guidance = (HumanMessage(content="Runtime guidance (trusted host):" + instruction,
                                  id=f"runtime-{ticket}") if instruction else None)
+        context.window.observe_tools(identity({
+            "tools": [convert_to_openai_tool(tool) for tool in tools],
+            "result": schema.model_json_schema(),
+        }))
         request = request.override(tools=tools, messages=[*messages, *([guidance] if guidance else [])])
         started = perf_counter()
         logger.info(
@@ -368,14 +382,14 @@ class RequestGate(AgentMiddleware):
             "上下文投影 review_id=%.8s work_id=%.8s original_tokens=%d projected_tokens=%d "
             "saved_tokens=%d investigation_questions=%d epoch=%d compacted=%s pressure=%s "
             "shared_message_prefix_tokens=%d pressure_reason=%s minimum_reclaim_tokens=%d "
-            "restored_sources=%d",
+            "restored_sources=%d tools_unchanged=%s",
             run.id, context.work.id, context.window.metrics["original_input_tokens"],
             context.window.metrics["projected_input_tokens"], context.window.metrics["saved_input_tokens"],
             len(context.investigations), context.window.epoch, context.window.metrics["compacted"],
             context.window.metrics["pressure"], context.window.metrics["shared_message_prefix_tokens"],
             context.window.metrics["pressure_reason"] or "-",
-            context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"])
-        pending, hunks = dict(context.pending), dict(context.pending_hunks)
+            context.window.metrics["minimum_reclaim_tokens"], context.window.metrics["restored_sources"],
+            context.window.metrics["tools_unchanged"])
         context.error_diagnostic = None
         receipt = None
         try:
@@ -439,7 +453,7 @@ class RequestGate(AgentMiddleware):
             usage["output_tokens"] if usage is not None else "unknown",
             len(message.tool_calls) if message else 0, ",".join(tool_names) or "-")
         await context.check_active()
-        # A successful response proves the model received the full request packet.
+        # A successful response confirms only material in the final projection.
         await context.acknowledge(pending, hunks)
         await context.persist()
         # Keep any guidance at its original position in the append-only history.
@@ -558,9 +572,9 @@ class AgentRunner:
                 request_budget = min(request_budget, max(1, headroom["input_tokens"] - 1024))
             initial_message = HumanMessage(content="", id=work.attempt_id)
             def estimate_initial(packet):
-                return request_input_tokens([SystemMessage(content=prompt),
-                    initial_message.model_copy(update={
-                        "content": json.dumps(packet, ensure_ascii=False)})], tools, schema)
+                messages = context.compact_messages([initial_message.model_copy(update={
+                    "content": json.dumps(packet, ensure_ascii=False)})])
+                return request_input_tokens([SystemMessage(content=prompt), *messages], tools, schema)
             initial = await provider.initial(context, candidate, request_budget=request_budget,
                                              estimate_request=estimate_initial)
             context.initial_packet = initial

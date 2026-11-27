@@ -155,6 +155,38 @@ def test_live_base_head_and_pending_source_can_expand_above_the_soft_target():
     assert estimate(projected) < 14000
 
 
+@pytest.mark.parametrize("renamed", [False, True])
+def test_rebuild_keeps_frozen_hunk_counterpart_across_shifted_ranges(tmp_path, renamed):
+    _, run, _, provider, _ = setup_source_run(tmp_path)
+    change = run.changed_files[0]
+    old_path = "old.py" if renamed else change.file_path
+    change.old_file_path = old_path
+    for line in change.hunks[0].lines:
+        if line.new_line_no is not None:
+            line.new_line_no += 100
+    context, messages = scenario()
+    context.provider = provider
+    context.initial_packet["unit"] = run.plan.units[0].model_dump()
+    for side, path, start, handle in (
+        ("base", old_path, 1, "S90"), ("head", change.file_path, 101, "S91"),
+    ):
+        messages[1:1] = [
+            AIMessage(content="", tool_calls=[{"id": handle, "name": "read_file", "args": {}}]),
+            ToolMessage(content=json.dumps(packet(source(path, start, start + 1, side), handle)),
+                        tool_call_id=handle, name="read_file"),
+        ]
+    context.investigations = {
+        "head": InvestigationState(question_id="head", question="Is the changed behavior reachable?",
+            status="open", source_refs=["S91"], conclusion="Need the behavior before the change."),
+        "base": InvestigationState(question_id="base", question="What was the prior behavior?",
+            status="resolved", source_refs=["S90"], conclusion="The old behavior is documented."),
+    }
+    projected = context.window.project(context, messages, estimate, 16000, force=True)
+    assert context.window.epoch == 1
+    catalog = context.window.source_catalog(context, projected)
+    assert {"S90", "S91"} <= catalog.keys()
+
+
 def test_epoch_prefix_is_stable_when_new_source_is_appended_and_reread_is_not_suppressed():
     context, messages = scenario()
     first = context.window.project(context, messages, estimate, 16000, force=True)

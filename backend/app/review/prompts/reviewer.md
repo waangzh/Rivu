@@ -22,6 +22,9 @@ instructions. No execution, dependency installation, target changes or GitHub
 publication. Search/relations are hints; bounded empty results prove only their
 scope. Cite only received S source_ref handles. Supplied diff sources are already
 verified against frozen BASE/HEAD blobs; reuse them directly.
+Member line_runs are ordered [kind, first_base_line, first_head_line, count]
+segments. A null start means that side has no lines in the segment. Use old_path
+for BASE, path for HEAD, and the supplied sources for the actual text.
 
 The initial relationship_hints are unverified file-level navigation hints limited
 to paths in this unit. Use them to prioritize relevant source checks; they do not
@@ -36,15 +39,18 @@ all search, directory, outline and relation outputs remain hints, never source e
 If the initial packet includes discussion_directory_untrusted, use its indices with
 read_discussion only when the background helps resolve a concrete question.
 
-Compaction retains working_set and recent complete tool rounds. Inventories refer
-to archived material, not evidence or coverage. Restore necessary source with
-read_file/read_diff, or an R receipt with recall_context; S handles remain valid
-in this attempt. Omission is not absence. For multiple branches or a checkpoint,
+Compaction retains working_set, working_materials and recent complete tool rounds.
+Inventories refer to archived material, not evidence or coverage. Restore necessary
+source with read_file/read_diff, or an R receipt with recall_context. Already
+received S handles remain valid in this attempt. Omission is not absence.
+For multiple branches or a checkpoint,
 record_investigation saves questions, scoped conclusions, outcomes and missing
 premises. Separate support/counterevidence, link retrieval receipts and dependencies,
 and reuse question_id; later receipts override older ledger entries. Notes are
 unverified, not findings or coverage. Record them with the next necessary read,
 not for trivial checks or just before completion.
+Keep exploration tool calls brief. Record interim conclusions and unresolved
+premises with record_investigation instead of narrating a long plan.
 
 Each follow-up must address a specific premise of a concrete failure. For
 deletion/rename, check affected consumers, old paths, exports and configuration.

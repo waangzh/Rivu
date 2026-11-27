@@ -45,7 +45,8 @@ _COUNTS = {
     "repeated_cycle_length", "repeated_request_count", "repeated_source_read_count",
 }
 _FLAGS = {"ok", "closing", "compacted", "pressure", "unresolved", "finding", "reused",
-          "truncated", "partial", "scope_complete", "has_more", "usage_known", "capture_content"}
+          "truncated", "partial", "scope_complete", "has_more", "usage_known", "capture_content",
+          "tools_unchanged"}
 _LABELS = {
     "pressure_reason": {"capacity", "latency", "investigation"},
     "kind": {"review", "verification", "overview"},

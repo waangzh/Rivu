@@ -20,6 +20,47 @@ from app.review.tool_scope import is_sensitive_repository_path
 
 TOOL_LOOP_WARNING = 3
 TOOL_LOOP_LIMIT = 5
+HINT_LISTS = {"matches", "edges", "paths", "entries", "symbols"}
+
+
+def message_payload(message):
+    if message.type not in {"human", "tool"} or not isinstance(message.content, str):
+        return None
+    try:
+        payload = json.loads(message.content)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def message_payloads(messages):
+    for message in messages:
+        if (payload := message_payload(message)) is not None:
+            yield message, payload
+
+
+def material_packets(message, payload):
+    if message.type == "human":
+        yield from payload.get("materials", [])
+        yield from payload.get("working_materials", [])
+    elif message.name == "read_diff" and payload.get("ok") is True and "member" in payload:
+        yield payload
+
+
+def project_member(member):
+    if not member.get("lines"):
+        return member
+    runs = []
+    for line in member["lines"]:
+        kind, old, new = line["kind"], line["old_line_no"], line["new_line_no"]
+        if runs:
+            prev_kind, prev_old, prev_new, count = runs[-1]
+            if (kind == prev_kind and old == (prev_old + count if prev_old is not None else None)
+                    and new == (prev_new + count if prev_new is not None else None)):
+                runs[-1][3] += 1
+                continue
+        runs.append([kind, old, new, 1])
+    return {**{key: value for key, value in member.items() if key != "lines"}, "line_runs": runs}
 
 
 class RepeatedToolLoop(RuntimeError):
@@ -229,16 +270,19 @@ class AgentContext:
         tool_results = {}
         compacted = []
         for message in messages:
-            if message.type not in {"human", "tool"} or not isinstance(message.content, str):
-                compacted.append(message)
-                continue
-            try:
-                payload = json.loads(message.content)
-            except (TypeError, ValueError):
+            payload = message_payload(message)
+            if payload is None:
                 compacted.append(message)
                 continue
             changed = False
+            for packet in material_packets(message, payload):
+                member = packet.get("member")
+                if member and member.get("lines") and packet["sources"]:
+                    packet["member"] = project_member(member)
+                    changed = True
             for item, source in cls._source_items(payload):
+                if item.get("content_omitted"):
+                    continue
                 key = cls._source_range(source)[:3]
                 start, end = source.get("start_line"), source.get("end_line")
                 known = ranges.setdefault(key, [])
@@ -250,33 +294,95 @@ class AgentContext:
                     )
                     item["content_omitted"] = True
                     changed = True
-                merged = []
-                for first, last in sorted([*known, (start, end)]):
-                    if merged and first <= merged[-1][1] + 1:
-                        merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
-                    else:
-                        merged.append((first, last))
-                ranges[key] = merged
+                else:
+                    merged = []
+                    for first, last in sorted([*known, (start, end)]):
+                        if merged and first <= merged[-1][1] + 1:
+                            merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
+                        else:
+                            merged.append((first, last))
+                    ranges[key] = merged
                 if message.type == "tool":
                     item["source"] = {key: source[key] for key in (
                         "commit_sha", "side", "path", "start_line", "end_line",
                     )}
                     changed = True
-            if message.type == "tool" and isinstance(payload, dict):
-                fingerprint = identity([message.name, payload])
-                previous = tool_results.get(fingerprint)
-                if previous and any(key in payload for key in ("matches", "edges", "paths", "entries", "symbols", "member")):
-                    payload = {key: value for key, value in payload.items()
-                               if key not in {"matches", "edges", "paths", "entries", "symbols", "member"}}
-                    payload["same_result_as_tool_call"] = previous
-                    payload["content_omitted"] = True
-                    changed = True
-                else:
-                    tool_results[fingerprint] = message.tool_call_id
+            if message.type == "tool":
+                removable = HINT_LISTS & payload.keys()
+                semantic = {key: value for key, value in payload.items()
+                            if key not in {"receipt_ref", "cursor", "next_cursor"}}
+                if message.name == "read_diff" and payload.get("ok") is True and "member" in payload:
+                    source_ranges = [cls._source_range(item["source"]) for item in payload["sources"]]
+                    if all(any(first <= start and end <= last
+                               for first, last in ranges.get((commit, side, path), []))
+                           for commit, side, path, start, end in source_ranges):
+                        removable = removable | {"member"}
+                        semantic["sources"] = source_ranges
+                if removable:
+                    fingerprint = identity([message.name, semantic])
+                    previous = tool_results.get(fingerprint)
+                    if previous:
+                        for key in removable:
+                            del payload[key]
+                        payload.update(same_result_as_tool_call=previous, content_omitted=True)
+                        changed = True
+                    else:
+                        tool_results[fingerprint] = message.tool_call_id
             compacted.append(message.model_copy(update={
                 "content": json.dumps(payload, ensure_ascii=False),
             }) if changed else message)
         return compacted
+
+    def projected_delivery(self, messages, original):
+        """Match staged material against bodies and member metadata in this request."""
+        if not self.pending and not self.pending_hunks:
+            return {}, {}
+        handles, bodies, projected_members = {}, {}, {}
+        for message, payload in message_payloads(messages):
+            for packet in material_packets(message, payload):
+                member = packet["member"]
+                projected_members[member["id"]] = member
+            for item, source in self._source_items(payload):
+                key = self._source_range(source)
+                handles.setdefault(item.get("source_ref"), set()).add(key)
+                if not item.get("content_omitted"):
+                    lines = source_lines(item["content"])
+                    if len(lines) == key[4] - key[3] + 1:
+                        bodies.setdefault(key[:3], []).append((key[3], key[4], lines))
+
+        def covered(ref):
+            commit, side, path, start, end = self._source_range(ref)
+            remaining, parts = start, []
+            for first, last, lines in sorted(bodies.get((commit, side, path), [])):
+                if first > remaining:
+                    break
+                if last < remaining:
+                    continue
+                parts.extend(lines[remaining - first:min(last, end) - first + 1])
+                remaining = last + 1
+                if remaining > end:
+                    return digest("".join(parts)) == ref["content_hash"]
+            return False
+
+        pending = {}
+        for handle, ref in self.pending.items():
+            source = ref.model_dump()
+            if self._source_range(source) in handles.get(handle, ()) and covered(source):
+                pending[handle] = ref
+        hunks = {}
+        if self.pending_hunks:
+            for message, payload in message_payloads(reversed(original)):
+                for packet in material_packets(message, payload):
+                    member, sources = packet["member"], packet["sources"]
+                    key = member["id"]
+                    staged = self.pending_hunks.get(key)
+                    if (staged and projected_members.get(key) == project_member(member)
+                            and staged == identity({"member": member, "sources": sources})
+                            and all(covered(item["source"]) for item in sources)):
+                        hunks[key] = staged
+                if len(hunks) == len(self.pending_hunks):
+                    break
+        return pending, hunks
 
     async def archive_tool(self, name, arguments, message):
         """Archive the original result once; handles never grant source authority."""
@@ -328,6 +434,7 @@ class AgentContext:
             "investigations": {key: value.model_dump() for key, value in self.investigations.items()},
             "memory_revision": self.memory_revision,
             "sources": {key: value.model_dump() for key, value in self.visible.items()},
+            "missing_material": self.material_failures,
             "receipts": self.receipts, "visible_receipts": sorted(self.visible_receipts),
             "candidates": self.submitted, "cursors": self.cursors,
             "context_metrics": self.window.metrics if self.window else {},
@@ -386,19 +493,22 @@ class AgentContext:
         return [self.visible[handle] for handle in handles]
 
     async def acknowledge(self, pending, hunks):
+        failures = {**self.material_failures, **{
+            key: "material_capacity" for key in self.pending_hunks.keys() - hunks.keys()
+            if key not in self.delivered_hunks
+        }}
         await asyncio.to_thread(self.provider.store.deliver, self.provider.run.id, self.work,
-            list(hunks), self.material_failures, self.provider.lease,
+            list(hunks), failures, self.provider.lease,
             source_ids=[ref.id for ref in pending.values()], digests=hunks)
         self.visible.update(pending)
         self.delivered_hunks.update(hunks)
         self.visible_receipts.update(self.receipts)
         for ref in pending.values():
             self.source_paths.add(ref.path)
-        for handle in pending:
-            self.pending.pop(handle, None)
-        for key in hunks:
-            self.pending_hunks.pop(key, None)
-            self.material_failures.pop(key, None)
+        self.pending.clear()
+        self.pending_hunks.clear()
+        self.material_failures.clear()
+        self.material_failures.update({key: reason for key, reason in failures.items() if key not in hunks})
 
     async def read(self, path, start, end, revision, *, allow_partial=False):
         result = await self.evidence.read(path, start, end, revision, allow_partial=allow_partial)
@@ -600,8 +710,9 @@ class ContextProvider:
             before_pending = dict(context.pending)
             try:
                 packet = await self.material(context, key)
-            except (ValueError, OSError):
-                context.material_failures[key] = "material_unavailable"
+            except (ValueError, OSError) as exc:
+                context.material_failures[key] = (
+                    "material_capacity" if str(exc) == "material_capacity" else "material_unavailable")
                 continue
             cost = tokens(packet)
             material.append(packet)

@@ -83,6 +83,7 @@ class OpenAICompatibleProvider(LLMProvider):
             return DeepSeekChatModel(**options)
         if profile.api_protocol == "anthropic":
             from app.llm.native import ObservedChatAnthropic
+            options["model_kwargs"] = {"cache_control": {"type": "ephemeral"}}
             if enabled:
                 options.update(temperature=None, thinking={"type": "enabled",
                     "budget_tokens": profile.reasoning_budget_tokens})

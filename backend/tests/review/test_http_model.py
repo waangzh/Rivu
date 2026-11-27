@@ -329,6 +329,7 @@ async def test_capacity_epochs_restore_archived_query_and_source_through_http_to
     assert report.status == "completed" and report.unresolved_unit_count == 1
     state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
     assert state["context_metrics"]["epoch"] >= 1
+    assert state["context_metrics"]["tools_unchanged"] is True
     assert len(state["receipts"]) == expected_reviews - 1
     with sessions() as session:
         assert len(list(session.scalars(select(ReviewRequestOrm)))) == report.usage["model_calls"] == expected_reviews + 1
@@ -880,6 +881,9 @@ async def test_tokens_and_time_guide_completion_before_call_fuse(tmp_path, bound
         assert "cycles of 2 tool rounds" in review_requests[-1]["messages"][-1]["content"]
         assert {tool["function"]["name"] for tool in review_requests[-1]["tools"]} == {
             "submit_candidate", "UnitCompletion"}
+        state = json.loads(provider.evidence.artifacts.read_text(report.units[0].context_archive_uri))
+        assert state["context_metrics"]["shared_message_prefix_tokens"] > 0
+        assert state["context_metrics"]["tools_unchanged"] is False
     elif boundary.startswith("loop"):
         assert len(review_requests) == (7 if boundary in {"loop_refuses", "loop_corrects"} else 6)
         assert report.units[0].status == ("interrupted" if boundary == "loop_refuses" else "completed")
@@ -932,8 +936,12 @@ async def test_low_novelty_keeps_tools_for_a_specific_followup(tmp_path, role, i
         else:
             investigation_requests.append(payload)
             step = len(investigation_requests)
-            assert {"read_file", "search_code"} <= names
+            assert {"read_file", "read_diff", "search_code"} <= names
             if step == 1:
+                read_file = next(tool["function"] for tool in payload["tools"]
+                                 if tool["function"]["name"] == "read_file")
+                assert "only when the relevant logic continues" in read_file["description"]
+                assert "list_symbols or search_code" in read_file["description"]
                 assert not any("Runtime guidance (trusted host):" in (message.get("content") or "")
                                for message in payload["messages"])
             if step == 5 and investigation == "overlapping_reads":

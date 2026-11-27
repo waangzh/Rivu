@@ -128,11 +128,17 @@ async def test_quoted_source_packet_fits_protected_reservation(tmp_path):
     assert not context.pending_hunks
     assert set(context.pending) == {
         material["source_ref"] for material in initial["candidate_materials"]}
+    # The raw estimate omits this member. The outgoing projection reuses the candidate source
+    # and replaces the duplicated line text, so the real request can admit the entire hunk.
     await AgentRunner(ReviewModel()).run(check, provider, BudgetGate(store, run, lease))
     saved = next(item for item in store.work_items(run.id) if item.id == check.id)
     assert saved.status == "completed", saved.error_code
-    assert saved.material_delivery == "incomplete"
-    assert store.candidates(run.id)[0].verification.verdict == "insufficient"
+    assert saved.material_delivery == "complete"
+    archive = json.loads(provider.evidence.artifacts.read_text(saved.context_archive_uri))
+    packet = json.loads(provider.evidence.artifacts.read_text(archive["initial_context"]["uri"]))
+    assert packet["materials"][0]["member"]["lines"]
+    assert verifier_estimate(packet) > VERIFICATION_INPUT
+    assert store.candidates(run.id)[0].verification.verdict == "confirmed"
     with store.sessions() as session:
         ticket = session.scalar(select(ReviewRequestOrm).where(ReviewRequestOrm.kind == "verification"))
         assert ticket.reserved_input_tokens <= VERIFICATION_INPUT

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.review.context import TOOL_LOOP_WARNING
+from app.review.context import TOOL_LOOP_WARNING, material_packets, message_payload, message_payloads
 from app.review.planner import tokens
 
 
@@ -27,6 +27,7 @@ class WorkingContext:
     checkpoint_revision: int | None = None
     metrics: dict = field(default_factory=dict)
     previous_projection: list = field(default_factory=list)
+    previous_tools: str | None = None
     slow_responses: int = 0
 
     @property
@@ -42,10 +43,10 @@ class WorkingContext:
         return cls.initial_ceiling(limits)
 
     @staticmethod
-    def active_refs(context):
+    def active_refs(context, *, include_pending=True):
         questions = context.investigations
         pending = [key for key, note in questions.items() if note.status in {"open", "blocked"}]
-        visited, refs = set(), set(context.pending)
+        visited, refs = set(), set(context.pending) if include_pending else set()
         while pending:
             key = pending.pop()
             if key in visited or key not in questions:
@@ -65,29 +66,58 @@ class WorkingContext:
         )
         self.slow_responses = self.slow_responses + 1 if short_and_slow else 0
 
+    def observe_tools(self, fingerprint):
+        self.metrics["tools_unchanged"] = self.previous_tools == fingerprint
+        self.previous_tools = fingerprint
+
     @classmethod
-    def required_refs(cls, context, catalog):
-        active = cls.active_refs(context)
+    def required_refs(cls, context, catalog, *, include_pending=True):
+        active = cls.active_refs(context, include_pending=include_pending)
         if context.work.kind == "verification":
             active.update(item["source_ref"] for item in context.initial_packet.get("candidate_materials", []))
         active_sources = [catalog[handle][1]["source"] for handle in active if handle in catalog]
+        if not active_sources:
+            return active
         active.update(handle for handle, (_, item) in catalog.items() if any(
             item["source"]["path"] == source["path"]
             and item["source"]["side"] != source["side"]
             and item["source"]["start_line"] <= source["end_line"]
             and source["start_line"] <= item["source"]["end_line"]
             for source in active_sources))
+
+        def overlaps(source, side, path, first, last):
+            return (source["side"] == side and source["path"] == path
+                    and source["start_line"] <= last and first <= source["end_line"])
+
+        member_ids = context.initial_packet.get("unit", {}).get("required_hunk_ids", [])
+        if context.provider is None or not member_ids:
+            return active
+        member_map = context.provider._member_map
+        paired_ranges = set()
+        for key in member_ids:
+            member = member_map[key]
+            sides = []
+            for side, path_key, number in (
+                ("base", "old_path", "old_line_no"), ("head", "path", "new_line_no"),
+            ):
+                lines = [line[number] for line in member["lines"] if line[number] is not None]
+                if lines:
+                    sides.append((side, member[path_key], lines[0], lines[-1]))
+            if len(sides) == 2:
+                for current, other in (sides, sides[::-1]):
+                    if any(overlaps(source, *current) for source in active_sources):
+                        paired_ranges.add(other)
+        if paired_ranges:
+            active.update(handle for handle, (_, item) in catalog.items()
+                          if any(overlaps(item["source"], *side) for side in paired_ranges))
         return active
 
     @staticmethod
     def source_catalog(context, messages):
         catalog = {}
         for position, message in enumerate(messages):
-            if message.type not in {"human", "tool"}:
-                continue
-            try:
-                payload = json.loads(message.content)
-            except (ValueError, TypeError):
+            payload = message_payload(message)
+            if payload is None:
                 continue
             for item, source in context._source_items(payload):
                 handle = item.get("source_ref")
@@ -198,6 +228,7 @@ class WorkingContext:
                                    "missing_material", "missing_candidate_materials"}}
         catalog = self.source_catalog(context, messages)
         active = self.required_refs(context, catalog)
+        required = self.required_refs(context, catalog, include_pending=False)
         closed = {handle for note in context.investigations.values()
                   if note.status in {"resolved", "not_applicable"}
                   for handle in [*note.source_refs, *note.counterevidence_refs]} - active
@@ -208,6 +239,15 @@ class WorkingContext:
         cutoff = rounds[-2] if len(rounds) >= 2 else (rounds[0] if rounds else len(messages))
         recent = messages[cutoff:]
         recent_handles = {handle for handle, (position, _) in catalog.items() if position >= cutoff}
+        recent_members = {packet["member"]["id"] for message, payload in message_payloads(recent)
+                          for packet in material_packets(message, payload)}
+        old_materials = {
+            packet["member"]["id"]: {"member": packet["member"], "sources": packet["sources"]}
+            for message, payload in message_payloads(messages[:cutoff])
+            for packet in material_packets(message, payload)
+            if packet["member"]["id"] not in recent_members
+            and (packet["member"]["id"] in context.pending_hunks or packet["member"].get("lines") == [])
+        }
         inventory = [
             {"source_ref": handle, **{key: item["source"][key] for key in (
                 "commit_sha", "side", "path", "start_line", "end_line")}}
@@ -242,9 +282,8 @@ class WorkingContext:
             "source_inventory": inventory, "change_inventory": changes,
             "retrieval_receipts": receipts,
             "read_history": list(read_history.values()),
-            "missing_material": context.material_failures,
             "notice": (
-                "Only working_set and recent messages contain source bodies. Inventory and "
+                "Use working_set, working_materials and recent messages for source bodies. Inventory and "
                 "investigation notes are not evidence of a claim or completed review. "
                 "read_file restores any listed fixed source; read_diff restores a change member; "
                 "recall_context restores a receipt. Read history records received data, not "
@@ -252,29 +291,68 @@ class WorkingContext:
                 "Search scope/partial flags still apply."
             ),
         }
-        working = []
-        prefix = [
-            packet_message(envelope, "review-envelope"),
-            packet_message(memory, f"investigation-memory-{self.epoch + 1}"),
-            packet_message({"working_set": working}, f"working-set-{self.epoch + 1}"),
-        ]
+        working, materials = [], []
+        envelope_message = packet_message(envelope, "review-envelope")
+        next_epoch = self.epoch + 1
 
         def assemble():
-            prefix[2] = packet_message({"working_set": working}, f"working-set-{self.epoch + 1}")
-            return context.compact_messages([*prefix, *recent])
+            packet = {"working_set": working}
+            if materials:
+                packet["working_materials"] = materials
+            omitted = context.pending_hunks.keys() - context.delivered_hunks - recent_members
+            omitted.difference_update(item["member"]["id"] for item in materials)
+            memory["missing_material"] = {
+                **context.material_failures, **dict.fromkeys(sorted(omitted), "material_capacity"),
+            }
+            return context.compact_messages([
+                envelope_message,
+                packet_message(memory, f"investigation-memory-{next_epoch}"),
+                packet_message(packet, f"working-set-{next_epoch}"),
+                *recent,
+            ])
+
+        def fit(collection, candidates):
+            candidates = list(candidates)
+            if not candidates:
+                return []
+            start = len(collection)
+            collection.extend(candidates)
+            if estimate(assemble()) <= input_limit:
+                return candidates
+            del collection[start:]
+            kept = []
+            for item in candidates:
+                collection.append(item)
+                if estimate(assemble()) <= input_limit:
+                    kept.append(item)
+                else:
+                    collection.pop()
+            return kept
 
         retained = set(recent_handles)
-        for handle in sorted(active - recent_handles):
+        for handle in sorted(required - recent_handles):
             if handle in catalog:
                 working.append(catalog[handle][1])
                 retained.add(handle)
+
+        pending_materials = [packet for key, packet in old_materials.items() if key in context.pending_hunks]
+        pending_materials.sort(key=lambda packet: bool(packet["member"].get("lines")))
+        staged_handles = {item["source_ref"] for packet in pending_materials for item in packet["sources"]}
+        for packet in fit(materials, pending_materials):
+            retained.update(item["source_ref"] for item in packet["sources"])
+        for item in fit(working, (catalog[key][1] for key in sorted(active - retained - staged_handles)
+                                  if key in catalog)):
+            retained.add(item["source_ref"])
+        for packet in fit(materials, (packet for key, packet in old_materials.items()
+                                      if key not in context.pending_hunks)):
+            retained.update(item["source_ref"] for item in packet["sources"])
         # Critical premises can expand above the soft target, but not the request gate.
         required_size = estimate(assemble())
         optional_limit = max(target, required_size)
         size = required_size
         changed_handles = {item["source_ref"] for packet in initial.get("materials", [])
                            for item in packet["sources"]}
-        order = sorted(set(catalog) - retained - closed, key=lambda handle: (
+        order = sorted(set(catalog) - retained - closed - staged_handles, key=lambda handle: (
             handle not in changed_handles, -catalog[handle][0], handle))
         for handle in order:
             cost = tokens(catalog[handle][1])

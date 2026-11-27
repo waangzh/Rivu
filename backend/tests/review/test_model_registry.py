@@ -49,6 +49,10 @@ def test_task_freezes_profile_and_resolves_original_provider_after_default_chang
                                  output_tokens=saved.options.limits.output_tokens)
     assert model.model_name == "first" and model.max_tokens == 2048
     new = freeze_configuration(request, providers)
+    assert new.prompt_version == "review-vnext-16"
+    historical = Configuration.model_validate_json(saved.model_copy(
+        update={"prompt_version": "review-vnext-15"}).model_dump_json())
+    assert historical.prompt_version == "review-vnext-15"
     assert new.provider_id == "cloud" and new.thinking
     payload = providers.for_run(new).agent_model(profile=new.model_profile)._get_request_payload([
         HumanMessage(content="fixture")])
@@ -98,10 +102,14 @@ async def test_anthropic_http_roundtrip_keeps_thinking_signature_and_cached_usag
         payload = json.loads(request.content)
         requests.append(payload)
         assert request.url.path == "/v1/messages"
+        assert payload["cache_control"] == {"type": "ephemeral"}
         assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2048}
         assert payload["max_tokens"] == 4096 and "temperature" not in payload
         if len(requests) == 2:
-            assert payload["messages"][1]["content"][0]["signature"] == "fixture-signature"
+            assert payload["messages"][1]["content"][0] == {
+                "type": "thinking", "thinking": "fixture-reasoning", "signature": "fixture-signature",
+            }
+            assert payload["messages"][2]["content"][0]["type"] == "tool_result"
         return httpx2.Response(200, json={"id": "msg-fixture", "type": "message",
             "role": "assistant", "model": "claude-sonnet", "stop_reason": "tool_use",
             "stop_sequence": None, "content": [

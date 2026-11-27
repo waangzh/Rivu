@@ -65,7 +65,8 @@ def submit_candidate(store, run, lease, work, hunk_id="h1"):
 
 
 def setup_source_run(tmp_path, *, head_source="def ratio(x):\n    return 10 / x\n",
-                     base_source="def ratio(x):\n    return 10 / (x or 1)\n", support_sources=None):
+                     base_source="def ratio(x):\n    return 10 / (x or 1)\n", support_sources=None,
+                     head_executable_paths=()):
     import subprocess
     from app.models.orm import ReviewTaskOrm, ReviewWorkItemOrm
     from app.review.context import ContextProvider
@@ -91,6 +92,8 @@ def setup_source_run(tmp_path, *, head_source="def ratio(x):\n    return 10 / x\
     base = git("rev-parse", "HEAD")
     (repo / "a.py").write_text(head_source, encoding="utf-8")
     git("add", ".")
+    for path in head_executable_paths:
+        git("update-index", "--chmod=+x", "--", path)
     git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "head")
     head = git("rev-parse", "HEAD")
     store, run, lease, sessions = setup_run(tmp_path)

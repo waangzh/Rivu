@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.models.review.diff import ChangedFile
 from app.review.context import AgentContext, InvestigationState
 from app.review.domain import Plan, SourceRef, Unit
+from tests.review.vnext_helpers import setup_source_run
 
 
 def source(path="a.py", start=1, end=2, side="head"):
@@ -62,19 +63,33 @@ def test_model_prose_cannot_suppress_source_and_partial_overlap_keeps_new_bytes(
     assert "SOURCE_BYTES_" in projected[2].content
 
 
-def test_repeated_search_results_keep_scope_and_cursor_control_fields():
+async def test_archived_repeated_search_results_keep_current_receipt_and_pagination(tmp_path):
+    store, run, lease, provider, _ = setup_source_run(tmp_path)
+    work = store.claim(run.id, store.work_items(run.id)[0].id, lease)
+    context = AgentContext(provider, work, None)
     result = {"ok": True, "source": "search_hint", "pagination_id": "scope",
-              "has_more": False, "next_cursor": None, "scope_complete": True,
+              "has_more": True, "scope_complete": False, "truncated": True,
+              "scope_files": 3, "filters": {"path": "a.py"},
               "matches": [{"path": "a.py", "line": 1, "text": "HINT_TEXT"}]}
-    messages = [ToolMessage(content=json.dumps(result), tool_call_id=str(index),
-                            name="search_code") for index in range(2)]
+    variants = [{}, {}, {"matches": [{"path": "a.py", "line": 2, "text": "next page"}]},
+                {"pagination_id": "other"}, {"filters": {"path": "b.py"}}, {"scope_files": 4},
+                {"scope_complete": True}, {"has_more": False}, {"truncated": False}]
+    messages = []
+    for index, change in enumerate(variants):
+        body = {**result, **change, "cursor": f"page-{index}", "next_cursor": f"next-{index}"}
+        messages.append(await context.archive_tool("search_code", {"cursor": body["cursor"]},
+            ToolMessage(content=json.dumps(body), tool_call_id=str(index), name="search_code")))
     projected = AgentContext.compact_messages(messages)
     assert "HINT_TEXT" in projected[0].content
     duplicate = json.loads(projected[1].content)
-    assert duplicate["same_result_as_tool_call"] == "0"
-    assert duplicate["scope_complete"] is True
-    assert duplicate["next_cursor"] is None
-    assert "matches" not in duplicate
+    assert duplicate == {
+        **{key: value for key, value in result.items() if key != "matches"},
+        "receipt_ref": "R2", "cursor": "page-1", "next_cursor": "next-1",
+        "same_result_as_tool_call": "0", "content_omitted": True,
+    }
+    assert projected[2:] == messages[2:]
+    assert AgentContext.compact_messages(messages[1:])[0] == messages[1]
+    assert AgentContext.compact_messages(projected) == projected
 
 
 def test_memory_only_round_does_not_reset_repeated_investigation_loop():

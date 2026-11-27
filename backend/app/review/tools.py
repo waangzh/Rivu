@@ -119,7 +119,9 @@ async def read_file(path: str, runtime: ToolRuntime[AgentContext],
     """Read fixed lines using start/end (defaults: head, start=1, end=null).
 
     Integer end reads exact inclusive lines (max 240); end=null reads a bounded page.
-    Continue at next_start if present. Prefer read_symbol for a named symbol.
+    Follow next_start only when the relevant logic continues onto the next page.
+    For an unknown region in a large file, start with list_symbols or search_code,
+    then read a precise range. Prefer read_symbol for a known symbol.
     """
     return await runtime.context.read(path, start, end, revision)
 

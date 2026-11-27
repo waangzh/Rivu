@@ -63,7 +63,7 @@ class Configuration(Model):
     api_key_env: str | None = None
     model_profile: ModelProfile | None = None
     options: Options
-    prompt_version: str = "review-vnext-15"
+    prompt_version: str = "review-vnext-16"
 
 
 class Snapshot(Model):
