@@ -88,8 +88,6 @@ async def get_model_providers():
 async def get_provider_models(provider_id: str):
     try:
         provider = ProviderRegistry(settings).resolve(provider_id)
-        if provider._provider_name not in {"openai", "deepseek", "openai-compatible"}:
-            raise HTTPException(status_code=400, detail="该供应商不支持 OpenAI 兼容模型列表")
         catalog = await fetch_model_catalog(
             provider=provider._provider_name, api_key=provider._api_key,
             base_url=provider._base_url, default_model=provider._default_model)

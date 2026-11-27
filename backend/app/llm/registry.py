@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from app.llm.profiles import ProviderConfig
-from app.llm.providers import LLMProviderError, OpenAICompatibleProvider, build_provider
+from app.llm.providers import LLMProviderError, OpenAICompatibleProvider, build_provider, require_chat_provider
 
 
 class RegisteredProvider(OpenAICompatibleProvider):
@@ -64,6 +64,7 @@ class ProviderRegistry:
                                   self.settings.rivu_model_request_timeout_seconds)
 
     def for_run(self, configuration):
+        require_chat_provider(configuration.provider, configuration.model_profile)
         if configuration.provider_id is not None:
             provider = self.resolve(configuration.provider_id, endpoint=configuration.endpoint,
                                     api_key_env=configuration.api_key_env)

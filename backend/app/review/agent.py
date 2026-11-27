@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.core.config import settings
+from app.llm.chat import request_preparation_error, validate_model_replay
 from app.llm.receipts import observe_response, safe_request_id
 from app.review.context import AgentContext, RepeatedToolLoop, TOOL_LOOP_LIMIT, TOOL_LOOP_WARNING
 from app.review.domain import AgentErrorDiagnostic, UnitCompletion, VerificationOutput, utcnow
@@ -64,9 +65,7 @@ def error_diagnostic(exc, *, ticket=None, receipt=None):
         "APIStatusError", "APIResponseValidationError", "TimeoutError", "ReadTimeout",
         "ConnectError", "RemoteProtocolError",
     }
-    codes = {"deepseek_reasoning_content_missing", "deepseek_thinking_forced_tool_unsupported",
-             "thinking_forced_tool_unsupported"}
-    code = str(exc) if type(exc) is ValueError and str(exc) in codes else None
+    code = request_preparation_error(exc)
     status = getattr(exc, "status_code", None)
     if type(status) is not int or not 100 <= status <= 599:
         status = None
@@ -220,10 +219,9 @@ class RequestGate(AgentMiddleware):
                 ([request.system_message] if request.system_message else []) + messages,
                 tools, schema) + 1024
 
-        validate_replay = getattr(request.model, "validate_replay", None)
         def inspect_projection(messages):
-            if validate_replay is not None:
-                validate_replay(([request.system_message] if request.system_message else []) + messages)
+            validate_model_replay(request.model,
+                                  ([request.system_message] if request.system_message else []) + messages)
             return context.projected_delivery(messages, request.messages)
 
         input_limit = limits.context_tokens - limits.output_tokens

@@ -245,7 +245,7 @@ async def test_disabled_overview_does_not_build_materials_or_spend_budget(tmp_pa
         await BudgetGate(store, run, lease).reserve(None, 100, overview=True)
 
 
-@pytest.mark.parametrize("mode", ["prose", "source", "malformed"])
+@pytest.mark.parametrize("mode", ["prose", "source", "malformed", "missing_reasoning"])
 async def test_overview_correction_preserves_deepseek_thinking_http_roundtrip(tmp_path, mode):
     from tests.review.test_deepseek import completion, deepseek_model, tool_message
 
@@ -266,6 +266,8 @@ async def test_overview_correction_preserves_deepseek_thinking_http_roundtrip(tm
                 message["content"] = PRIVATE
             elif mode == "malformed":
                 message["tool_calls"][0]["function"]["arguments"] = "{"
+            elif mode == "missing_reasoning":
+                message.pop("reasoning_content")
         else:
             assert len(requests) == 2
             prior = next(item for item in payload["messages"] if item["role"] == "assistant")
@@ -283,10 +285,14 @@ async def test_overview_correction_preserves_deepseek_thinking_http_roundtrip(tm
                           http_client=client, max_retries=0)
         model.root_async_client, model.async_client = sdk, sdk.chat.completions
         overview = await generate_overview(report, provider, BudgetGate(store, run, lease), model)
-    assert overview.status == "ready"
-    assert store.usage(run.id)["model_calls"] == 2
-    assert store.usage(run.id)["output_tokens"] == 24
-    assert store.usage(run.id)["cached_input_tokens"] == 40
+    expected_calls = 1 if mode == "missing_reasoning" else 2
+    assert len(requests) == store.usage(run.id)["model_calls"] == expected_calls
+    assert store.usage(run.id)["output_tokens"] == 12 * expected_calls
+    assert store.usage(run.id)["cached_input_tokens"] == 20 * expected_calls
+    if mode == "missing_reasoning":
+        assert overview.status == "failed" and overview.error_code == "reasoning_content_missing"
+    else:
+        assert overview.status == "ready"
     with sessions() as session:
         tickets = list(session.scalars(select(ReviewRequestOrm)))
         assert all(ticket.state == "settled" for ticket in tickets)

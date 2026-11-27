@@ -21,8 +21,6 @@ def test_presets_use_standard_api_and_supported_models():
     assert presets["glm"]["config"].base_url == "https://open.bigmodel.cn/api/paas/v4"
     assert presets["kimi"]["config"].base_url == "https://api.moonshot.ai/v1"
     for preset in presets.values():
-        assert all(profile.api_protocol.startswith("openai-")
-                   for profile in preset["config"].models)
         assert preset["config"].default_model in {
             profile.model_id for profile in preset["config"].models}
 
@@ -81,7 +79,7 @@ def test_thinking_can_be_disabled_for_the_preset(provider_id):
     model = RegisteredProvider(provider_id, preset["config"], "fixture", 60).agent_model(thinking=False)
     payload = model._get_request_payload([HumanMessage(content="fixture")])
     assert payload["extra_body"]["thinking"] == {"type": "disabled"}
-    assert not model.replay_reasoning
+    assert not model.compat.replay_reasoning_content
 
 
 @pytest.mark.parametrize("provider_id", ["glm", "kimi"])

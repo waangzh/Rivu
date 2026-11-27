@@ -5,10 +5,10 @@ import { createSSRApp } from 'vue';
 import { renderToString } from '@vue/server-renderer';
 import { reactive } from 'vue';
 
-const profile = { model_id: 'reasoning-model', api_protocol: 'openai-responses',
+const profile = { model_id: 'reasoning-model',
   supports_tools: true, reasoning_format: 'openai', thinking: true,
   reasoning_effort: 'medium', reasoning_efforts: ['low', 'medium', 'high'],
-  reasoning_budget_tokens: 2048, supports_temperature: false, context_tokens: 128000,
+  supports_temperature: false, context_tokens: 128000,
   max_output_tokens: 8192, max_tokens_parameter: 'max_completion_tokens', stream_usage: true };
 
 test('任务创建与重试保留 Provider、Thinking 和推理强度', async () => {
@@ -49,7 +49,6 @@ test('新建页显示 Provider、真实能力与模型推理强度', async () =>
     assert.match(html, /供应商/);
     assert.match(html, /OpenAI/);
     assert.doesNotMatch(html, />default</);
-    assert.match(html, /openai-responses/);
     assert.match(html, /128,000/);
     assert.match(html, /8,192/);
     assert.match(html, /Thinking/);
@@ -82,7 +81,7 @@ test('供应商名称根据配置展示并区分同名服务', async () => {
 test('选择官方供应商会复制模型预设，自定义模型的工具能力默认未知', async () => {
   const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' });
   try {
-    const { createProvider, discoveredProfile, profileSource, protocolLabel, usesPresetProtocol } = await server.ssrLoadModule('/src/utils/providerPresets.ts');
+    const { createProvider, discoveredProfile, profileSource } = await server.ssrLoadModule('/src/utils/providerPresets.ts');
     const preset = reactive({ id: 'deepseek', label: 'DeepSeek', config: {
       provider: 'deepseek', base_url: 'https://api.deepseek.com', api_key_env: 'DEEPSEEK_API_KEY',
       default_model: profile.model_id, models: [profile] } });
@@ -90,22 +89,17 @@ test('选择官方供应商会复制模型预设，自定义模型的工具能�
     assert.equal(first.id, 'deepseek');
     assert.equal(first.config.provider, 'deepseek');
     assert.equal(profileSource(first, first.config.models[0], [preset]), '内置预设');
-    assert.equal(usesPresetProtocol(first, first.config.models[0], [preset]), true);
-    assert.equal(protocolLabel(first.config.models[0].api_protocol), 'Responses');
+    assert.equal(first.config.models[0].max_tokens_parameter, 'max_completion_tokens');
     assert.equal(discoveredProfile(first, profile.model_id, [preset]).supports_tools, true);
     assert.equal(discoveredProfile(first, 'unlisted-model', [preset]).supports_tools, false);
     const second = createProvider(preset, [first]);
     assert.equal(second.id, 'deepseek-2');
     first.config.models[0].supports_tools = false;
     assert.equal(profileSource(first, first.config.models[0], [preset]), '手动配置');
-    assert.equal(usesPresetProtocol(first, first.config.models[0], [preset]), true);
-    first.config.models[0].api_protocol = 'openai-chat';
-    assert.equal(usesPresetProtocol(first, first.config.models[0], [preset]), false);
     assert.equal(second.config.models[0].supports_tools, true);
     const custom = createProvider(undefined, []);
     assert.equal(custom.config.provider, 'openai-compatible');
     assert.equal(custom.config.models[0].supports_tools, false);
-    assert.equal(usesPresetProtocol(custom, custom.config.models[0], [preset]), false);
-    assert.equal(protocolLabel(custom.config.models[0].api_protocol), 'Chat Completions');
+    assert.equal(custom.config.models[0].max_tokens_parameter, 'max_tokens');
   } finally { await server.close(); }
 });

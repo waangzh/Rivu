@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.llm.profiles import ProviderConfig
+from app.llm.profiles import ProviderConfig, ProviderKind
 
 
 class Settings(BaseSettings):
@@ -43,12 +43,17 @@ class Settings(BaseSettings):
     # ---- LLM Provider ----
     openai_base_url: str = "https://api.openai.com/v1"
     rivu_model: str = "gpt-4.1-mini"
-    rivu_provider: str = "openai"  # openai / deepseek / openai-compatible
+    rivu_provider: ProviderKind = "openai"
     rivu_model_request_timeout_seconds: float = Field(default=60, ge=1, le=600)
     rivu_deepseek_thinking: bool = True
     rivu_deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     rivu_model_providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     rivu_default_provider: str | None = None
+
+    @field_validator("rivu_provider", mode="before")
+    @classmethod
+    def normalize_provider(cls, value):
+        return value.strip().lower() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def validate_model_providers(self):

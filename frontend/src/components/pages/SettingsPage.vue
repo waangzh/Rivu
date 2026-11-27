@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getDiagnostics, getModelProviders, getProviderModels, getProviderPresets, testModelConnection, updateSystemSettings } from '../../api/client';
 import type { SystemDiagnostics, ProviderInfo, ModelProfile, ProviderPreset } from '../../types/operations';
 import { usePreferences } from '../../composables/usePreferences';
-import { createProvider, discoveredProfile, newProfile, profileSource, protocolLabel, providerDisplayNames, providerIsCustom, usesPresetProtocol } from '../../utils/providerPresets';
+import { createProvider, discoveredProfile, newProfile, profileSource, providerDisplayNames, providerIsCustom } from '../../utils/providerPresets';
 import AppIcon from '../common/AppIcon.vue';
 const emit = defineEmits<{ saved: [] }>();
 const { theme, density } = usePreferences();
@@ -22,15 +22,20 @@ const unsaved = computed(() => (id: string) => {
   const item = providers.value.find(provider => provider.id === id);
   return !item || savedConfigs.value[id] !== JSON.stringify(item.config);
 });
-const protocols = ['openai-chat', 'openai-responses'] as const;
-const formats = ['openai', 'deepseek', 'glm', 'kimi', 'qwen', 'chat-template', 'anthropic', 'google-budget', 'google-level'] as const;
+const formats = ['openai', 'deepseek', 'glm', 'kimi', 'qwen', 'chat-template'] as const;
 const efforts = ['minimal', 'low', 'medium', 'high', 'max', 'xhigh'] as const;
 function effortsFor(format: ModelProfile['reasoning_format']) {
   if (format === 'deepseek') return ['low', 'high', 'max'];
-  if (format === 'google-level') return ['minimal', 'low', 'medium', 'high'];
-  if (format === 'anthropic') return ['low', 'medium', 'high'];
   if (format === 'openai') return efforts;
   return [];
+}
+function syncReasoningOptions(profile: ModelProfile) {
+  profile.thinking = profile.reasoning_format === 'openai' || (profile.reasoning_format !== null && profile.thinking);
+  const supported = effortsFor(profile.reasoning_format);
+  profile.reasoning_efforts = profile.reasoning_efforts.filter(effort => supported.includes(effort));
+  if (profile.reasoning_effort && !profile.reasoning_efforts.includes(profile.reasoning_effort)) {
+    profile.reasoning_effort = null;
+  }
 }
 function addProvider() {
   const preset = presets.value.find(item => item.id === selectedPreset.value);
@@ -137,7 +142,7 @@ onBeforeUnmount(() => { disposed = true; });
           <p v-else class="field-hint">服务端凭据已配置。</p>
           <label>默认模型<select v-model="item.config.default_model" required :disabled="busy"><option v-for="profile in item.config.models" :key="profile.model_id" :value="profile.model_id">{{ profile.model_id || '请填写模型名称' }}</option></select></label>
           <details><summary>连接高级设置</summary><div class="section-stack space-top"><label>接口地址<input v-model="item.config.base_url" type="url" required :disabled="busy" /></label><label v-if="providerIsCustom(item, presets)">服务端密钥变量<input v-model="item.config.api_key_env" required :disabled="busy" /></label><p class="field-hint">更改已冻结任务的接口地址会影响其恢复。</p></div></details>
-          <div v-if="['openai', 'deepseek', 'openai-compatible'].includes(item.config.provider)" class="section-stack">
+          <div class="section-stack">
             <div><button type="button" class="btn secondary" :disabled="busy || unsaved(item.id)" :title="unsaved(item.id) ? '请先保存更改' : '从供应商获取模型列表'" @click="findModels(item)">查找供应商模型</button></div>
             <p v-if="unsaved(item.id)" class="field-hint">请先保存供应商配置，再查询模型。</p>
             <template v-if="catalogModels">
@@ -159,17 +164,14 @@ onBeforeUnmount(() => { disposed = true; });
             <label v-if="profile.reasoning_format"><input v-model="profile.thinking" type="checkbox" :disabled="busy || profile.reasoning_format === 'openai'" />默认开启 Thinking</label>
             <p v-if="profile.reasoning_format === 'kimi' && profile.thinking" class="field-hint">Kimi 官方建议 Thinking 工具调用的输出上限至少为 16000 Token；实际审查使用服务端配置的上限。</p>
             <details><summary>模型高级设置</summary><div class="section-stack space-top">
-            <p v-if="usesPresetProtocol(item, profile, presets)" class="field-hint">接口协议：{{ protocolLabel(profile.api_protocol) }}</p>
-            <label v-else>接口协议<select v-model="profile.api_protocol" :disabled="busy"><option v-if="profile.api_protocol === 'anthropic' || profile.api_protocol === 'google'" :value="profile.api_protocol">{{ protocolLabel(profile.api_protocol) }}</option><option v-for="protocol in protocols" :key="protocol" :value="protocol">{{ protocolLabel(protocol) }}</option></select></label>
             <div class="grid two"><label>上下文 Token<input v-model.number="profile.context_tokens" type="number" min="8192" max="1000000" required :disabled="busy" /></label><label>最大输出 Token<input v-model.number="profile.max_output_tokens" type="number" min="256" max="125000" required :disabled="busy" /></label></div>
             <p class="field-hint">审查使用的上下文与输出额度同时受服务端资源策略限制。</p>
             <div class="grid two"><label><input v-model="profile.supports_tools" type="checkbox" :disabled="busy" />原生 Tool Calling</label><label><input v-model="profile.supports_temperature" type="checkbox" :disabled="busy" />允许 temperature</label></div>
-            <div v-if="profile.api_protocol === 'openai-chat'" class="grid two"><label>输出上限参数<select v-model="profile.max_tokens_parameter" :disabled="busy"><option>max_tokens</option><option>max_completion_tokens</option></select></label><label><input v-model="profile.stream_usage" type="checkbox" :disabled="busy" />支持流式用量</label></div>
-            <label>推理参数格式<select v-model="profile.reasoning_format" :disabled="busy"><option :value="null">不支持推理</option><option v-for="format in formats" :key="format">{{ format }}</option></select></label>
+            <div class="grid two"><label>输出上限参数<select v-model="profile.max_tokens_parameter" :disabled="busy"><option>max_tokens</option><option>max_completion_tokens</option></select></label><label><input v-model="profile.stream_usage" type="checkbox" :disabled="busy" />支持流式用量</label></div>
+            <label>推理参数格式<select v-model="profile.reasoning_format" :disabled="busy" @change="syncReasoningOptions(profile)"><option :value="null">不支持推理</option><option v-for="format in formats" :key="format">{{ format }}</option></select></label>
             <template v-if="profile.reasoning_format">
               <div role="group" aria-label="支持的推理强度" class="grid two"><label v-for="effort in effortsFor(profile.reasoning_format)" :key="effort"><input v-model="profile.reasoning_efforts" type="checkbox" :value="effort" :disabled="busy" />{{ effort }}</label></div>
               <label>默认推理强度<select v-model="profile.reasoning_effort" :disabled="busy"><option :value="null">不指定</option><option v-for="effort in profile.reasoning_efforts" :key="effort">{{ effort }}</option></select></label>
-              <label v-if="['anthropic','google-budget'].includes(profile.reasoning_format)">推理 Token 预算<input v-model.number="profile.reasoning_budget_tokens" type="number" min="1024" required :disabled="busy" /></label>
             </template>
             </div></details>
           </section>

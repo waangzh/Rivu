@@ -2,18 +2,15 @@ import asyncio
 import json
 
 import httpx
-import httpx2
 import pytest
-from anthropic import AsyncAnthropic
-from google.genai import Client, types
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
-from app.llm.profiles import ModelProfile, ProviderConfig
-from app.llm.profiles import default_profile
+from app.llm.profiles import ModelProfile, ProviderConfig, default_profile
 from app.llm.registry import ProviderRegistry
-from app.llm.receipts import capture_http_response, observe_response
+from app.llm.providers import LLMProviderError
+from app.llm.receipts import observe_response
 from app.review.configuration import freeze_configuration
 from app.review.contracts import ReviewRequest
 from app.review.domain import Configuration, Options, UnitCompletion
@@ -30,7 +27,7 @@ def registry(monkeypatch, **profiles):
 
 def test_task_freezes_profile_and_resolves_original_provider_after_default_changes(monkeypatch):
     first = ModelProfile(model_id="first", context_tokens=32768, max_output_tokens=2048)
-    second = ModelProfile(model_id="second", api_protocol="openai-responses",
+    second = ModelProfile(model_id="second", max_tokens_parameter="max_completion_tokens",
         reasoning_format="openai", thinking=True, reasoning_efforts=["low", "high"],
         reasoning_effort="high", supports_temperature=False)
     providers = registry(monkeypatch, local=("openai-compatible", first), cloud=("openai", second))
@@ -56,8 +53,8 @@ def test_task_freezes_profile_and_resolves_original_provider_after_default_chang
     assert new.provider_id == "cloud" and new.thinking
     payload = providers.for_run(new).agent_model(profile=new.model_profile)._get_request_payload([
         HumanMessage(content="fixture")])
-    assert payload["reasoning"]["effort"] == "high" and "temperature" not in payload
-    assert payload["store"] is False and "reasoning.encrypted_content" in payload["include"]
+    assert payload["reasoning_effort"] == "high" and "temperature" not in payload
+    assert payload["max_completion_tokens"] == new.options.limits.output_tokens
 
 
 def test_legacy_task_resolves_its_frozen_endpoint_after_global_endpoint_changes():
@@ -91,122 +88,102 @@ def test_model_selection_freezes_thinking_and_native_tool_requirement(monkeypatc
         freeze_configuration(request, providers)
 
 
-async def test_anthropic_http_roundtrip_keeps_thinking_signature_and_cached_usage(monkeypatch):
-    profile = ModelProfile(model_id="claude-sonnet", api_protocol="anthropic",
-        reasoning_format="anthropic", thinking=True, supports_temperature=False)
-    providers = registry(monkeypatch, claude=("anthropic", profile))
-    model = providers.resolve().agent_model()
-    requests = []
-
-    def transport(request):
-        payload = json.loads(request.content)
-        requests.append(payload)
-        assert request.url.path == "/v1/messages"
-        assert payload["cache_control"] == {"type": "ephemeral"}
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2048}
-        assert payload["max_tokens"] == 4096 and "temperature" not in payload
-        if len(requests) == 2:
-            assert payload["messages"][1]["content"][0] == {
-                "type": "thinking", "thinking": "fixture-reasoning", "signature": "fixture-signature",
-            }
-            assert payload["messages"][2]["content"][0]["type"] == "tool_result"
-        return httpx2.Response(200, json={"id": "msg-fixture", "type": "message",
-            "role": "assistant", "model": "claude-sonnet", "stop_reason": "tool_use",
-            "stop_sequence": None, "content": [
-                {"type": "thinking", "thinking": "fixture-reasoning", "signature": "fixture-signature"},
-                {"type": "tool_use", "id": "call-fixture", "name": "UnitCompletion", "input": {}}],
-            "usage": {"input_tokens": 10, "output_tokens": 12,
-                      "cache_read_input_tokens": 20, "cache_creation_input_tokens": 5}})
-
-    async with httpx2.AsyncClient(transport=httpx2.MockTransport(transport)) as client:
-        model.__dict__["_async_client"] = AsyncAnthropic(api_key="fixture",
-            base_url="https://example.test", http_client=client, max_retries=0)
-        bound = model.bind_tools([UnitCompletion])
-        with observe_response() as receipt:
-            first = await bound.ainvoke([HumanMessage(content="fixture")])
-        assert receipt.parsed and receipt.usage["input_tokens"] == 35
-        assert first.usage_metadata["input_token_details"] == {"cache_read": 20, "cache_creation": 5}
-        restored = AIMessage.model_validate_json(first.model_dump_json())
-        await bound.ainvoke([HumanMessage(content="fixture"), restored,
-                            ToolMessage(content="received", tool_call_id="call-fixture")])
-    assert len(requests) == 2
+@pytest.mark.parametrize("model_id", ["o1", "o3", "o4-mini", "gpt-5"])
+def test_openai_reasoning_defaults_are_chat_compatible(model_id):
+    profile = default_profile("openai", model_id)
+    assert profile.thinking and profile.reasoning_format == "openai"
+    assert profile.reasoning_effort in profile.reasoning_efforts
+    assert profile.max_tokens_parameter == "max_completion_tokens"
+    assert not profile.supports_temperature and profile.stream_usage
 
 
-async def test_google_http_roundtrip_keeps_thought_signature_and_reasoning_usage(monkeypatch):
-    profile = ModelProfile(model_id="gemini-2.5-flash", api_protocol="google",
-        reasoning_format="google-budget", thinking=True)
-    providers = registry(monkeypatch, gemini=("google", profile))
-    model = providers.resolve().agent_model()
-    assert model.max_retries == 1
-    requests = []
-
-    def transport(request):
-        payload = json.loads(request.content)
-        requests.append(payload)
-        assert request.url.path.endswith(":generateContent")
-        assert payload["generationConfig"]["thinkingConfig"]["thinking_budget"] == 2048
-        if len(requests) == 2:
-            assert payload["contents"][1]["parts"][0]["thoughtSignature"] == "c2lnbmF0dXJl"
-        return httpx.Response(200, json={"candidates": [{"index": 0, "finishReason": "STOP",
-            "content": {"role": "model", "parts": [{"functionCall": {"name": "UnitCompletion",
-                "args": {}}, "thoughtSignature": "c2lnbmF0dXJl"}]}}],
-            "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 5,
-                "thoughtsTokenCount": 7, "totalTokenCount": 42, "cachedContentTokenCount": 20}})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
-        sdk = Client(api_key="fixture", http_options=types.HttpOptions(
-            base_url="https://example.test", httpx_async_client=client))
-        model.client = sdk
-        bound = model.bind_tools([UnitCompletion])
-        with observe_response() as receipt:
-            first = await bound.ainvoke([HumanMessage(content="fixture")])
-        assert receipt.parsed and receipt.usage["output_tokens"] == 12
-        assert first.usage_metadata["output_token_details"]["reasoning"] == 7
-        restored = AIMessage.model_validate_json(first.model_dump_json())
-        await bound.ainvoke([HumanMessage(content="fixture"), restored,
-                            ToolMessage(content="received", tool_call_id=first.tool_calls[0]["id"])])
-    await sdk.aio.aclose()
-    assert len(requests) == 2
+@pytest.mark.parametrize("model_id", ["gpt-5", "gpt-5-mini", "gpt-5-nano-2025-08-07"])
+def test_original_gpt_5_family_offers_only_its_supported_reasoning_efforts(model_id):
+    profile = default_profile("openai", model_id)
+    assert profile.reasoning_efforts == ["minimal", "low", "medium", "high"]
+    assert profile.reasoning_effort == "medium"
 
 
-async def test_responses_http_roundtrip_preserves_encrypted_reasoning_and_usage(monkeypatch):
-    profile = ModelProfile(model_id="o3", api_protocol="openai-responses", reasoning_format="openai",
-        thinking=True, reasoning_effort="high", reasoning_efforts=["low", "high"],
-        supports_temperature=False)
+async def test_openai_reasoning_uses_chat_completions_for_tool_roundtrip(monkeypatch):
+    model_id = "o3"
+    profile = default_profile("openai", model_id)
     model = registry(monkeypatch, openai=("openai", profile)).resolve().agent_model()
     requests = []
 
     def transport(request):
         payload = json.loads(request.content)
         requests.append(payload)
-        assert request.url.path == "/responses"
-        assert payload["max_output_tokens"] == 4096
+        assert request.url.path == "/v1/chat/completions"
+        assert payload["reasoning_effort"] == profile.reasoning_effort
+        assert payload["max_completion_tokens"] == 4096
+        assert "max_tokens" not in payload and "temperature" not in payload
         if len(requests) == 2:
-            assert payload["input"][1]["encrypted_content"] == "encrypted-fixture"
-        return httpx.Response(200, json={"id": "resp-fixture", "object": "response",
-            "created_at": 1, "model": "o3", "status": "completed", "error": None,
-            "incomplete_details": None, "parallel_tool_calls": True, "tools": [],
-            "tool_choice": "auto", "output": [
-                {"id": "rs-fixture", "type": "reasoning", "summary": [],
-                 "encrypted_content": "encrypted-fixture"},
-                {"type": "function_call", "name": "UnitCompletion", "arguments": "{}",
-                 "call_id": "call-fixture", "id": "fc-fixture", "status": "completed"}],
-            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42,
-                "input_tokens_details": {"cached_tokens": 20},
-                "output_tokens_details": {"reasoning_tokens": 7}}})
+            assert payload["messages"][1]["tool_calls"][0]["id"] == "call-fixture"
+            assert payload["messages"][2]["tool_call_id"] == "call-fixture"
+        return httpx.Response(200, json={"id": "chat-fixture", "object": "chat.completion",
+            "created": 1, "model": model_id, "choices": [{"index": 0, "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call-fixture", "type": "function",
+                     "function": {"name": "UnitCompletion", "arguments": "{}"}}]}}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 12, "total_tokens": 42,
+                "prompt_tokens_details": {"cached_tokens": 20},
+                "completion_tokens_details": {"reasoning_tokens": 7}}})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(transport),
-            event_hooks={"response": [capture_http_response]}) as client:
-        model.root_async_client = AsyncOpenAI(api_key="fixture", base_url="https://example.test",
-                                             http_client=client, max_retries=0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        sdk = AsyncOpenAI(api_key="fixture", base_url="https://example.test/v1", http_client=client)
+        model.root_async_client, model.async_client = sdk, sdk.chat.completions
         bound = model.bind_tools([UnitCompletion])
         with observe_response() as receipt:
             first = await bound.ainvoke([HumanMessage(content="fixture")])
-        assert receipt.parsed and receipt.usage["output_token_details"]["reasoning"] == 7
+        assert receipt.received and receipt.parsed
+        assert first.usage_metadata == receipt.usage == {
+            "input_tokens": 30, "output_tokens": 12, "total_tokens": 42,
+            "input_token_details": {"cache_read": 20}, "output_token_details": {"reasoning": 7},
+        }
         restored = AIMessage.model_validate_json(first.model_dump_json())
         await bound.ainvoke([HumanMessage(content="fixture"), restored,
                             ToolMessage(content="received", tool_call_id="call-fixture")])
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize(("provider", "protocol", "format_"), [
+    ("anthropic", "anthropic", "anthropic"),
+    ("google", "google", "google-budget"),
+    ("google", "google", "google-level"),
+    ("openai", "openai-responses", "openai"),
+    ("openai-compatible", "openai-responses", None),
+    ("openai", None, "google-level"),
+    ("anthropic", None, None),
+])
+def test_retired_frozen_configuration_cannot_resolve_or_construct_model(monkeypatch, provider, protocol, format_):
+    providers = registry(monkeypatch, active=("openai", default_profile("openai", "gpt-4.1-mini")))
+    payload = {"provider": provider, "provider_id": "missing", "endpoint": "https://example.test",
+               "model": "fixture", "options": {}}
+    if protocol or format_:
+        payload["model_profile"] = {
+            "model_id": "fixture", "api_protocol": protocol, "reasoning_format": format_,
+            "reasoning_budget_tokens": 2048,
+        }
+    saved = Configuration.model_validate(payload)
+    assert saved.model_dump()["model_profile"] == payload.get("model_profile")
+    with pytest.raises(LLMProviderError, match="^unsupported_provider$"):
+        providers.for_run(saved)
+    if saved.model_profile is not None:
+        with pytest.raises(LLMProviderError, match="^unsupported_provider$"):
+            providers.resolve().agent_model(profile=saved.model_profile)
+
+
+def test_historical_chat_profile_remains_runnable(monkeypatch):
+    profile = ModelProfile(model_id="first", reasoning_format="deepseek", thinking=True,
+                           max_tokens_parameter="max_completion_tokens", stream_usage=False)
+    providers = registry(monkeypatch, local=("openai-compatible", profile))
+    saved = freeze_configuration(ReviewRequest(pr_url="https://github.com/o/r/pull/1"), providers)
+    payload = saved.model_dump()
+    payload["model_profile"].update(api_protocol="openai-chat", reasoning_budget_tokens=2048)
+    restored = Configuration.model_validate(payload)
+    model = providers.for_run(restored).agent_model(profile=restored.model_profile)
+    assert model.compat.max_tokens_parameter == "max_tokens" and model.stream_usage
+    assert model.compat.strict_reasoning_replay
 
 
 async def test_distinct_providers_can_generate_concurrently(monkeypatch):
@@ -239,16 +216,6 @@ def test_unknown_openai_model_does_not_assume_native_tool_support():
     assert default_profile("openai", "gpt-4.1-mini").supports_tools
 
 
-def test_provider_rejects_a_model_using_another_native_protocol():
-    with pytest.raises(ValueError, match="provider_protocol_mismatch"):
-        ProviderConfig(provider="anthropic", base_url="https://example.test",
-            api_key_env="TEST_MODEL_KEY", default_model="fixture",
-            models=[ModelProfile(model_id="fixture", api_protocol="openai-chat")])
-
-
-def test_protocol_specific_reasoning_levels_are_validated():
-    with pytest.raises(ValueError, match="model_reasoning_effort_protocol_mismatch"):
-        ModelProfile(model_id="gemini", api_protocol="google", reasoning_format="google-level",
-            reasoning_efforts=["low", "xhigh"])
-    with pytest.raises(ValueError, match="model_reasoning_effort_protocol_mismatch"):
+def test_format_specific_reasoning_levels_are_validated():
+    with pytest.raises(ValueError, match="model_reasoning_effort_format_mismatch"):
         ModelProfile(model_id="deepseek", reasoning_format="deepseek", reasoning_efforts=["medium"])

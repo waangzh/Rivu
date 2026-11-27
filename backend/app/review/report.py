@@ -9,6 +9,7 @@ from time import perf_counter
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import ValidationError
 
+from app.llm.chat import request_preparation_error, validate_model_replay
 from app.llm.receipts import observe_response
 from app.review.domain import Overview, OverviewDiagnostic, OverviewOutput, Report, SourceRef, utcnow
 from app.review.findings import aggregate, group_findings
@@ -177,6 +178,7 @@ async def _generate_overview(report, provider, budget, model):
         for attempt in (1, 2):
             receipt = None
             await budget.active()
+            validate_model_replay(model, messages)
             estimate = tokens({
                 "messages": [message.model_dump(mode="json") for message in messages],
                 "schema": schema,
@@ -236,7 +238,8 @@ async def _generate_overview(report, provider, budget, model):
         overview.status = "skipped_deadline" if utcnow() >= provider.run.hard_deadline else "failed"
         overview.error_code = ("hard_deadline" if overview.status == "skipped_deadline" else
                                str(exc) if isinstance(exc, BudgetExceeded) else
-                               "overview_timeout" if isinstance(exc, TimeoutError) else "overview_unavailable")
+                               "overview_timeout" if isinstance(exc, TimeoutError) else
+                               request_preparation_error(exc) or "overview_unavailable")
         logger.warning("总览未完成 review_id=%.8s status=%s code=%s error_type=%s elapsed_ms=%.0f",
                        run_id, overview.status, overview.error_code, type(exc).__name__,
                        (perf_counter() - started) * 1000)

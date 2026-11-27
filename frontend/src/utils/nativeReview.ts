@@ -47,6 +47,7 @@ export const executionErrorLabel = (code: string | null) =>
     frozen_provider_endpoint_changed: '任务冻结的 Provider 端点已改变，请恢复原配置',
     frozen_provider_identity_changed: '任务冻结的 Provider 类型已改变，请恢复原配置',
     frozen_provider_unavailable: '任务冻结的 Provider 未配置，请恢复原配置',
+    unsupported_provider: '任务冻结的供应商或接口协议已退役',
     provider_not_configured: '任务所用的 Provider 未配置',
     model_not_configured: '任务所用的模型配置已移除，请恢复原配置',
     agent_credentials_unavailable: '所选 Provider 的服务端凭据未配置',

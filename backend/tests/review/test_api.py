@@ -12,6 +12,9 @@ from fastapi import FastAPI
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from app.core.config import Settings
+from app.llm.registry import ProviderRegistry
+from app.models.orm import ReviewTaskOrm
 from app.review.contracts import ReviewRequest
 from app.review.grouping import GROUPING_PROMPT
 from app.services.review.review_service import ReviewService
@@ -95,6 +98,65 @@ async def test_direct_create_is_idempotent_and_complete_report_uses_new_api(serv
         assert len((await client.get(f"/api/reviews/{run_id}/units")).json()) == 2
         assert (await client.post(f"/api/reviews/{run_id}/resume")).status_code == 404
         assert result["report"]["findings"][0]["publishable"] is True
+
+
+@pytest.mark.parametrize(("provider", "protocol", "format_"), [
+    ("openai-compatible", "openai-chat", None),
+    ("openai", "openai-responses", "openai"),
+    ("anthropic", "anthropic", "anthropic"),
+    ("google", "google", "google-budget"),
+])
+async def test_persisted_model_profiles_keep_history_and_report_readable(service_pipeline, provider, protocol, format_):
+    service, _, app = service_pipeline
+    run = await service.create(ReviewRequest(pr_url="https://github.com/o/r/pull/1"), "historical")
+    assert await service._worker.run_once()
+    profile = {"model_id": run.configuration.model, "api_protocol": protocol,
+               "reasoning_format": format_, "reasoning_budget_tokens": 2048}
+    with service.store.sessions.begin() as session:
+        row = session.get(ReviewTaskOrm, run.id)
+        row.provider = provider
+        row.task_snapshot = {**row.task_snapshot, "configuration": {
+            **row.task_snapshot["configuration"], "provider": provider, "model_profile": profile}}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        history = await client.get("/api/reviews")
+        detail = await client.get(f"/api/reviews/{run.id}")
+        report = await client.get(f"/api/reviews/{run.id}/report")
+        assert history.status_code == detail.status_code == report.status_code == 200
+        configuration = detail.json()["configuration"]
+        item = next(item for item in history.json()["items"] if item["id"] == run.id)
+        assert item["configuration"] == configuration and configuration["provider"] == provider
+        if protocol == "openai-chat":
+            assert configuration["model_profile"]["model_id"] == profile["model_id"]
+            assert "api_protocol" not in configuration["model_profile"]
+            assert "reasoning_budget_tokens" not in configuration["model_profile"]
+        else:
+            assert configuration["model_profile"] == profile
+        assert "更新比例计算逻辑" in report.json()["markdown"]
+        assert len(report.json()["report"]["findings"]) == 1
+    with service.store.sessions() as session:
+        assert session.get(ReviewTaskOrm, run.id).task_snapshot["configuration"]["model_profile"] == profile
+
+
+async def test_worker_rejects_unfinished_retired_profile_without_reserving_usage(service_pipeline):
+    service, _, _ = service_pipeline
+    run = await service.create(ReviewRequest(pr_url="https://github.com/o/r/pull/1"), "historical")
+    profile = {"model_id": run.configuration.model, "api_protocol": "openai-responses",
+               "reasoning_format": "openai", "reasoning_budget_tokens": 2048}
+    with service.store.sessions.begin() as session:
+        row = session.get(ReviewTaskOrm, run.id)
+        row.provider = "openai"
+        row.task_snapshot = {**row.task_snapshot, "configuration": {
+            **row.task_snapshot["configuration"], "provider": "openai",
+            "provider_id": "retired", "model_profile": profile}}
+    service.reload_provider(ProviderRegistry(Settings(_env_file=None)))
+
+    assert await service._worker.run_once()
+    failed = service.store.get(run.id)
+    assert failed.status == "failed"
+    assert "unsupported_provider" in failed.report.reasons
+    assert failed.report.usage["model_calls"] == 0
+    assert failed.configuration.model_dump()["model_profile"] == profile
 
 
 async def test_overview_retry_only_calls_overview_and_changes_report_version(service_pipeline):

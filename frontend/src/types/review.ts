@@ -377,7 +377,8 @@ export interface Run {
     thinking: boolean;
     reasoning_effort: import('./operations').ReasoningEffort | null;
     provider_id: string | null;
-    model_profile: import('./operations').ModelProfile | null;
+    // Historical runs can carry a frozen profile from a retired protocol.
+    model_profile: import('./operations').ModelProfile | Record<string, unknown> | null;
     options: ReviewOptions;
     prompt_version: string;
   };

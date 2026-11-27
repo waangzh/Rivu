@@ -134,7 +134,7 @@ if (!controller.signal.aborted) recent.value = result.items.slice(0, 3); } catch
 <span>执行模型</span>
 <AppSelect :model-value="model" :options="modelOptions" :disabled="busy" aria-label="执行模型"
   @update:model-value="$emit('update:model', $event)" />
-<p v-if="profile" class="field-hint">{{ profile.api_protocol }} · 上下文 {{ profile.context_tokens.toLocaleString() }} Token · 最大输出 {{ profile.max_output_tokens.toLocaleString() }} Token · {{ profile.supports_tools ? '原生工具调用' : '不支持审查所需工具调用' }}</p>
+<p v-if="profile" class="field-hint">上下文 {{ profile.context_tokens.toLocaleString() }} Token · 最大输出 {{ profile.max_output_tokens.toLocaleString() }} Token · {{ profile.supports_tools ? '原生工具调用' : '不支持审查所需工具调用' }}</p>
 <p v-if="profile && !profile.supports_tools" class="notice warn">该模型不能运行审查所需的原生工具调用。</p>
 <template v-if="profile?.reasoning_format">
   <label class="field-label"><input type="checkbox" :checked="thinking ?? profile.thinking" :disabled="busy || profile.reasoning_format === 'openai'" @change="$emit('update:thinking', ($event.target as HTMLInputElement).checked)" />Thinking</label>

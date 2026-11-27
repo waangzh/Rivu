@@ -111,10 +111,10 @@ def test_thinking_does_not_silently_relax_a_multi_tool_forced_choice():
         "name": "first", "parameters": {"type": "object", "properties": {}}}}
     other = {"type": "function", "function": {
         "name": "second", "parameters": {"type": "object", "properties": {}}}}
-    with pytest.raises(ValueError, match="deepseek_thinking_forced_tool_unsupported"):
+    with pytest.raises(ValueError, match="thinking_forced_tool_unsupported"):
         model._get_request_payload([HumanMessage(content="fixture")], tools=[tool, other],
                                    tool_choice={"type": "function", "function": {"name": "first"}})
-    with pytest.raises(ValueError, match="deepseek_reasoning_content_missing"):
+    with pytest.raises(ValueError, match="reasoning_content_missing"):
         model._get_request_payload([HumanMessage(content="fixture"), AIMessage(content="prior")],
                                    tools=[tool])
     payload = model._get_request_payload([HumanMessage(content="fixture")],
@@ -163,6 +163,7 @@ async def test_deepseek_http_stream_preserves_reasoning_in_following_tool_reques
         requests.append(payload)
         if len(requests) == 1:
             assert payload["stream"] is True
+            assert payload["stream_options"] == {"include_usage": True}
             chunks = [
                 {"choices": [{"index": 0, "delta": {
                     "role": "assistant", "reasoning_content": "stream-reasoning"}}]},
@@ -356,7 +357,8 @@ async def test_http_success_retains_usage_when_response_or_agent_processing_fail
         "request_preparation" if failure == "replay" else
         "agent_processing" if failure == "structured_output" else "response_parsing")
     if failure == "replay":
-        assert diagnostic.code == "deepseek_reasoning_content_missing"
+        assert diagnostic.code == "reasoning_content_missing"
+        assert diagnostic.ticket is None
     else:
         assert diagnostic.response_received and diagnostic.usage_known
         assert diagnostic.request_id == "safe-request-id"
@@ -367,7 +369,14 @@ async def test_http_success_retains_usage_when_response_or_agent_processing_fail
     assert reopened.units[0].error_diagnostic == diagnostic
 
 
-async def test_usage_without_total_counts_is_unknown_instead_of_zero(tmp_path):
+@pytest.mark.parametrize("usage", [
+    {"completion_tokens_details": {"reasoning_tokens": 5356}},
+    {"input_tokens": 30, "output_tokens": 12},
+    {"prompt_tokens": -1, "completion_tokens": 12},
+    {"prompt_tokens": 30, "completion_tokens": "12"},
+    {"prompt_tokens": True, "completion_tokens": 12},
+])
+async def test_usage_without_valid_chat_counts_stays_unknown(tmp_path, usage):
     store, run, lease, provider, sessions = setup_source_run(tmp_path)
     run.configuration.options.generate_overview = False
     with sessions.begin() as session:
@@ -375,7 +384,7 @@ async def test_usage_without_total_counts_is_unknown_instead_of_zero(tmp_path):
 
     def transport(request):
         payload = completion(tool_message("UnitCompletion", {}, "done", "reasoning"))
-        payload["usage"] = {"completion_tokens_details": {"reasoning_tokens": 5356}}
+        payload["usage"] = usage
         return httpx.Response(200, json=payload)
 
     model = deepseek_model()

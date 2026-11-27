@@ -17,8 +17,7 @@ export function providerIsCustom(item: ProviderInfo, presets: ProviderPreset[]) 
 
 export function providerDisplayNames(providers: ProviderInfo[], presets: ProviderPreset[]) {
   const names = providers.map(item => presetFor(item, presets)?.label
-    || ({ openai: 'OpenAI', deepseek: 'DeepSeek', anthropic: 'Anthropic', google: 'Google' } as Record<string, string>)[item.config.provider]
-    || '自定义服务');
+    || ({ openai: 'OpenAI', deepseek: 'DeepSeek', 'openai-compatible': '自定义服务' })[item.config.provider]);
   return Object.fromEntries(providers.map((item, index) => {
     const name = names[index];
     const count = names.filter(candidate => candidate === name).length;
@@ -39,29 +38,15 @@ export function createProvider(preset: ProviderPreset | undefined, providers: Pr
 }
 
 export function newProfile(): ModelProfile {
-  return { model_id: '', api_protocol: 'openai-chat', supports_tools: false,
+  return { model_id: '', supports_tools: false,
     reasoning_format: null, reasoning_efforts: [], thinking: false, reasoning_effort: null,
-    reasoning_budget_tokens: 2048, supports_temperature: true, max_tokens_parameter: 'max_tokens',
+    supports_temperature: true, max_tokens_parameter: 'max_tokens',
     stream_usage: false, context_tokens: 128000, max_output_tokens: 4096 };
 }
 
 export function discoveredProfile(item: ProviderInfo, modelId: string, presets: ProviderPreset[]): ModelProfile {
   const model = presetFor(item, presets)?.config.models.find(candidate => candidate.model_id === modelId);
   return model ? JSON.parse(JSON.stringify(model)) as ModelProfile : { ...newProfile(), model_id: modelId };
-}
-
-export function usesPresetProtocol(item: ProviderInfo, profile: ModelProfile, presets: ProviderPreset[]) {
-  const model = presetFor(item, presets)?.config.models.find(candidate => candidate.model_id === profile.model_id);
-  return !!model && model.api_protocol === profile.api_protocol;
-}
-
-export function protocolLabel(protocol: ModelProfile['api_protocol']) {
-  return ({
-    'openai-chat': 'Chat Completions',
-    'openai-responses': 'Responses',
-    anthropic: 'Anthropic Messages',
-    google: 'Google Gemini',
-  })[protocol];
 }
 
 export function profileSource(item: ProviderInfo, profile: ModelProfile, presets: ProviderPreset[]) {

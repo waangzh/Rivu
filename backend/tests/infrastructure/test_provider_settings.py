@@ -1,7 +1,8 @@
 import pytest
+from pydantic import ValidationError
 
 from app.api import system
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.llm.profiles import ModelProfile, ProviderConfig
 from app.models.operations import ModelCatalogResponse, ModelConnectionRequest, SystemSettingsUpdate
 
@@ -10,6 +11,24 @@ def provider_config():
     return ProviderConfig(provider="openai-compatible", base_url="https://example.test/v1",
         api_key_env="TEST_MODEL_KEY", default_model="fixture",
         models=[ModelProfile(model_id="fixture")])
+
+
+@pytest.mark.parametrize("invalid", [
+    {"provider": "anthropic"},
+    {"provider": "google"},
+    {"models": [{"model_id": "fixture", "api_protocol": "openai-chat"}]},
+    {"models": [{"model_id": "fixture", "api_protocol": "openai-responses"}]},
+    {"models": [{"model_id": "fixture", "reasoning_budget_tokens": 2048}]},
+    {"models": [{"model_id": "fixture", "reasoning_format": "google-level"}]},
+    {"models": [{"model_id": "fixture", "reasoning_format": "google-budget"}]},
+    {"models": [{"model_id": "fixture", "reasoning_format": "anthropic"}]},
+])
+def test_saved_settings_reject_retired_provider_and_profile_fields(invalid):
+    providers = {"local": {**provider_config().model_dump(), **invalid}}
+    with pytest.raises(ValidationError):
+        SystemSettingsUpdate(model_providers=providers, default_provider="local")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, rivu_model_providers=providers, rivu_default_provider="local")
 
 
 async def test_registry_api_returns_capabilities_and_key_reference_not_key(monkeypatch):

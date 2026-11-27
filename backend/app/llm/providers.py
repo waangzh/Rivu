@@ -2,10 +2,10 @@
 
 from abc import ABC, abstractmethod
 
-from app.llm.deepseek import DeepSeekChatModel
-from app.llm.receipts import ObservedChatOpenAI
-from app.llm.profiles import default_profile
-from app.llm.compatible import CompatibleChatModel
+from app.llm.chat import OpenAIChatModel, thinking_options
+from app.llm.compat import OpenAICompat
+from app.llm.frozen import RetiredModelProfile
+from app.llm.profiles import SUPPORTED_PROVIDERS, default_profile
 
 
 class LLMProviderError(ValueError):
@@ -18,11 +18,10 @@ def model_error_message(code):
         "model_reasoning_unsupported": "该模型未配置推理能力。",
         "model_reasoning_effort_unsupported": "该模型不支持所选推理强度。",
         "model_reasoning_cannot_be_disabled": "该推理模型不能关闭 Thinking。",
-        "model_reasoning_budget_exceeds_output": "推理 Token 预算必须小于输出上限。",
-        "anthropic_effort_incompatible_with_budget_thinking": "此 Anthropic 模型不能同时使用当前推理预算和所选强度。",
         "model_output_limit_exceeded": "输出上限超过模型能力。",
         "model_not_configured": "该 Provider 未配置所选模型。",
         "provider_not_configured": "所选 Provider 未配置。",
+        "unsupported_provider": "该任务冻结的供应商或接口协议已退役。",
         "agent_credentials_unavailable": "所选 Provider 的服务端凭据未配置。",
         "frozen_provider_endpoint_changed": "任务冻结的 Provider 端点已改变，请恢复原配置。",
         "frozen_provider_identity_changed": "任务冻结的 Provider 类型已改变，请恢复原配置。",
@@ -61,6 +60,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     def agent_model(self, model=None, *, output_tokens=4096, thinking=None, reasoning_effort=None,
                     profile=None):
+        require_chat_provider(self._provider_name, profile)
         if not self._api_key:
             raise LLMProviderError("agent_credentials_unavailable")
         if profile is None:
@@ -70,62 +70,15 @@ class OpenAICompatibleProvider(LLMProvider):
         enabled = profile.thinking if thinking is None else thinking
         effort = reasoning_effort or profile.reasoning_effort
         validate_model_options(profile, enabled, effort, output_tokens)
-        options = dict(api_key=self._api_key, base_url=self._base_url,
-            model=profile.model_id, temperature=0.1 if profile.supports_temperature else None,
-            max_tokens=output_tokens,
-            max_retries=0, timeout=self._request_timeout_seconds)
-        if profile.reasoning_format == "deepseek":
-            options.update(extra_body={"thinking": {"type": "enabled" if enabled else "disabled"}},
-                           use_responses_api=False, stream_usage=True)
-            if enabled:
-                options.update(temperature=None,
-                               reasoning_effort=effort or "high")
-            return DeepSeekChatModel(**options)
-        if profile.api_protocol == "anthropic":
-            from app.llm.native import ObservedChatAnthropic
-            options["model_kwargs"] = {"cache_control": {"type": "ephemeral"}}
-            if enabled:
-                options.update(temperature=None, thinking={"type": "enabled",
-                    "budget_tokens": profile.reasoning_budget_tokens})
-                if effort:
-                    options["effort"] = effort
-            return ObservedChatAnthropic(**options)
-        if profile.api_protocol == "google":
-            from app.llm.native import ObservedChatGoogle
-            options.pop("max_tokens")
-            options.pop("timeout")
-            options.update(max_output_tokens=output_tokens, max_retries=1,
-                timeout=self._request_timeout_seconds, include_thoughts=enabled)
-            if profile.reasoning_format == "google-budget":
-                options["thinking_budget"] = profile.reasoning_budget_tokens if enabled else 0
-            elif profile.reasoning_format == "google-level":
-                options["thinking_level"] = effort if enabled else "minimal"
-            return ObservedChatGoogle(**options)
-        options["use_responses_api"] = profile.api_protocol == "openai-responses"
-        if options["use_responses_api"]:
-            import httpx
-            from app.llm.receipts import capture_http_response
-            options.update(output_version="responses/v1", store=False,
-                include=["reasoning.encrypted_content"],
-                http_async_client=httpx.AsyncClient(event_hooks={"response": [capture_http_response]}))
-        if enabled and profile.reasoning_format == "openai":
-            options["reasoning_effort"] = effort or "high"
-        elif profile.reasoning_format == "openai":
-            raise LLMProviderError("model_reasoning_cannot_be_disabled")
-        if profile.api_protocol == "openai-chat":
-            if profile.reasoning_format in {"qwen", "chat-template"}:
-                options["extra_body"] = ({"enable_thinking": enabled}
-                    if profile.reasoning_format == "qwen" else
-                    {"chat_template_kwargs": {"enable_thinking": enabled}})
-            elif profile.reasoning_format in {"glm", "kimi"}:
-                thinking_options = {"type": "enabled" if enabled else "disabled"}
-                options["extra_body"] = {"thinking": thinking_options}
-            return CompatibleChatModel(**options, max_tokens_parameter=profile.max_tokens_parameter,
-                stream_usage=profile.stream_usage,
-                replay_reasoning=enabled and profile.reasoning_format in {"qwen", "chat-template", "glm", "kimi"},
-                automatic_tool_choice=enabled and profile.reasoning_format == "kimi",
-                model_provider_id=self._provider_name)
-        return ObservedChatOpenAI(**options)
+        compat = OpenAICompat.from_profile(profile, enabled)
+        return OpenAIChatModel(
+            api_key=self._api_key, base_url=self._base_url, model=profile.model_id,
+            temperature=0.1 if compat.supports_temperature else None,
+            max_tokens=output_tokens, stream_usage=compat.stream_usage,
+            max_retries=0, timeout=self._request_timeout_seconds,
+            compat=compat, model_provider_id=self._provider_name,
+            **thinking_options(compat.thinking_format, enabled, effort),
+        )
 
 
 def validate_model_options(profile, thinking, effort, output_tokens):
@@ -139,18 +92,17 @@ def validate_model_options(profile, thinking, effort, output_tokens):
         raise LLMProviderError("model_reasoning_effort_unsupported")
     if output_tokens > profile.max_output_tokens:
         raise LLMProviderError("model_output_limit_exceeded")
-    if thinking and profile.reasoning_format == "anthropic" and (
-            profile.reasoning_budget_tokens >= output_tokens):
-        raise LLMProviderError("model_reasoning_budget_exceeds_output")
-    if profile.api_protocol == "anthropic" and thinking and effort in {"max", "xhigh"}:
-        raise LLMProviderError("anthropic_effort_incompatible_with_budget_thinking")
+
+
+def require_chat_provider(provider, profile=None):
+    if provider not in SUPPORTED_PROVIDERS or isinstance(profile, RetiredModelProfile):
+        raise LLMProviderError("unsupported_provider")
 
 
 def build_provider(provider_name, api_key, base_url, default_model):
     from app.core.config import settings
     normalized = provider_name.strip().lower()
-    if normalized not in {"openai", "deepseek", "openai-compatible"}:
-        raise ValueError("unsupported_provider")
+    require_chat_provider(normalized)
     return OpenAICompatibleProvider(api_key, base_url, default_model,
         provider_name=normalized, thinking=settings.rivu_deepseek_thinking,
         reasoning_effort=settings.rivu_deepseek_reasoning_effort,
